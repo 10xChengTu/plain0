@@ -186,7 +186,13 @@ const excludedIdPatterns: ReadonlyArray<ExcludedIdPattern> = [
  * that excluded machinery — confirmed by `validateRemoteSshLibraryOwnershipBoundary`
  * (`scripts/plain/boundary-contracts.mjs`), which locks `russh` itself to
  * that one Rust module tree. These three ids are locked independently by
- * `validateRemoteCommandRegistration`'s own closed Rust-side command set. */
+ * `validateRemoteCommandRegistration`'s own closed Rust-side command set.
+ *
+ * `F220` S3 adds `plain.remote.openFolder`/`plain.remote.refreshFolder` —
+ * the remote *workspace filesystem* commands (SFTP-backed, over the same
+ * from-scratch `remote::` session) for the identical reason: they open a
+ * `plain-workspace://` root backed by `remote::remote_fs`, never any
+ * upstream Remote Development extension-host path. */
 const allowedExcludedIdCollisions: Readonly<
 	Partial<Record<keyof WorkbenchSurfaceSnapshot, ReadonlySet<string>>>
 > = Object.freeze({
@@ -195,6 +201,8 @@ const allowedExcludedIdCollisions: Readonly<
 		"plain.remote.connect",
 		"plain.remote.disconnect",
 		"plain.remote.forgetHostKey",
+		"plain.remote.openFolder",
+		"plain.remote.refreshFolder",
 	]),
 });
 

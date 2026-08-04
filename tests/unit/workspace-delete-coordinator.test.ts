@@ -578,6 +578,12 @@ function testBridge(
 		remoteSessionWatchEvent() {
 			throw new Error("unused");
 		},
+		async remoteWorkspacePickDirectory() {
+			throw new Error("unused");
+		},
+		async remoteWorkspaceAddRoot() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

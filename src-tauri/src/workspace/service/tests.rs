@@ -9,6 +9,7 @@ use tempfile::TempDir;
 use super::WorkspaceService;
 use crate::error::CommandError;
 use crate::path_policy::RelativePath;
+use crate::remote::session::RemoteSessionService;
 use crate::workspace::dto::{
     WorkspaceDeleteIncompleteReason, WorkspaceDeleteResult, WorkspaceEntryKind,
     WorkspacePickRootsMode, WorkspacePickRootsStatus, WorkspaceRestoreStatus,
@@ -22,6 +23,22 @@ use crate::workspace::picker::{
 #[cfg(target_os = "macos")]
 use crate::workspace::trash::{PlatformTrash, PlatformTrashOutcome, PlatformTrashRequest};
 use crate::workspace::{RootId, MAX_WORKSPACE_ROOTS};
+
+/// `F220` S3: every workspace FS/delete `WorkspaceService` method now takes
+/// a `&RemoteSessionService` (to dispatch a remote-backed root — see
+/// `WorkspaceService::remote_context`); this whole file's tests exercise
+/// only *local* roots, so each call site gets its own throwaway instance
+/// via this helper, exactly the same way every other test call constructs
+/// throwaway fixtures rather than sharing state across tests. The
+/// known-hosts base path is never actually touched (created lazily, only
+/// by a real connect/pin/list call, none of which any test in this file
+/// performs) — an arbitrary, guaranteed-unique path is enough.
+fn remote_service_for_test() -> RemoteSessionService {
+    RemoteSessionService::new(std::env::temp_dir().join(format!(
+        "plain-workspace-service-tests-remote-{}",
+        uuid::Uuid::new_v4()
+    )))
+}
 
 enum FakeOutcome {
     Selected(Vec<PathBuf>),
@@ -473,6 +490,7 @@ fn save_target_new_file_publication_is_exact_and_no_replace() {
         target.root_id(),
         target.relative_path().clone(),
         content.clone(),
+        &remote_service_for_test(),
     ))
     .unwrap();
     assert_eq!(result.written_stat().unwrap().size(), content.len() as u64);
@@ -483,6 +501,7 @@ fn save_target_new_file_publication_is_exact_and_no_replace() {
         target.root_id(),
         target.relative_path().clone(),
         b"replacement".to_vec(),
+        &remote_service_for_test(),
     ))
     .unwrap_err();
     assert_eq!(error.code(), "ENTRY_ALREADY_EXISTS");
@@ -1092,6 +1111,7 @@ fn readers_are_isolated_by_window_and_root_id() {
         "first",
         first_id,
         RelativePath::parse_wire("identity.txt").unwrap(),
+        &remote_service_for_test(),
     ))
     .unwrap();
     assert_eq!(stat.kind(), WorkspaceEntryKind::File);
@@ -1101,6 +1121,7 @@ fn readers_are_isolated_by_window_and_root_id() {
             "second",
             first_id,
             RelativePath::parse_wire("identity.txt").unwrap(),
+            &remote_service_for_test(),
         ))
         .unwrap_err()
         .code(),
@@ -1110,6 +1131,7 @@ fn readers_are_isolated_by_window_and_root_id() {
         "second",
         second_id,
         RelativePath::parse_wire("").unwrap(),
+        &remote_service_for_test(),
     ))
     .unwrap()
     .entries()
@@ -1137,12 +1159,14 @@ fn creators_are_isolated_by_window_and_root_id() {
         "main",
         first_id,
         RelativePath::parse_wire("created.txt").unwrap(),
+        &remote_service_for_test(),
     ))
     .unwrap();
     let directory_receipt = block_on(service.create_directory(
         "main",
         second_id,
         RelativePath::parse_wire("created-dir").unwrap(),
+        &remote_service_for_test(),
     ))
     .unwrap();
 
@@ -1168,6 +1192,7 @@ fn creators_are_isolated_by_window_and_root_id() {
         "other-window",
         first_id,
         RelativePath::parse_wire("private.txt").unwrap(),
+        &remote_service_for_test(),
     ))
     .unwrap_err();
     assert_eq!(wrong_window.code(), "ROOT_NOT_AUTHORIZED");
@@ -1178,6 +1203,7 @@ fn creators_are_isolated_by_window_and_root_id() {
         "main",
         first_id,
         RelativePath::parse_wire("revoked.txt").unwrap(),
+        &remote_service_for_test(),
     ))
     .unwrap_err();
     assert_eq!(revoked.code(), "ROOT_NOT_AUTHORIZED");
@@ -1202,7 +1228,14 @@ fn renames_are_isolated_by_window_and_root_id() {
     let first_id = selected.snapshot().roots()[0].root_id();
     let second_id = selected.snapshot().roots()[1].root_id();
 
-    block_on(service.rename("main", first_id, relative("source"), relative("renamed"))).unwrap();
+    block_on(service.rename(
+        "main",
+        first_id,
+        relative("source"),
+        relative("renamed"),
+        &remote_service_for_test(),
+    ))
+    .unwrap();
     assert_eq!(std::fs::read(first_root.join("renamed")).unwrap(), b"first");
     assert_eq!(
         std::fs::read(second_root.join("source")).unwrap(),
@@ -1214,15 +1247,21 @@ fn renames_are_isolated_by_window_and_root_id() {
         second_id,
         relative("source"),
         relative("private"),
+        &remote_service_for_test(),
     ))
     .unwrap_err();
     assert_eq!(wrong_window.code(), "ROOT_NOT_AUTHORIZED");
     assert!(!second_root.join("private").exists());
 
     service.remove_root("main", second_id).unwrap();
-    let revoked =
-        block_on(service.rename("main", second_id, relative("source"), relative("revoked")))
-            .unwrap_err();
+    let revoked = block_on(service.rename(
+        "main",
+        second_id,
+        relative("source"),
+        relative("revoked"),
+        &remote_service_for_test(),
+    ))
+    .unwrap_err();
     assert_eq!(revoked.code(), "ROOT_NOT_AUTHORIZED");
     assert_eq!(
         std::fs::read(second_root.join("source")).unwrap(),
@@ -2054,6 +2093,7 @@ fn a_waiting_window_close_does_not_block_other_window_operations() {
                 "second",
                 second_id,
                 RelativePath::parse_wire("second.txt").unwrap(),
+                &remote_service_for_test(),
             )
             .await;
         other_tx.send((snapshot, created)).unwrap();
@@ -2136,6 +2176,7 @@ fn read_file_returns_a_binary_plr1_receipt_and_rejects_wrong_or_revoked_roots() 
         "main",
         root_id,
         RelativePath::parse_wire("binary.bin").unwrap(),
+        &remote_service_for_test(),
     ))
     .unwrap();
     assert_eq!(plr1_content(&frame), binary);
@@ -2144,6 +2185,7 @@ fn read_file_returns_a_binary_plr1_receipt_and_rejects_wrong_or_revoked_roots() 
         "other-window",
         root_id,
         RelativePath::parse_wire("binary.bin").unwrap(),
+        &remote_service_for_test(),
     ))
     .unwrap_err();
     assert_eq!(wrong_window.code(), "ROOT_NOT_AUTHORIZED");
@@ -2154,6 +2196,7 @@ fn read_file_returns_a_binary_plr1_receipt_and_rejects_wrong_or_revoked_roots() 
         "main",
         unknown_root,
         RelativePath::parse_wire("binary.bin").unwrap(),
+        &remote_service_for_test(),
     ))
     .unwrap_err();
     assert_eq!(wrong_root.code(), "ROOT_NOT_AUTHORIZED");
@@ -2163,6 +2206,7 @@ fn read_file_returns_a_binary_plr1_receipt_and_rejects_wrong_or_revoked_roots() 
         "main",
         root_id,
         RelativePath::parse_wire("binary.bin").unwrap(),
+        &remote_service_for_test(),
     )) {
         Ok(_) => panic!("revoked roots must not remain readable"),
         Err(error) => error,
@@ -2185,15 +2229,22 @@ fn versioned_write_uses_the_mutation_gate_and_returns_the_publication_stat() {
     .unwrap();
     let root_id = selected.snapshot().roots()[0].root_id();
     let path = RelativePath::parse_wire("target.txt").unwrap();
-    let expected = block_on(service.stat("main", root_id, path.clone()))
-        .unwrap()
-        .version()
-        .unwrap()
-        .to_owned();
+    let expected =
+        block_on(service.stat("main", root_id, path.clone(), &remote_service_for_test()))
+            .unwrap()
+            .version()
+            .unwrap()
+            .to_owned();
 
-    let result =
-        block_on(service.write_file("main", root_id, path, expected.clone(), b"new".to_vec()))
-            .unwrap();
+    let result = block_on(service.write_file(
+        "main",
+        root_id,
+        path,
+        expected.clone(),
+        b"new".to_vec(),
+        &remote_service_for_test(),
+    ))
+    .unwrap();
     let written_version = result
         .written_stat()
         .unwrap_or_else(|| panic!("expected written, got {result:?}"))
@@ -2210,6 +2261,7 @@ fn versioned_write_uses_the_mutation_gate_and_returns_the_publication_stat() {
             RelativePath::parse_wire("target.txt").unwrap(),
             expected,
             b"replay".to_vec(),
+            &remote_service_for_test(),
         ))
         .unwrap_err()
         .code(),
@@ -2239,6 +2291,7 @@ fn versioned_write_panic_is_response_unavailable_without_poisoning_the_mutation_
         "main",
         root_id,
         RelativePath::parse_wire("after-panic.txt").unwrap(),
+        &remote_service_for_test(),
     ))
     .unwrap();
     assert!(root.join("after-panic.txt").is_file());
@@ -2392,23 +2445,35 @@ fn trash_and_permanent_delete_receipts_are_distinct_and_mutually_exclusive_per_w
     let trash =
         block_on(service.prepare_trash("main", vec![(root_id, relative("entry"))])).unwrap();
     assert_eq!(
-        block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)],))
-            .unwrap_err()
-            .code(),
+        block_on(service.prepare_delete(
+            "main",
+            vec![(root_id, relative("entry"), false)],
+            &remote_service_for_test(),
+        ))
+        .unwrap_err()
+        .code(),
         "WORKSPACE_CONFLICT"
     );
     block_on(service.cancel_trash("main", trash.confirmation_id())).unwrap();
 
-    let permanent =
-        block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
-            .unwrap();
+    let permanent = block_on(service.prepare_delete(
+        "main",
+        vec![(root_id, relative("entry"), false)],
+        &remote_service_for_test(),
+    ))
+    .unwrap();
     assert_eq!(
         block_on(service.prepare_trash("main", vec![(root_id, relative("entry"))]))
             .unwrap_err()
             .code(),
         "WORKSPACE_CONFLICT"
     );
-    block_on(service.cancel_delete("main", permanent.confirmation_id())).unwrap();
+    block_on(service.cancel_delete(
+        "main",
+        permanent.confirmation_id(),
+        &remote_service_for_test(),
+    ))
+    .unwrap();
 }
 
 #[cfg(target_os = "macos")]
@@ -2576,12 +2641,15 @@ fn confirmed_delete_consumes_file_authorization_once() {
     .unwrap();
     let root_id = selected.snapshot().roots()[0].root_id();
 
-    let plan =
-        block_on(service.prepare_delete("main", vec![(root_id, relative("delete.txt"), false)]))
-            .unwrap();
+    let plan = block_on(service.prepare_delete(
+        "main",
+        vec![(root_id, relative("delete.txt"), false)],
+        &remote_service_for_test(),
+    ))
+    .unwrap();
     let confirmation_id = plan.confirmation_id();
     let entry_id = plan.entries()[0].entry_id();
-    block_on(service.begin_delete("main", confirmation_id)).unwrap();
+    block_on(service.begin_delete("main", confirmation_id, &remote_service_for_test())).unwrap();
     let result = block_on(service.commit_delete_entry(
         "main",
         confirmation_id,
@@ -2589,6 +2657,7 @@ fn confirmed_delete_consumes_file_authorization_once() {
         root_id,
         relative("delete.txt"),
         false,
+        &remote_service_for_test(),
     ))
     .unwrap();
     assert_eq!(result, WorkspaceDeleteResult::Deleted);
@@ -2601,6 +2670,7 @@ fn confirmed_delete_consumes_file_authorization_once() {
         root_id,
         relative("delete.txt"),
         false,
+        &remote_service_for_test(),
     ))
     .unwrap_err();
     assert_eq!(replay.code(), "WORKSPACE_DELETE_PLAN_INVALID");
@@ -2621,16 +2691,26 @@ fn delete_cancel_and_second_batch_have_zero_file_side_effects() {
     ))
     .unwrap();
     let root_id = selected.snapshot().roots()[0].root_id();
-    let plan = block_on(service.prepare_delete("main", vec![(root_id, relative("first"), false)]))
-        .unwrap();
-    let conflict =
-        block_on(service.prepare_delete("main", vec![(root_id, relative("second"), false)]))
-            .unwrap_err();
+    let plan = block_on(service.prepare_delete(
+        "main",
+        vec![(root_id, relative("first"), false)],
+        &remote_service_for_test(),
+    ))
+    .unwrap();
+    let conflict = block_on(service.prepare_delete(
+        "main",
+        vec![(root_id, relative("second"), false)],
+        &remote_service_for_test(),
+    ))
+    .unwrap_err();
     assert_eq!(conflict.code(), "WORKSPACE_CONFLICT");
 
-    block_on(service.cancel_delete("main", plan.confirmation_id())).unwrap();
+    block_on(service.cancel_delete("main", plan.confirmation_id(), &remote_service_for_test()))
+        .unwrap();
     assert_eq!(std::fs::read(root.join("first")).unwrap(), b"first");
-    let replay = block_on(service.cancel_delete("main", plan.confirmation_id())).unwrap_err();
+    let replay =
+        block_on(service.cancel_delete("main", plan.confirmation_id(), &remote_service_for_test()))
+            .unwrap_err();
     assert_eq!(replay.code(), "WORKSPACE_DELETE_PLAN_INVALID");
 }
 
@@ -2655,16 +2735,19 @@ fn begin_revalidates_the_whole_batch_before_any_remove() {
             (root_id, relative("first"), false),
             (root_id, relative("last"), false),
         ],
+        &remote_service_for_test(),
     ))
     .unwrap();
     std::fs::write(root.join("last"), b"changed").unwrap();
 
-    let error = block_on(service.begin_delete("main", plan.confirmation_id())).unwrap_err();
+    let error =
+        block_on(service.begin_delete("main", plan.confirmation_id(), &remote_service_for_test()))
+            .unwrap_err();
     assert_eq!(error.code(), "WORKSPACE_DELETE_BATCH_CHANGED");
     assert_eq!(std::fs::read(root.join("first")).unwrap(), b"first");
     assert_eq!(std::fs::read(root.join("last")).unwrap(), b"changed");
     assert_eq!(
-        block_on(service.begin_delete("main", plan.confirmation_id()))
+        block_on(service.begin_delete("main", plan.confirmation_id(), &remote_service_for_test()))
             .unwrap_err()
             .code(),
         "WORKSPACE_DELETE_PLAN_INVALID"
@@ -2691,11 +2774,16 @@ fn recursive_delete_handles_mixed_tree_raw_symlink_and_hardlink_journal() {
     ))
     .unwrap();
     let root_id = selected.snapshot().roots()[0].root_id();
-    let plan =
-        block_on(service.prepare_delete("main", vec![(root_id, relative("tree"), true)])).unwrap();
+    let plan = block_on(service.prepare_delete(
+        "main",
+        vec![(root_id, relative("tree"), true)],
+        &remote_service_for_test(),
+    ))
+    .unwrap();
     assert_eq!(plan.entries().len(), 1);
     let entry_id = plan.entries()[0].entry_id();
-    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
+    block_on(service.begin_delete("main", plan.confirmation_id(), &remote_service_for_test()))
+        .unwrap();
     let result = block_on(service.commit_delete_entry(
         "main",
         plan.confirmation_id(),
@@ -2703,6 +2791,7 @@ fn recursive_delete_handles_mixed_tree_raw_symlink_and_hardlink_journal() {
         root_id,
         relative("tree"),
         true,
+        &remote_service_for_test(),
     ))
     .unwrap();
     assert_eq!(result, WorkspaceDeleteResult::Deleted);
@@ -2729,9 +2818,13 @@ fn delete_rejects_nonrecursive_nonempty_and_overlapping_selections() {
     .unwrap();
     let root_id = selected.snapshot().roots()[0].root_id();
     assert_eq!(
-        block_on(service.prepare_delete("main", vec![(root_id, relative("tree"), false)],))
-            .unwrap_err()
-            .code(),
+        block_on(service.prepare_delete(
+            "main",
+            vec![(root_id, relative("tree"), false)],
+            &remote_service_for_test(),
+        ))
+        .unwrap_err()
+        .code(),
         "DIRECTORY_NOT_EMPTY"
     );
     assert_eq!(
@@ -2741,6 +2834,7 @@ fn delete_rejects_nonrecursive_nonempty_and_overlapping_selections() {
                 (root_id, relative("tree"), true),
                 (root_id, relative("tree/child"), false),
             ],
+            &remote_service_for_test(),
         ))
         .unwrap_err()
         .code(),
@@ -2755,6 +2849,7 @@ fn delete_rejects_nonrecursive_nonempty_and_overlapping_selections() {
                 (root_id, relative("hardlink-source"), false),
                 (root_id, relative("hardlink-alias"), false),
             ],
+            &remote_service_for_test(),
         ))
         .unwrap_err()
         .code(),
@@ -2775,6 +2870,7 @@ fn delete_rejects_nonrecursive_nonempty_and_overlapping_selections() {
                 (root_id, relative("first-tree"), true),
                 (root_id, relative("second-tree"), true),
             ],
+            &remote_service_for_test(),
         ))
         .unwrap_err()
         .code(),
@@ -2801,20 +2897,41 @@ fn delete_plan_expires_at_the_exact_monotonic_deadline() {
     ))
     .unwrap();
     let root_id = selected.snapshot().roots()[0].root_id();
-    let before_boundary =
-        block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
-            .unwrap();
+    let before_boundary = block_on(service.prepare_delete(
+        "main",
+        vec![(root_id, relative("entry"), false)],
+        &remote_service_for_test(),
+    ))
+    .unwrap();
     let base = *now.lock().unwrap();
     *now.lock().unwrap() = base + Duration::from_secs(119);
-    block_on(service.begin_delete("main", before_boundary.confirmation_id())).unwrap();
-    block_on(service.cancel_delete("main", before_boundary.confirmation_id())).unwrap();
+    block_on(service.begin_delete(
+        "main",
+        before_boundary.confirmation_id(),
+        &remote_service_for_test(),
+    ))
+    .unwrap();
+    block_on(service.cancel_delete(
+        "main",
+        before_boundary.confirmation_id(),
+        &remote_service_for_test(),
+    ))
+    .unwrap();
 
-    let at_boundary =
-        block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
-            .unwrap();
+    let at_boundary = block_on(service.prepare_delete(
+        "main",
+        vec![(root_id, relative("entry"), false)],
+        &remote_service_for_test(),
+    ))
+    .unwrap();
     *now.lock().unwrap() = base + Duration::from_secs(239);
 
-    let error = block_on(service.begin_delete("main", at_boundary.confirmation_id())).unwrap_err();
+    let error = block_on(service.begin_delete(
+        "main",
+        at_boundary.confirmation_id(),
+        &remote_service_for_test(),
+    ))
+    .unwrap_err();
     assert_eq!(error.code(), "WORKSPACE_DELETE_PLAN_INVALID");
     assert_eq!(std::fs::read(root.join("entry")).unwrap(), b"plain");
 }
@@ -2833,11 +2950,15 @@ fn root_lifecycle_invalidates_delete_plan_without_touching_files() {
     ))
     .unwrap();
     let root_id = selected.snapshot().roots()[0].root_id();
-    let plan = block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
-        .unwrap();
+    let plan = block_on(service.prepare_delete(
+        "main",
+        vec![(root_id, relative("entry"), false)],
+        &remote_service_for_test(),
+    ))
+    .unwrap();
     service.remove_root("main", root_id).unwrap();
     assert_eq!(
-        block_on(service.begin_delete("main", plan.confirmation_id()))
+        block_on(service.begin_delete("main", plan.confirmation_id(), &remote_service_for_test()))
             .unwrap_err()
             .code(),
         "WORKSPACE_DELETE_PLAN_INVALID"
@@ -2860,9 +2981,12 @@ fn picker_replacement_and_window_close_invalidate_delete_receipts() {
     ))
     .unwrap();
     let root_id = selected.snapshot().roots()[0].root_id();
-    let replaced_plan =
-        block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
-            .unwrap();
+    let replaced_plan = block_on(service.prepare_delete(
+        "main",
+        vec![(root_id, relative("entry"), false)],
+        &remote_service_for_test(),
+    ))
+    .unwrap();
     block_on(service.pick_roots(
         "main",
         FakePicker::selected(vec![replacement]),
@@ -2870,9 +2994,13 @@ fn picker_replacement_and_window_close_invalidate_delete_receipts() {
     ))
     .unwrap();
     assert_eq!(
-        block_on(service.begin_delete("main", replaced_plan.confirmation_id()))
-            .unwrap_err()
-            .code(),
+        block_on(service.begin_delete(
+            "main",
+            replaced_plan.confirmation_id(),
+            &remote_service_for_test()
+        ))
+        .unwrap_err()
+        .code(),
         "WORKSPACE_DELETE_PLAN_INVALID"
     );
 
@@ -2883,14 +3011,21 @@ fn picker_replacement_and_window_close_invalidate_delete_receipts() {
     ))
     .unwrap();
     let restored_id = restored.snapshot().roots()[0].root_id();
-    let closed_plan =
-        block_on(service.prepare_delete("main", vec![(restored_id, relative("entry"), false)]))
-            .unwrap();
+    let closed_plan = block_on(service.prepare_delete(
+        "main",
+        vec![(restored_id, relative("entry"), false)],
+        &remote_service_for_test(),
+    ))
+    .unwrap();
     service.close_window("main");
     assert_eq!(
-        block_on(service.begin_delete("main", closed_plan.confirmation_id()))
-            .unwrap_err()
-            .code(),
+        block_on(service.begin_delete(
+            "main",
+            closed_plan.confirmation_id(),
+            &remote_service_for_test()
+        ))
+        .unwrap_err()
+        .code(),
         "WORKSPACE_DELETE_PLAN_INVALID"
     );
     assert_eq!(std::fs::read(root.join("entry")).unwrap(), b"plain");
@@ -2921,10 +3056,12 @@ fn each_deleted_entry_refreshes_the_executing_batch_idle_deadline() {
             (root_id, relative("first"), false),
             (root_id, relative("second"), false),
         ],
+        &remote_service_for_test(),
     ))
     .unwrap();
     let base = *now.lock().unwrap();
-    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
+    block_on(service.begin_delete("main", plan.confirmation_id(), &remote_service_for_test()))
+        .unwrap();
     *now.lock().unwrap() = base + Duration::from_secs(119);
     assert_eq!(
         block_on(service.commit_delete_entry(
@@ -2934,6 +3071,7 @@ fn each_deleted_entry_refreshes_the_executing_batch_idle_deadline() {
             root_id,
             relative("first"),
             false,
+            &remote_service_for_test(),
         ))
         .unwrap(),
         WorkspaceDeleteResult::Deleted
@@ -2947,6 +3085,7 @@ fn each_deleted_entry_refreshes_the_executing_batch_idle_deadline() {
             root_id,
             relative("second"),
             false,
+            &remote_service_for_test(),
         ))
         .unwrap(),
         WorkspaceDeleteResult::Deleted
@@ -2974,9 +3113,11 @@ fn a_changed_entry_returns_retained_and_invalidates_remaining_batch() {
             (root_id, relative("first"), false),
             (root_id, relative("second"), false),
         ],
+        &remote_service_for_test(),
     ))
     .unwrap();
-    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
+    block_on(service.begin_delete("main", plan.confirmation_id(), &remote_service_for_test()))
+        .unwrap();
     std::fs::write(root.join("first"), b"changed").unwrap();
     let result = block_on(service.commit_delete_entry(
         "main",
@@ -2985,6 +3126,7 @@ fn a_changed_entry_returns_retained_and_invalidates_remaining_batch() {
         root_id,
         relative("first"),
         false,
+        &remote_service_for_test(),
     ))
     .unwrap();
     assert_eq!(
@@ -3003,6 +3145,7 @@ fn a_changed_entry_returns_retained_and_invalidates_remaining_batch() {
             root_id,
             relative("second"),
             false,
+            &remote_service_for_test(),
         ))
         .unwrap_err()
         .code(),
@@ -3030,9 +3173,12 @@ fn delete_accepts_a_full_64_entry_batch_in_exact_input_order() {
             (root_id, relative(&name), false)
         })
         .collect::<Vec<_>>();
-    let plan = block_on(service.prepare_delete("main", entries.clone())).unwrap();
+    let plan =
+        block_on(service.prepare_delete("main", entries.clone(), &remote_service_for_test()))
+            .unwrap();
     assert_eq!(plan.entries().len(), 64);
-    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
+    block_on(service.begin_delete("main", plan.confirmation_id(), &remote_service_for_test()))
+        .unwrap();
     for (entry, (root_id, path, recursive)) in plan.entries().iter().zip(entries) {
         let result = block_on(service.commit_delete_entry(
             "main",
@@ -3041,6 +3187,7 @@ fn delete_accepts_a_full_64_entry_batch_in_exact_input_order() {
             root_id,
             path,
             recursive,
+            &remote_service_for_test(),
         ))
         .unwrap();
         assert_eq!(result, WorkspaceDeleteResult::Deleted);
@@ -3068,10 +3215,14 @@ fn delete_plans_large_files_without_copy_content_limits() {
     ))
     .unwrap();
     let root_id = selected.snapshot().roots()[0].root_id();
-    let plan =
-        block_on(service.prepare_delete("main", vec![(root_id, relative("large.bin"), false)]))
-            .unwrap();
-    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
+    let plan = block_on(service.prepare_delete(
+        "main",
+        vec![(root_id, relative("large.bin"), false)],
+        &remote_service_for_test(),
+    ))
+    .unwrap();
+    block_on(service.begin_delete("main", plan.confirmation_id(), &remote_service_for_test()))
+        .unwrap();
     assert_eq!(
         block_on(service.commit_delete_entry(
             "main",
@@ -3080,6 +3231,7 @@ fn delete_plans_large_files_without_copy_content_limits() {
             root_id,
             relative("large.bin"),
             false,
+            &remote_service_for_test(),
         ))
         .unwrap(),
         WorkspaceDeleteResult::Deleted
@@ -3114,6 +3266,7 @@ fn delete_rejects_special_files_before_any_batch_side_effect() {
             (root_id, relative("ordinary"), false),
             (root_id, relative("pipe"), false),
         ],
+        &remote_service_for_test(),
     ))
     .unwrap_err();
     assert_eq!(error.code(), "ENTRY_TYPE_MISMATCH");
@@ -3135,15 +3288,20 @@ fn delete_tokens_are_window_bound_and_wrong_entry_options_invalidate_the_batch()
     ))
     .unwrap();
     let root_id = selected.snapshot().roots()[0].root_id();
-    let plan = block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
-        .unwrap();
+    let plan = block_on(service.prepare_delete(
+        "main",
+        vec![(root_id, relative("entry"), false)],
+        &remote_service_for_test(),
+    ))
+    .unwrap();
     assert_eq!(
-        block_on(service.begin_delete("other", plan.confirmation_id()))
+        block_on(service.begin_delete("other", plan.confirmation_id(), &remote_service_for_test()))
             .unwrap_err()
             .code(),
         "WORKSPACE_DELETE_PLAN_INVALID"
     );
-    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
+    block_on(service.begin_delete("main", plan.confirmation_id(), &remote_service_for_test()))
+        .unwrap();
     assert_eq!(
         block_on(service.commit_delete_entry(
             "main",
@@ -3152,6 +3310,7 @@ fn delete_tokens_are_window_bound_and_wrong_entry_options_invalidate_the_batch()
             root_id,
             relative("entry"),
             true,
+            &remote_service_for_test(),
         ))
         .unwrap_err()
         .code(),
@@ -3166,6 +3325,7 @@ fn delete_tokens_are_window_bound_and_wrong_entry_options_invalidate_the_batch()
             root_id,
             relative("entry"),
             false,
+            &remote_service_for_test(),
         ))
         .unwrap_err()
         .code(),
@@ -3194,8 +3354,11 @@ fn confirmed_delete_consumes_a_cross_root_batch_in_input_order() {
         (first_id, relative("file"), false),
         (second_id, relative("empty"), false),
     ];
-    let plan = block_on(service.prepare_delete("main", requests.clone())).unwrap();
-    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
+    let plan =
+        block_on(service.prepare_delete("main", requests.clone(), &remote_service_for_test()))
+            .unwrap();
+    block_on(service.begin_delete("main", plan.confirmation_id(), &remote_service_for_test()))
+        .unwrap();
 
     for (entry, (root_id, path, recursive)) in plan.entries().iter().zip(requests) {
         assert_eq!(
@@ -3206,6 +3369,7 @@ fn confirmed_delete_consumes_a_cross_root_batch_in_input_order() {
                 root_id,
                 path,
                 recursive,
+                &remote_service_for_test(),
             ))
             .unwrap(),
             WorkspaceDeleteResult::Deleted
@@ -3233,8 +3397,12 @@ fn confirmed_delete_rejects_a_same_identity_basename_round_trip() {
     ))
     .unwrap();
     let root_id = selected.snapshot().roots()[0].root_id();
-    let plan = block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
-        .unwrap();
+    let plan = block_on(service.prepare_delete(
+        "main",
+        vec![(root_id, relative("entry"), false)],
+        &remote_service_for_test(),
+    ))
+    .unwrap();
     let before = std::fs::metadata(&entry).unwrap();
     let original_permissions = before.permissions();
 
@@ -3253,7 +3421,7 @@ fn confirmed_delete_rejects_a_same_identity_basename_round_trip() {
     );
 
     assert_eq!(
-        block_on(service.begin_delete("main", plan.confirmation_id()))
+        block_on(service.begin_delete("main", plan.confirmation_id(), &remote_service_for_test()))
             .unwrap_err()
             .code(),
         "WORKSPACE_DELETE_BATCH_CHANGED"
@@ -3277,9 +3445,14 @@ fn confirmed_delete_rejects_external_hardlink_count_changes_after_begin() {
     ))
     .unwrap();
     let root_id = selected.snapshot().roots()[0].root_id();
-    let plan = block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
+    let plan = block_on(service.prepare_delete(
+        "main",
+        vec![(root_id, relative("entry"), false)],
+        &remote_service_for_test(),
+    ))
+    .unwrap();
+    block_on(service.begin_delete("main", plan.confirmation_id(), &remote_service_for_test()))
         .unwrap();
-    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
     std::fs::hard_link(&entry, &alias).unwrap();
 
     assert_eq!(
@@ -3290,6 +3463,7 @@ fn confirmed_delete_rejects_external_hardlink_count_changes_after_begin() {
             root_id,
             relative("entry"),
             false,
+            &remote_service_for_test(),
         ))
         .unwrap(),
         WorkspaceDeleteResult::EntryRetained {
@@ -3332,9 +3506,14 @@ fn top_level_delete_ignores_special_and_unrepresentable_parent_siblings() {
     ))
     .unwrap();
     let root_id = selected.snapshot().roots()[0].root_id();
-    let plan = block_on(service.prepare_delete("main", vec![(root_id, relative("target"), false)]))
+    let plan = block_on(service.prepare_delete(
+        "main",
+        vec![(root_id, relative("target"), false)],
+        &remote_service_for_test(),
+    ))
+    .unwrap();
+    block_on(service.begin_delete("main", plan.confirmation_id(), &remote_service_for_test()))
         .unwrap();
-    block_on(service.begin_delete("main", plan.confirmation_id())).unwrap();
     assert_eq!(
         block_on(service.commit_delete_entry(
             "main",
@@ -3343,6 +3522,7 @@ fn top_level_delete_ignores_special_and_unrepresentable_parent_siblings() {
             root_id,
             relative("target"),
             false,
+            &remote_service_for_test(),
         ))
         .unwrap(),
         WorkspaceDeleteResult::Deleted
@@ -3370,11 +3550,15 @@ fn concurrent_identical_delete_commits_consume_at_most_once() {
     ))
     .unwrap();
     let root_id = selected.snapshot().roots()[0].root_id();
-    let plan = block_on(service.prepare_delete("main", vec![(root_id, relative("entry"), false)]))
-        .unwrap();
+    let plan = block_on(service.prepare_delete(
+        "main",
+        vec![(root_id, relative("entry"), false)],
+        &remote_service_for_test(),
+    ))
+    .unwrap();
     let confirmation_id = plan.confirmation_id();
     let entry_id = plan.entries()[0].entry_id();
-    block_on(service.begin_delete("main", confirmation_id)).unwrap();
+    block_on(service.begin_delete("main", confirmation_id, &remote_service_for_test())).unwrap();
 
     let first_service = Arc::clone(&service);
     let first = tauri::async_runtime::spawn(async move {
@@ -3386,6 +3570,7 @@ fn concurrent_identical_delete_commits_consume_at_most_once() {
                 root_id,
                 relative("entry"),
                 false,
+                &remote_service_for_test(),
             )
             .await
     });
@@ -3399,6 +3584,7 @@ fn concurrent_identical_delete_commits_consume_at_most_once() {
                 root_id,
                 relative("entry"),
                 false,
+                &remote_service_for_test(),
             )
             .await
     });
@@ -3529,12 +3715,17 @@ fn root_revocation_terminates_the_active_search() {
     );
 }
 
-/// `F220` S2 (ADR 0007 §1 §5) representative test: a remote-backed root
-/// fails closed with `ROOT_BACKEND_UNSUPPORTED` at the workspace stat/read
-/// consumption point, exactly like a `ROOT_NOT_AUTHORIZED` root does today —
-/// see [`super::WorkspaceScope::lease`]'s doc comment for why this single
-/// chokepoint is what makes every downstream reader/writer/search consumer
-/// fail closed without needing its own backend match.
+/// `F220` S3 (ADR 0007 §1) representative test: a remote-backed root now
+/// really dispatches to `remote::remote_fs` (superseding `F220` S2's own
+/// blanket `ROOT_BACKEND_UNSUPPORTED` stub — see that slice's now-updated
+/// doc history). With no live session behind it (this test's
+/// `authorize_remote_root_for_test` mints a random, never-connected
+/// `RemoteSessionId`, and `remote_service_for_test()` starts with zero
+/// registered sessions), every dispatched operation still fails closed —
+/// now with `REMOTE_SESSION_NOT_FOUND`, the accurate reason, rather than a
+/// generic "this backend isn't supported yet" — exercising exactly the
+/// [`super::WorkspaceScope::remote_context`] chokepoint every remote-capable
+/// operation now funnels through.
 #[test]
 fn stat_and_read_file_fail_closed_for_a_remote_backed_root() {
     let service = WorkspaceService::new();
@@ -3547,18 +3738,23 @@ fn stat_and_read_file_fail_closed_for_a_remote_backed_root() {
         )
         .expect("remote root registers for test");
 
-    let stat_error =
-        block_on(service.stat("main", remote_id, RelativePath::parse_wire("").unwrap()))
-            .expect_err("stat on a remote-backed root must fail closed");
-    assert_eq!(stat_error.code(), "ROOT_BACKEND_UNSUPPORTED");
+    let stat_error = block_on(service.stat(
+        "main",
+        remote_id,
+        RelativePath::parse_wire("").unwrap(),
+        &remote_service_for_test(),
+    ))
+    .expect_err("stat on a remote-backed root with no live session must fail closed");
+    assert_eq!(stat_error.code(), "REMOTE_SESSION_NOT_FOUND");
 
     let read_error = block_on(service.read_file(
         "main",
         remote_id,
         RelativePath::parse_wire("anything.txt").unwrap(),
+        &remote_service_for_test(),
     ))
-    .expect_err("read_file on a remote-backed root must fail closed");
-    assert_eq!(read_error.code(), "ROOT_BACKEND_UNSUPPORTED");
+    .expect_err("read_file on a remote-backed root with no live session must fail closed");
+    assert_eq!(read_error.code(), "REMOTE_SESSION_NOT_FOUND");
 }
 
 /// `F220` S2 representative test for the search domain: multi-root search

@@ -74,6 +74,21 @@ export interface PlainWorkspaceDeleteProvider {
 	plainRefreshDeleteRoots(resources: readonly URI[]): void;
 }
 
+/** `F220` S3: the `Plain: Refresh Remote Folder` command's own narrow
+ * capability — fires a full-rescan `onDidChangeFile` for one root, the
+ * exact same synthesis `plainRefreshDeleteRoots` already uses for a root it
+ * cannot otherwise prove the post-delete state of. This is the *entire*
+ * mechanism ADR 0007 §3's "rescan-on-demand" contract needs on the
+ * frontend: a remote root never receives a `workspaceWatch` wake callback
+ * (Rust never emits one for a backend with no realtime watcher), so
+ * external changes are only ever discovered by a mutation this session
+ * itself performed (already handled generically by `fireCreated`/
+ * `fireDeleted`/`fireMoved`/`fireRootUpdated`) or by this explicit,
+ * user-triggered rescan. */
+export interface PlainWorkspaceRemoteRefreshProvider {
+	plainRefreshRoot(rootId: string): void;
+}
+
 export interface PlainWorkspaceProviderStat extends IStat {
 	readonly plainVersion: string | null;
 }
@@ -534,7 +549,11 @@ function createdProviderStat(
  * from case-sensitive and case-insensitive volumes at the same time, while the
  * Workbench capability is provider-wide rather than root-specific.
  */
-class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileReadWriteCapability {
+class PlainWorkspaceFileSystemProvider
+	implements
+		IFileSystemProviderWithFileReadWriteCapability,
+		PlainWorkspaceRemoteRefreshProvider
+{
 	readonly #bridge: PlainBridge;
 	readonly #allowsMutationDispatch: boolean;
 	readonly #allowsTrashDispatch: boolean;
@@ -860,6 +879,25 @@ class PlainWorkspaceFileSystemProvider implements IFileSystemProviderWithFileRea
 	plainSnapshotDeleteResource(resource: URI): PlainWorkspaceDeleteResource {
 		this.requireMutationDispatchAllowed();
 		return this.resolveMutationResource(resource);
+	}
+
+	plainRefreshRoot(rootId: string): void {
+		// Reuses the request codec's own UUID-v4 validation rather than
+		// duplicating it — a malformed `rootId` throws the same
+		// `ROOT_NOT_AUTHORIZED`-shaped violation any other resolver call
+		// would.
+		const validated = frozenWorkspaceEntryRequest(rootId, "");
+		const root = URI.from(
+			{
+				scheme: PLAIN_WORKSPACE_SCHEME,
+				authority: validated.rootId,
+				path: "/",
+				query: "",
+				fragment: "",
+			},
+			true,
+		);
+		this.fireRootUpdated(root);
 	}
 
 	plainRefreshDeleteRoots(resources: readonly URI[]): void {

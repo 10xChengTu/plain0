@@ -38,6 +38,10 @@ import {
 	registerPlainRemoteSshCommands,
 } from "./features/remote/plain-remote-ssh-commands";
 import {
+	configurePlainRemoteWorkspaceBridge,
+	registerPlainRemoteWorkspaceCommands,
+} from "./features/remote/plain-remote-workspace-commands";
+import {
 	createPlainUserDataFileSystemProvider,
 	PLAIN_USER_DATA_SCHEME,
 } from "./features/preferences/user-data-file-system-provider";
@@ -193,6 +197,10 @@ async function bootstrap(): Promise<void> {
 		ReturnType<typeof configurePlainRemoteSshBridge> | undefined;
 	let remoteSshCommandsRegistration:
 		ReturnType<typeof registerPlainRemoteSshCommands> | undefined;
+	let remoteWorkspaceBridgeRegistration:
+		ReturnType<typeof configurePlainRemoteWorkspaceBridge> | undefined;
+	let remoteWorkspaceCommandsRegistration:
+		ReturnType<typeof registerPlainRemoteWorkspaceCommands> | undefined;
 	// `F100` S3: constructed and configured here (before `initialize()`),
 	// exactly like every other `configuredBridge`-style singleton in this
 	// file — `debug-contribution.ts` registers the three debug `ViewPane`s'
@@ -221,6 +229,8 @@ async function bootstrap(): Promise<void> {
 			debugRuntime.session.dispose();
 			remoteSshCommandsRegistration?.dispose();
 			remoteSshBridgeRegistration?.dispose();
+			remoteWorkspaceCommandsRegistration?.dispose();
+			remoteWorkspaceBridgeRegistration?.dispose();
 		},
 		{ once: true },
 	);
@@ -348,6 +358,17 @@ async function bootstrap(): Promise<void> {
 		await getService(INotificationService),
 	);
 	remoteSshCommandsRegistration = registerPlainRemoteSshCommands();
+
+	// `F220` S3: "Plain: Open Remote Folder…"/"Plain: Refresh Remote Folder"
+	// — needs the same topology coordinator `registerWorkspaceCommands`
+	// (below) drives root-set mutations through, plus the workspace file
+	// system provider's own rescan-on-demand capability.
+	remoteWorkspaceBridgeRegistration = configurePlainRemoteWorkspaceBridge(
+		bridge,
+		workspaceTopologyCoordinator,
+		workspaceFileSystemProvider,
+	);
+	remoteWorkspaceCommandsRegistration = registerPlainRemoteWorkspaceCommands();
 
 	// `F080` S2: the `git:` read-only content provider (decision 4) — a
 	// `PlainScmProvider.getOriginalResource` URI is only ever resolved once

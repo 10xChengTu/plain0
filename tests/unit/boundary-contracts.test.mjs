@@ -2807,30 +2807,34 @@ const workspaceDeleteSources = [
 pub(crate) async fn workspace_prepare_delete(
   window: WebviewWindow,
   service: State<'_, WorkspaceService>,
+  remote: State<'_, RemoteSessionService>,
   request: WorkspacePrepareDeleteRequest,
 ) -> Result<WorkspaceDeleteBatchPlan, CommandError> {
-  service.prepare_delete(window.label(), request.into_parts()?).await
+  service.prepare_delete(window.label(), request.into_parts()?, remote.inner()).await
 }
 #[tauri::command]
 pub(crate) async fn workspace_cancel_delete(
   window: WebviewWindow,
   service: State<'_, WorkspaceService>,
+  remote: State<'_, RemoteSessionService>,
   request: WorkspaceDeleteBatchRequest,
 ) -> Result<(), CommandError> {
-  service.cancel_delete(window.label(), request.confirmation_id()).await
+  service.cancel_delete(window.label(), request.confirmation_id(), remote.inner()).await
 }
 #[tauri::command]
 pub(crate) async fn workspace_begin_delete(
   window: WebviewWindow,
   service: State<'_, WorkspaceService>,
+  remote: State<'_, RemoteSessionService>,
   request: WorkspaceDeleteBatchRequest,
 ) -> Result<(), CommandError> {
-  service.begin_delete(window.label(), request.confirmation_id()).await
+  service.begin_delete(window.label(), request.confirmation_id(), remote.inner()).await
 }
 #[tauri::command]
 pub(crate) async fn workspace_commit_delete_entry(
   window: WebviewWindow,
   service: State<'_, WorkspaceService>,
+  remote: State<'_, RemoteSessionService>,
   request: WorkspaceCommitDeleteEntryRequest,
 ) -> Result<WorkspaceDeleteResult, CommandError> {
   let (confirmation_id, entry_id, root_id, relative_path, recursive) = request.into_parts()?;
@@ -2841,6 +2845,7 @@ pub(crate) async fn workspace_commit_delete_entry(
     root_id,
     relative_path,
     recursive,
+    remote.inner(),
   ).await
 }`,
 		),
@@ -5302,8 +5307,8 @@ describe("Plain confirmed-delete Harness contracts", () => {
 			"src-tauri/src/workspace/commands.rs",
 			(source) =>
 				source.replace(
-					"  service.begin_delete(window.label(), request.confirmation_id()).await",
-					"  service.cancel_delete(window.label(), request.confirmation_id()).await?;\n  service.begin_delete(window.label(), request.confirmation_id()).await",
+					"  service.begin_delete(window.label(), request.confirmation_id(), remote.inner()).await",
+					"  service.cancel_delete(window.label(), request.confirmation_id(), remote.inner()).await?;\n  service.begin_delete(window.label(), request.confirmation_id(), remote.inner()).await",
 				),
 		);
 		expect(
@@ -7065,8 +7070,8 @@ describe("Plain workspace provider copy boundary", () => {
 		);
 
 		const inherited = mutateProvider(
-			"implements IFileSystemProviderWithFileReadWriteCapability",
-			"extends WritableProvider implements IFileSystemProviderWithFileReadWriteCapability",
+			"implements\n\t\tIFileSystemProviderWithFileReadWriteCapability",
+			"extends WritableProvider implements\n\t\tIFileSystemProviderWithFileReadWriteCapability",
 		);
 		expect(validateWorkspaceProviderCopyBoundary(inherited)).toContain(
 			"Plain workspace provider must not inherit hidden write capabilities",
@@ -8620,11 +8625,12 @@ const versionedWriteRustSources = [
 pub(crate) async fn workspace_write_file(
   window: WebviewWindow,
   service: State<'_, WorkspaceService>,
+  remote: State<'_, RemoteSessionService>,
   request: tauri::ipc::Request<'_>,
 ) -> Result<WorkspaceWriteResult, CommandError> {
   let frame = WorkspaceWriteFileFrame::parse_invoke_body(request.body())?;
   let (root_id, relative_path, expected_version, content) = frame.into_parts();
-  service.write_file(window.label(), root_id, relative_path, expected_version, content).await
+  service.write_file(window.label(), root_id, relative_path, expected_version, content, remote.inner()).await
 }
 `,
 	},

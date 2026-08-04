@@ -48,6 +48,7 @@ import type {
 	RemoteSessionConnectResult,
 	RemoteSessionEventPayload,
 	RemoteSessionStateResult,
+	RemoteWorkspaceDirectoryPage,
 	RuntimeInfo,
 	TerminalDataEvent,
 	TerminalExitEvent,
@@ -1055,6 +1056,23 @@ export interface BrowserMockRemoteFixtureForTest {
 	 * call); a target that has never been pinned always reports
 	 * `"hostKeyPendingConfirmation"` regardless of this list. */
 	readonly changedHostKeyTargetsForTest?: readonly string[];
+	/** `F220` S3: the mock "remote host" filesystem `remoteWorkspacePickDirectory`
+	 * browses and `remoteWorkspaceAddRoot` authorizes from — a flat map keyed
+	 * by absolute POSIX path (e.g. `"/home/octocat/project"`), independent of
+	 * every local root fixture. `"/"` always exists implicitly as a
+	 * directory even if not listed. Each value is either `"directory"` or a
+	 * file's UTF-8 text content; every ancestor of a listed path is treated
+	 * as an implicit directory too (so listing only leaf paths is enough). */
+	readonly directoryTreeForTest?: Readonly<
+		Record<string, "directory" | Readonly<{ content: string }>>
+	>;
+	/** Simulates a symlink/mount that makes an input path resolve somewhere
+	 * else entirely — keyed by the exact input `path` a picker/add-root call
+	 * receives, valued by the (possibly outside-any-sane-root) path it
+	 * "canonicalizes" to. Exercises the same "trust the server's own
+	 * realpath, not the caller's string" contract the real SFTP client
+	 * enforces, without needing a real filesystem symlink. */
+	readonly realpathOverridesForTest?: Readonly<Record<string, string>>;
 }
 
 export interface BrowserMockBridgeOptions {
@@ -7709,6 +7727,11 @@ export function createBrowserMockBridge(
 	const remoteSessionListeners = new Set<
 		(payload: RemoteSessionEventPayload) => void
 	>();
+	// `F220` S3 — dedups `remoteWorkspaceAddRoot` by `(sessionId, canonicalPath)`
+	// identity, mirroring `WorkspaceScope::authorize_remote_root`'s own
+	// contract: re-authorizing the same directory reuses its existing rootId
+	// rather than minting a duplicate.
+	const remoteRootIdentities = new Map<string, string>();
 
 	function remoteSessionNotFound(): CommandError {
 		return commandError(
@@ -7751,6 +7774,110 @@ export function createBrowserMockBridge(
 		for (const listener of remoteSessionListeners) {
 			listener(payload);
 		}
+	}
+
+	// --- F220 S3: remote directory picker / root authorization mock --------
+
+	function remoteMockNormalizePath(path: string): string {
+		if (path === "/" || path === "") {
+			return "/";
+		}
+		const trimmed = path.endsWith("/") ? path.slice(0, -1) : path;
+		return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+	}
+
+	/** Resolves a raw picker/add-root `path` to its "canonical" form —
+	 * applies `realpathOverridesForTest` first (simulating a symlink/mount
+	 * the real SFTP server's own `realpath` would resolve through), then
+	 * normalizes. Mirrors `remote::remote_fs`'s own "trust the server's
+	 * realpath, not the caller's string" contract. */
+	function remoteMockCanonicalize(path: string): string {
+		const overridden = remoteFixture.realpathOverridesForTest?.[path];
+		return remoteMockNormalizePath(overridden ?? path);
+	}
+
+	function remoteMockDirectoryTree(): ReadonlyMap<
+		string,
+		"directory" | Readonly<{ content: string }>
+	> {
+		return new Map(
+			Object.entries(remoteFixture.directoryTreeForTest ?? {}).map(
+				([path, entry]) => [remoteMockNormalizePath(path), entry],
+			),
+		);
+	}
+
+	/** `true` for `"/"` (always an implicit directory) or any path that is
+	 * itself listed as `"directory"`, or is a strict ancestor of some listed
+	 * path (an implicit intermediate directory — fixtures only need to list
+	 * leaves). */
+	function remoteMockIsDirectory(
+		tree: ReadonlyMap<string, "directory" | Readonly<{ content: string }>>,
+		path: string,
+	): boolean {
+		if (path === "/") {
+			return true;
+		}
+		const direct = tree.get(path);
+		if (direct === "directory") {
+			return true;
+		}
+		if (direct !== undefined) {
+			return false;
+		}
+		const prefix = `${path}/`;
+		for (const candidate of tree.keys()) {
+			if (candidate.startsWith(prefix)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	function remoteMockChildNames(
+		tree: ReadonlyMap<string, "directory" | Readonly<{ content: string }>>,
+		parentPath: string,
+	): string[] {
+		const prefix = parentPath === "/" ? "/" : `${parentPath}/`;
+		const names = new Set<string>();
+		for (const candidate of tree.keys()) {
+			if (candidate === parentPath || !candidate.startsWith(prefix)) {
+				continue;
+			}
+			const rest = candidate.slice(prefix.length);
+			const separatorIndex = rest.indexOf("/");
+			names.add(separatorIndex < 0 ? rest : rest.slice(0, separatorIndex));
+		}
+		return [...names].sort();
+	}
+
+	/** Builds a real mock filesystem tree (the same `MockDirectoryNode` shape
+	 * every local root already uses) from every fixture entry under
+	 * `basePath` — once built and inserted into `roots`/`trees`, every
+	 * existing generic stat/readDirectory/readFile/writeFile/create/rename/
+	 * delete handler in this file already works for it unchanged, exactly
+	 * as it does for a local root: this mock's tree model was never actually
+	 * local-filesystem-specific, only how a root gets *authorized* differs. */
+	function buildRemoteMockTree(
+		tree: ReadonlyMap<string, "directory" | Readonly<{ content: string }>>,
+		basePath: string,
+	): MockDirectoryNode {
+		const childEntries: Record<string, MockNode> = {};
+		for (const name of remoteMockChildNames(tree, basePath)) {
+			const childPath = basePath === "/" ? `/${name}` : `${basePath}/${name}`;
+			childEntries[name] = remoteMockIsDirectory(tree, childPath)
+				? buildRemoteMockTree(tree, childPath)
+				: mockFile((tree.get(childPath) as { content: string }).content);
+		}
+		return mockDirectory(childEntries);
+	}
+
+	function remoteMockDisplayName(canonicalPath: string): string {
+		if (canonicalPath === "/") {
+			return "Remote Root";
+		}
+		const segment = canonicalPath.slice(canonicalPath.lastIndexOf("/") + 1);
+		return segment.length > 0 ? segment : "Remote Root";
 	}
 
 	/** Completes a connect once the host key itself has already been
@@ -9955,6 +10082,67 @@ export function createBrowserMockBridge(
 			return () => {
 				remoteSessionListeners.delete(listener);
 			};
+		},
+		async remoteWorkspacePickDirectory(sessionId, path, offset, limit) {
+			if (!remoteSessions.has(sessionId)) {
+				throw remoteSessionNotFound();
+			}
+			const canonicalPath = remoteMockCanonicalize(path);
+			const tree = remoteMockDirectoryTree();
+			if (!remoteMockIsDirectory(tree, canonicalPath)) {
+				throw entryTypeMismatch();
+			}
+			const allEntries = remoteMockChildNames(tree, canonicalPath).filter(
+				(name) => {
+					const childPath =
+						canonicalPath === "/" ? `/${name}` : `${canonicalPath}/${name}`;
+					return remoteMockIsDirectory(tree, childPath);
+				},
+			);
+			const bounded = Math.max(0, Math.min(offset, allEntries.length));
+			const entries = allEntries.slice(bounded, bounded + limit);
+			const parentPath =
+				canonicalPath === "/"
+					? null
+					: canonicalPath.slice(0, canonicalPath.lastIndexOf("/")) || "/";
+			return Object.freeze({
+				canonicalPath,
+				parentPath,
+				entries: Object.freeze(entries),
+				total: allEntries.length,
+				offset: bounded,
+				hasMore: bounded + entries.length < allEntries.length,
+			}) satisfies RemoteWorkspaceDirectoryPage;
+		},
+		async remoteWorkspaceAddRoot(sessionId, path, displayName) {
+			if (!remoteSessions.has(sessionId)) {
+				throw remoteSessionNotFound();
+			}
+			const canonicalPath = remoteMockCanonicalize(path);
+			const tree = remoteMockDirectoryTree();
+			if (!remoteMockIsDirectory(tree, canonicalPath)) {
+				throw entryTypeMismatch();
+			}
+			const identityKey = `${sessionId}\0${canonicalPath}`;
+			let rootId = remoteRootIdentities.get(identityKey);
+			if (rootId === undefined) {
+				rootId = nextDebugSessionId();
+				remoteRootIdentities.set(identityKey, rootId);
+				const root = Object.freeze({
+					rootId,
+					displayName: displayName ?? remoteMockDisplayName(canonicalPath),
+					uri: `plain-workspace://${rootId}/`,
+				}) satisfies WorkspaceRoot;
+				roots.set(rootId, root);
+				trees.set(rootId, buildRemoteMockTree(tree, canonicalPath));
+				revision += 1;
+			}
+			// ADR 0007 §4: Recent recording for a remote root is `F220` S4 scope
+			// (cold-start "needs reconnect" state this slice does not yet
+			// build) — deliberately no `recordRecent()` call here, mirroring
+			// `WorkspaceService::authorize_remote_root`'s own identical
+			// omission.
+			return snapshot();
 		},
 	};
 }

@@ -6,10 +6,13 @@ import {
 	decodeRemoteSessionEventPayload,
 	decodeRemoteSessionStateResult,
 	decodeRemoteVoid,
+	decodeRemoteWorkspaceDirectoryPage,
 	frozenRemoteHostKeyConfirmRequest,
 	frozenRemoteHostTargetRequest,
 	frozenRemoteSessionConnectRequest,
 	frozenRemoteSessionIdRequest,
+	frozenRemoteWorkspaceAddRootRequest,
+	frozenRemoteWorkspacePickDirectoryRequest,
 } from "../../app/platform/tauri/remote-codec";
 
 const sessionId = "00000000-0000-4000-8000-000000000101";
@@ -460,6 +463,218 @@ describe("remote-codec", () => {
 					extra: true,
 				}),
 			).toThrowError(expect.objectContaining(contractError));
+		});
+	});
+
+	describe("frozenRemoteWorkspacePickDirectoryRequest", () => {
+		it("builds a frozen own-data request from valid inputs", () => {
+			const request = frozenRemoteWorkspacePickDirectoryRequest(
+				sessionId,
+				"/home/octocat",
+				0,
+				100,
+			);
+			expect(request).toEqual({
+				sessionId,
+				path: "/home/octocat",
+				offset: 0,
+				limit: 100,
+			});
+			expect(Object.isFrozen(request)).toBe(true);
+		});
+
+		it("rejects a non-UUID sessionId", () => {
+			expect(() =>
+				frozenRemoteWorkspacePickDirectoryRequest("nope", "/", 0, 1),
+			).toThrowError(expect.objectContaining(requestError));
+		});
+
+		it("rejects an empty path", () => {
+			expect(() =>
+				frozenRemoteWorkspacePickDirectoryRequest(sessionId, "", 0, 1),
+			).toThrowError(expect.objectContaining(requestError));
+		});
+
+		it("rejects an oversized path", () => {
+			expect(() =>
+				frozenRemoteWorkspacePickDirectoryRequest(
+					sessionId,
+					"/".repeat(8_193),
+					0,
+					1,
+				),
+			).toThrowError(expect.objectContaining(requestError));
+			expect(() =>
+				frozenRemoteWorkspacePickDirectoryRequest(
+					sessionId,
+					`/${"a".repeat(8_191)}`,
+					0,
+					1,
+				),
+			).not.toThrowError();
+		});
+
+		it("rejects a negative or non-integer offset", () => {
+			expect(() =>
+				frozenRemoteWorkspacePickDirectoryRequest(sessionId, "/", -1, 1),
+			).toThrowError(expect.objectContaining(requestError));
+			expect(() =>
+				frozenRemoteWorkspacePickDirectoryRequest(sessionId, "/", 1.5, 1),
+			).toThrowError(expect.objectContaining(requestError));
+		});
+
+		it("rejects a zero, oversized, or non-integer limit", () => {
+			expect(() =>
+				frozenRemoteWorkspacePickDirectoryRequest(sessionId, "/", 0, 0),
+			).toThrowError(expect.objectContaining(requestError));
+			expect(() =>
+				frozenRemoteWorkspacePickDirectoryRequest(sessionId, "/", 0, 501),
+			).toThrowError(expect.objectContaining(requestError));
+			expect(() =>
+				frozenRemoteWorkspacePickDirectoryRequest(sessionId, "/", 0, 500),
+			).not.toThrowError();
+			expect(() =>
+				frozenRemoteWorkspacePickDirectoryRequest(sessionId, "/", 0, 1.5),
+			).toThrowError(expect.objectContaining(requestError));
+		});
+	});
+
+	describe("decodeRemoteWorkspaceDirectoryPage", () => {
+		const validPage = {
+			canonicalPath: "/home/octocat",
+			parentPath: "/home",
+			entries: Object.freeze(["project", "scratch"]),
+			total: 2,
+			offset: 0,
+			hasMore: false,
+		};
+
+		it("decodes and freezes a well-formed page", () => {
+			const decoded = decodeRemoteWorkspaceDirectoryPage(validPage);
+			expect(decoded).toEqual(validPage);
+			expect(Object.isFrozen(decoded)).toBe(true);
+			expect(Object.isFrozen(decoded.entries)).toBe(true);
+		});
+
+		it("accepts a null parentPath for the filesystem root", () => {
+			const decoded = decodeRemoteWorkspaceDirectoryPage({
+				...validPage,
+				canonicalPath: "/",
+				parentPath: null,
+			});
+			expect(decoded.parentPath).toBeNull();
+		});
+
+		it("rejects a payload with a missing or extra key", () => {
+			const { hasMore: _hasMore, ...missing } = validPage;
+			expect(() => decodeRemoteWorkspaceDirectoryPage(missing)).toThrowError(
+				expect.objectContaining(contractError),
+			);
+			expect(() =>
+				decodeRemoteWorkspaceDirectoryPage({ ...validPage, extra: true }),
+			).toThrowError(expect.objectContaining(contractError));
+		});
+
+		it("rejects a non-array or oversized entries list", () => {
+			expect(() =>
+				decodeRemoteWorkspaceDirectoryPage({
+					...validPage,
+					entries: "project",
+				}),
+			).toThrowError(expect.objectContaining(contractError));
+		});
+
+		it("rejects an entry that is not a non-empty string", () => {
+			expect(() =>
+				decodeRemoteWorkspaceDirectoryPage({
+					...validPage,
+					entries: [""],
+				}),
+			).toThrowError(expect.objectContaining(contractError));
+			expect(() =>
+				decodeRemoteWorkspaceDirectoryPage({
+					...validPage,
+					entries: [42],
+				}),
+			).toThrowError(expect.objectContaining(contractError));
+		});
+
+		it("rejects negative total/offset or a non-boolean hasMore", () => {
+			expect(() =>
+				decodeRemoteWorkspaceDirectoryPage({ ...validPage, total: -1 }),
+			).toThrowError(expect.objectContaining(contractError));
+			expect(() =>
+				decodeRemoteWorkspaceDirectoryPage({ ...validPage, offset: -1 }),
+			).toThrowError(expect.objectContaining(contractError));
+			expect(() =>
+				decodeRemoteWorkspaceDirectoryPage({ ...validPage, hasMore: "no" }),
+			).toThrowError(expect.objectContaining(contractError));
+		});
+
+		it("rejects a Proxy payload", () => {
+			const proxy = new Proxy(validPage, {});
+			expect(() => decodeRemoteWorkspaceDirectoryPage(proxy)).toThrowError(
+				expect.objectContaining(contractError),
+			);
+		});
+	});
+
+	describe("frozenRemoteWorkspaceAddRootRequest", () => {
+		it("builds a frozen own-data request without a display name", () => {
+			const request = frozenRemoteWorkspaceAddRootRequest(
+				sessionId,
+				"/home/octocat/project",
+				undefined,
+			);
+			expect(request).toEqual({
+				sessionId,
+				path: "/home/octocat/project",
+			});
+			expect(Object.isFrozen(request)).toBe(true);
+		});
+
+		it("builds a frozen own-data request with a display name", () => {
+			const request = frozenRemoteWorkspaceAddRootRequest(
+				sessionId,
+				"/home/octocat/project",
+				"My Project",
+			);
+			expect(request).toEqual({
+				sessionId,
+				path: "/home/octocat/project",
+				displayName: "My Project",
+			});
+		});
+
+		it("rejects a non-UUID sessionId", () => {
+			expect(() =>
+				frozenRemoteWorkspaceAddRootRequest("nope", "/", undefined),
+			).toThrowError(expect.objectContaining(requestError));
+		});
+
+		it("rejects an empty or oversized path", () => {
+			expect(() =>
+				frozenRemoteWorkspaceAddRootRequest(sessionId, "", undefined),
+			).toThrowError(expect.objectContaining(requestError));
+			expect(() =>
+				frozenRemoteWorkspaceAddRootRequest(
+					sessionId,
+					"/".repeat(8_193),
+					undefined,
+				),
+			).toThrowError(expect.objectContaining(requestError));
+		});
+
+		it("rejects an empty or oversized display name", () => {
+			expect(() =>
+				frozenRemoteWorkspaceAddRootRequest(sessionId, "/", ""),
+			).toThrowError(expect.objectContaining(requestError));
+			expect(() =>
+				frozenRemoteWorkspaceAddRootRequest(sessionId, "/", "a".repeat(513)),
+			).toThrowError(expect.objectContaining(requestError));
+			expect(() =>
+				frozenRemoteWorkspaceAddRootRequest(sessionId, "/", "a".repeat(512)),
+			).not.toThrowError();
 		});
 	});
 });

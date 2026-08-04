@@ -175,7 +175,31 @@ struct RemoteSessionRecord {
     host: String,
     port: u16,
     user: String,
-    handle: Handle<RemoteClientHandler>,
+    /// Shared, not exclusively owned: [`RemoteSessionService::open_sftp`]
+    /// clones this `Arc` to open a channel concurrently with (and without
+    /// blocking) every other use of the same live SSH session — `Handle`'s
+    /// own `channel_open_session`/`disconnect` both take `&self` (russh's
+    /// `Handle` is a lightweight front end to a background task reached over
+    /// an internal `mpsc`, safe to call concurrently from many owners), so an
+    /// `Arc` is the minimal change that lets `F220` S3's on-demand-per-
+    /// operation SFTP channels coexist with S1's own single-record-per-
+    /// session bookkeeping. Disconnect still closes the *transport*
+    /// deterministically: it is the sole path that removes the record from
+    /// `windows` and sends the disconnect message, so a channel opened just
+    /// before disconnect keeps working only as long as the background task
+    /// this `Arc` keeps alive does (mirrors `shut_down`'s pre-`F220`-S3
+    /// "closing is simply dropping the last handle" contract, now scoped to
+    /// "the last `Arc` clone" instead of "the only owner").
+    handle: Arc<Handle<RemoteClientHandler>>,
+    /// The exact fingerprint the live handshake matched against the pinned
+    /// entry at connect time (see [`RemoteClientHandler::check_server_key`] —
+    /// a session is only ever created once that pin was verified) — this is
+    /// the authoritative `(host, port)` fingerprint for as long as this
+    /// session stays open, and is what `F220` S3's remote-root authorization
+    /// flow uses to build a root's ADR 0007 §2 `(host-key fingerprint,
+    /// canonical path)` identity, without a second known-hosts store lookup
+    /// that could race a concurrent `remote_host_key_forget`/re-pin.
+    host_key_fingerprint: String,
 }
 
 #[derive(Clone, Eq, Hash, PartialEq)]
@@ -380,6 +404,13 @@ impl RemoteSessionService {
         connect_timeout: Duration,
     ) -> Result<RemoteSessionConnectResult, CommandError> {
         let outcome: Arc<Mutex<Option<HostKeyOutcome>>> = Arc::new(Mutex::new(None));
+        // Cloned before the move into `handler` below purely so a
+        // successful connect can report the pinned fingerprint it matched
+        // against without a second known-hosts lookup — see
+        // `RemoteSessionRecord::host_key_fingerprint`'s own doc comment.
+        let expected_fingerprint = expected
+            .as_ref()
+            .map(|pinned| pinned.sha256_fingerprint.clone());
         let handler = RemoteClientHandler {
             host: target.host.clone(),
             port: target.port,
@@ -445,16 +476,23 @@ impl RemoteSessionService {
             result = authenticate_with_agent(&mut handle, agent_socket_path, &target.user) => result,
         };
         if let Err(error) = auth_result {
-            shut_down(handle).await;
+            shut_down(&handle).await;
             return Err(error);
         }
 
+        // A session is only ever constructed once `check_server_key` accepted
+        // the live key against `expected` (see the module doc's "Two-phase
+        // connect" section) — `expected_fingerprint` is therefore always
+        // `Some` here, and holds exactly what the just-completed handshake
+        // matched.
+        let host_key_fingerprint = expected_fingerprint.unwrap_or_default();
         let session_id = RemoteSessionId::new();
         let record = RemoteSessionRecord {
             host: target.host.clone(),
             port: target.port,
             user: target.user.clone(),
-            handle,
+            handle: Arc::new(handle),
+            host_key_fingerprint,
         };
         lock(&self.state.windows)
             .entry(window_label.to_owned())
@@ -487,7 +525,7 @@ impl RemoteSessionService {
         let host = record.host.clone();
         let port = record.port;
         let user = record.user.clone();
-        shut_down(record.handle).await;
+        shut_down(&record.handle).await;
         sink.emit(RemoteSessionEventPayload::Disconnected {
             session_id,
             host,
@@ -639,6 +677,56 @@ impl RemoteSessionService {
             .get(window_label)
             .map_or(0, HashMap::len)
     }
+
+    /// The exact pinned fingerprint `session_id` authenticated against —
+    /// `F220` S3's remote-root authorization flow uses this (never a fresh
+    /// known-hosts lookup) to build a root's ADR 0007 §2 identity, so the
+    /// identity always reflects what this *live* session actually trusts.
+    pub(crate) fn session_host_key_fingerprint(
+        &self,
+        window_label: &str,
+        session_id: RemoteSessionId,
+    ) -> Result<String, CommandError> {
+        lock(&self.state.windows)
+            .get(window_label)
+            .and_then(|sessions| sessions.get(&session_id))
+            .map(|record| record.host_key_fingerprint.clone())
+            .ok_or_else(remote_session_not_found)
+    }
+
+    /// Opens a brand-new SFTP subsystem channel on `session_id`'s live SSH
+    /// connection — `F220` S3's chosen channel-management shape (ADR 0007's
+    /// research doc §2's own "单通道复用或小连接池自定，但有界" allowance):
+    /// one channel per remote filesystem operation rather than a persistent
+    /// pool, opened on demand and closed (via the returned [`SftpSession`]
+    /// being dropped) once that one operation finishes. Concurrency is
+    /// therefore bounded by however many filesystem operations the frontend
+    /// actually has in flight at once — never unbounded, and never a shared
+    /// mutable channel multiple operations could interleave requests on.
+    pub(crate) async fn open_sftp(
+        &self,
+        window_label: &str,
+        session_id: RemoteSessionId,
+    ) -> Result<russh_sftp::client::SftpSession, CommandError> {
+        let handle = {
+            lock(&self.state.windows)
+                .get(window_label)
+                .and_then(|sessions| sessions.get(&session_id))
+                .map(|record| Arc::clone(&record.handle))
+                .ok_or_else(remote_session_not_found)?
+        };
+        let channel = handle
+            .channel_open_session()
+            .await
+            .map_err(|_| super::remote_sftp_unavailable())?;
+        channel
+            .request_subsystem(true, "sftp")
+            .await
+            .map_err(|_| super::remote_sftp_unavailable())?;
+        russh_sftp::client::SftpSession::new(channel.into_stream())
+            .await
+            .map_err(|_| super::remote_sftp_unavailable())
+    }
 }
 
 /// The sole ambient directory open for the whole known-hosts store: created
@@ -701,12 +789,16 @@ async fn wait_for_cancel(flag: &AtomicBool) {
 }
 
 /// Best-effort graceful shutdown: sends a real SSH disconnect message, then
-/// drops the handle (which drops its `Msg` sender, causing the background
-/// session task to notice, exit, and close the underlying socket — see the
-/// module doc). A failure to send the disconnect message is not itself an
-/// error this function reports — the handle is dropped either way, which
-/// alone is sufficient to close the connection.
-async fn shut_down(handle: Handle<RemoteClientHandler>) {
+/// (for the caller's own copy) drops the handle. `disconnect` takes `&self`
+/// (see [`RemoteSessionRecord::handle`]'s own doc comment for why the
+/// session table stores an `Arc` rather than the bare `Handle`), so this
+/// only needs a shared reference — the background session task actually
+/// exits (dropping its `Msg` sender and closing the underlying socket — see
+/// the module doc) once every `Arc` clone, including the one this function
+/// borrowed from, is gone. A failure to send the disconnect message is not
+/// itself an error this function reports — every caller already removes (or
+/// never inserts) the session record either way.
+async fn shut_down(handle: &Handle<RemoteClientHandler>) {
     let _ = handle
         .disconnect(russh::Disconnect::ByApplication, "", "")
         .await;

@@ -6,6 +6,7 @@ import type {
 	RemoteSessionEventPayload,
 	RemoteSessionStateEntry,
 	RemoteSessionStateResult,
+	RemoteWorkspaceDirectoryPage,
 } from "./contracts";
 
 const CONTRACT_ERROR_MESSAGE =
@@ -140,6 +141,13 @@ function isValidPort(value: unknown): value is number {
 		(value as number) >= 1 &&
 		(value as number) <= 65_535
 	);
+}
+
+/** `F220` S3: a type-predicate twin of `isValidPort`, for the (unbounded-
+ * above, non-port) `total`/`offset` fields `remoteWorkspacePickDirectory`
+ * decodes. */
+function isSafeNonNegativeInteger(value: unknown): value is number {
+	return Number.isSafeInteger(value) && (value as number) >= 0;
 }
 
 function remoteRequestInvalid(): never {
@@ -538,4 +546,128 @@ export function decodeRemoteSessionEventPayload(
 		});
 	}
 	return violation();
+}
+
+// --- Remote SSH workspace filesystem (F220 S3) ------------------------------
+
+// Mirrors `remote::dto::MAX_REMOTE_PICK_PATH_CHARS`/`MAX_REMOTE_PICK_PAGE_SIZE`
+// exactly — a hostile-input backstop, not an expected value.
+const MAX_REMOTE_PICK_PATH_CHARS = 8_192;
+const MAX_REMOTE_PICK_PAGE_SIZE = 500;
+/** Generous ceiling on a decoded page's own entry list — well above
+ * `MAX_REMOTE_PICK_PAGE_SIZE` (the *requested* `limit`), purely a defensive
+ * parse bound on a hostile/malformed response. */
+const MAX_REMOTE_PICK_ENTRIES_DECODE = 4_096;
+
+function validateRemotePickPath(path: unknown): asserts path is string {
+	if (
+		typeof path !== "string" ||
+		path.length === 0 ||
+		path.length > MAX_REMOTE_PICK_PATH_CHARS
+	) {
+		remoteRequestInvalid();
+	}
+}
+
+/** Encodes `remote_workspace_pick_directory`'s request. */
+export function frozenRemoteWorkspacePickDirectoryRequest(
+	sessionId: string,
+	path: string,
+	offset: number,
+	limit: number,
+): Readonly<Record<string, unknown>> {
+	if (!isUuidV4(sessionId)) {
+		return remoteRequestInvalid();
+	}
+	validateRemotePickPath(path);
+	if (!Number.isSafeInteger(offset) || offset < 0) {
+		return remoteRequestInvalid();
+	}
+	if (
+		!Number.isSafeInteger(limit) ||
+		limit < 1 ||
+		limit > MAX_REMOTE_PICK_PAGE_SIZE
+	) {
+		return remoteRequestInvalid();
+	}
+	return Object.freeze({ sessionId, path, offset, limit });
+}
+
+/** Decodes `remote_workspace_pick_directory`'s response. */
+export function decodeRemoteWorkspaceDirectoryPage(
+	value: unknown,
+): RemoteWorkspaceDirectoryPage {
+	if (
+		!isPlainObject(value) ||
+		!hasExactKeys(value, [
+			"canonicalPath",
+			"parentPath",
+			"entries",
+			"total",
+			"offset",
+			"hasMore",
+		])
+	) {
+		return violation();
+	}
+	if (
+		typeof value.canonicalPath !== "string" ||
+		value.canonicalPath.length === 0 ||
+		(value.parentPath !== null && typeof value.parentPath !== "string") ||
+		!isSafeNonNegativeInteger(value.total) ||
+		!isSafeNonNegativeInteger(value.offset) ||
+		typeof value.hasMore !== "boolean"
+	) {
+		return violation();
+	}
+	const entries = ownObjectArraySnapshot(
+		value.entries,
+		MAX_REMOTE_PICK_ENTRIES_DECODE,
+		(entry) => {
+			if (
+				typeof entry !== "string" ||
+				entry.length === 0 ||
+				entry.length > MAX_REMOTE_PICK_PATH_CHARS
+			) {
+				return violation();
+			}
+			return entry;
+		},
+	);
+	try {
+		rejectProxyObject(value);
+	} catch {
+		return violation();
+	}
+	return Object.freeze({
+		canonicalPath: value.canonicalPath,
+		parentPath: value.parentPath,
+		entries,
+		total: value.total,
+		offset: value.offset,
+		hasMore: value.hasMore,
+	});
+}
+
+/** Encodes `remote_workspace_add_root`'s request. */
+export function frozenRemoteWorkspaceAddRootRequest(
+	sessionId: string,
+	path: string,
+	displayName: string | undefined,
+): Readonly<Record<string, unknown>> {
+	if (!isUuidV4(sessionId)) {
+		return remoteRequestInvalid();
+	}
+	validateRemotePickPath(path);
+	if (displayName !== undefined) {
+		if (
+			typeof displayName !== "string" ||
+			displayName.length === 0 ||
+			displayName.length > 512
+		) {
+			return remoteRequestInvalid();
+		}
+		return Object.freeze({ sessionId, path, displayName });
+	}
+	return Object.freeze({ sessionId, path });
 }

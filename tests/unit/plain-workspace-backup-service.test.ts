@@ -252,6 +252,8 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		remoteHostKeyForget: notImplemented,
 		remoteHostKeyList: notImplemented,
 		remoteSessionWatchEvent: notImplemented,
+		remoteWorkspacePickDirectory: notImplemented,
+		remoteWorkspaceAddRoot: notImplemented,
 		...overrides,
 	};
 	return { bridge, state };

@@ -236,6 +236,8 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		remoteHostKeyForget: vi.fn(),
 		remoteHostKeyList: vi.fn(),
 		remoteSessionWatchEvent: vi.fn(),
+		remoteWorkspacePickDirectory: vi.fn(),
+		remoteWorkspaceAddRoot: vi.fn(),
 		...overrides,
 	};
 }
@@ -444,6 +446,8 @@ describe("workspace Workbench command overrides", () => {
 			remoteHostKeyForget: vi.fn(),
 			remoteHostKeyList: vi.fn(),
 			remoteSessionWatchEvent: vi.fn(),
+			remoteWorkspacePickDirectory: vi.fn(),
+			remoteWorkspaceAddRoot: vi.fn(),
 		};
 		const contextValues = new Map<string, unknown>([
 			["openFolderWorkspaceSupport", false],

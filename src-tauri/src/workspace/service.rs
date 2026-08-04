@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::error::CommandError;
 use crate::path_policy::RelativePath;
+use crate::remote::session::RemoteSessionService;
 use crate::search::dto::{
     search_not_found, SearchId, WorkspaceSearchFilesQuery, WorkspaceSearchFilesResult,
     WorkspaceSearchTextPollResult, WorkspaceSearchTextQuery, WorkspaceSearchTextStartResult,
@@ -13,8 +14,9 @@ use crate::search::text_search::{self, TextSearchHandle};
 
 use super::dto::{
     DeleteConfirmationId, DeleteEntryId, TrashConfirmationId, TrashEntryId,
-    WorkspaceDeleteBatchPlan, WorkspaceDeleteResult, WorkspaceEntryStat, WorkspaceMoveResult,
-    WorkspaceOpenFileTarget, WorkspaceOpenFilesResult, WorkspacePickRootsMode,
+    WorkspaceDeleteBatchPlan, WorkspaceDeleteEntryKind, WorkspaceDeleteEntryPlan,
+    WorkspaceDeleteIncompleteReason, WorkspaceDeleteResult, WorkspaceEntryStat,
+    WorkspaceMoveResult, WorkspaceOpenFileTarget, WorkspaceOpenFilesResult, WorkspacePickRootsMode,
     WorkspacePickRootsResult, WorkspacePickRootsStatus, WorkspacePickSaveTargetResult,
     WorkspaceReadDirectoryResult, WorkspaceRestoreStatus, WorkspaceSaveTarget, WorkspaceSnapshot,
     WorkspaceTrashBatchPlan, WorkspaceTrashResult, WorkspaceWatchPendingRoot,
@@ -323,7 +325,12 @@ impl WorkspaceService {
         window_label: &str,
         root_id: RootId,
         relative_path: RelativePath,
+        remote: &RemoteSessionService,
     ) -> Result<WorkspaceEntryStat, CommandError> {
+        if let Some(context) = self.remote_context(window_label, root_id)? {
+            return super::remote_backend::stat(remote, window_label, &context, &relative_path)
+                .await;
+        }
         self.run_reader(window_label, root_id, move |lease| {
             reader::stat(&lease, &relative_path)
         })
@@ -335,7 +342,17 @@ impl WorkspaceService {
         window_label: &str,
         root_id: RootId,
         relative_path: RelativePath,
+        remote: &RemoteSessionService,
     ) -> Result<WorkspaceReadDirectoryResult, CommandError> {
+        if let Some(context) = self.remote_context(window_label, root_id)? {
+            return super::remote_backend::read_directory(
+                remote,
+                window_label,
+                &context,
+                &relative_path,
+            )
+            .await;
+        }
         self.run_reader(window_label, root_id, move |lease| {
             reader::read_directory(&lease, &relative_path)
         })
@@ -347,11 +364,57 @@ impl WorkspaceService {
         window_label: &str,
         root_id: RootId,
         relative_path: RelativePath,
+        remote: &RemoteSessionService,
     ) -> Result<Vec<u8>, CommandError> {
+        if let Some(context) = self.remote_context(window_label, root_id)? {
+            return super::remote_backend::read_file(
+                remote,
+                window_label,
+                &context,
+                &relative_path,
+            )
+            .await;
+        }
         self.run_reader(window_label, root_id, move |lease| {
             reader::read_file(&lease, &relative_path)?.into_plr1_frame()
         })
         .await
+    }
+
+    /// `F220` S3: peeks whether `root_id` is remote-backed without taking a
+    /// [`WorkspaceRootLease`] — `Ok(None)` for local (every existing local
+    /// call path is unchanged), `Ok(Some(context))` for remote, `Err` for a
+    /// stale/unauthorized id. See [`super::WorkspaceScope::remote_context`]'s
+    /// own doc comment.
+    fn remote_context(
+        &self,
+        window_label: &str,
+        root_id: RootId,
+    ) -> Result<Option<super::RemoteRootContext>, CommandError> {
+        self.scope_for_window(window_label)?.remote_context(root_id)
+    }
+
+    /// `F220` S3 (ADR 0007 §1): authorizes a remote directory (already
+    /// canonicalized by the caller via `remote::remote_fs::canonicalize_for_root`)
+    /// as a new — or, by identity, existing — workspace root, exactly like
+    /// [`Self::pick_roots`] does for a local directory. No watcher
+    /// registration is ever prepared for a remote root (ADR 0007 §3: remote
+    /// has no realtime watcher).
+    pub(crate) fn authorize_remote_root(
+        &self,
+        window_label: &str,
+        session_id: crate::remote::dto::RemoteSessionId,
+        host_key_fingerprint: &str,
+        canonical_path: &str,
+        display_name: &str,
+    ) -> Result<(RootId, WorkspaceSnapshot), CommandError> {
+        let workspace = self.scope_for_window(window_label)?;
+        workspace.authorize_remote_root(
+            session_id,
+            host_key_fingerprint,
+            canonical_path,
+            display_name,
+        )
     }
 
     /// Read-only, multi-root file search. Does not take the mutation gate
@@ -442,7 +505,19 @@ impl WorkspaceService {
         relative_path: RelativePath,
         expected_version: String,
         content: Vec<u8>,
+        remote: &RemoteSessionService,
     ) -> Result<WorkspaceWriteResult, CommandError> {
+        if let Some(context) = self.remote_context(window_label, root_id)? {
+            return super::remote_backend::write_file(
+                remote,
+                window_label,
+                &context,
+                &relative_path,
+                &expected_version,
+                &content,
+            )
+            .await;
+        }
         self.run_versioned_write(window_label, root_id, move |lease| {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
@@ -471,7 +546,18 @@ impl WorkspaceService {
         root_id: RootId,
         relative_path: RelativePath,
         content: Vec<u8>,
+        remote: &RemoteSessionService,
     ) -> Result<WorkspaceWriteResult, CommandError> {
+        if let Some(context) = self.remote_context(window_label, root_id)? {
+            return super::remote_backend::publish_file(
+                remote,
+                window_label,
+                &context,
+                &relative_path,
+                &content,
+            )
+            .await;
+        }
         self.run_versioned_write(window_label, root_id, move |lease| {
             #[cfg(any(target_os = "linux", target_os = "macos"))]
             {
@@ -494,7 +580,17 @@ impl WorkspaceService {
         window_label: &str,
         root_id: RootId,
         relative_path: RelativePath,
+        remote: &RemoteSessionService,
     ) -> Result<WorkspaceEntryStat, CommandError> {
+        if let Some(context) = self.remote_context(window_label, root_id)? {
+            return super::remote_backend::create_file(
+                remote,
+                window_label,
+                &context,
+                &relative_path,
+            )
+            .await;
+        }
         self.run_mutation(window_label, root_id, move |lease| {
             writer::create_file(&lease, &relative_path)
         })
@@ -506,7 +602,17 @@ impl WorkspaceService {
         window_label: &str,
         root_id: RootId,
         relative_path: RelativePath,
+        remote: &RemoteSessionService,
     ) -> Result<WorkspaceEntryStat, CommandError> {
+        if let Some(context) = self.remote_context(window_label, root_id)? {
+            return super::remote_backend::create_directory(
+                remote,
+                window_label,
+                &context,
+                &relative_path,
+            )
+            .await;
+        }
         self.run_mutation(window_label, root_id, move |lease| {
             writer::create_directory(&lease, &relative_path)
         })
@@ -519,7 +625,18 @@ impl WorkspaceService {
         root_id: RootId,
         source_path: RelativePath,
         target_path: RelativePath,
+        remote: &RemoteSessionService,
     ) -> Result<(), CommandError> {
+        if let Some(context) = self.remote_context(window_label, root_id)? {
+            return super::remote_backend::rename(
+                remote,
+                window_label,
+                &context,
+                &source_path,
+                &target_path,
+            )
+            .await;
+        }
         self.run_mutation(window_label, root_id, move |lease| {
             writer::rename(&lease, &source_path, &target_path)
         })
@@ -590,36 +707,103 @@ impl WorkspaceService {
         &self,
         window_label: &str,
         entries: Vec<(RootId, RelativePath, bool)>,
+        remote: &RemoteSessionService,
     ) -> Result<WorkspaceDeleteBatchPlan, CommandError> {
+        let workspace = self.scope_for_window(window_label)?;
+        let mut remote_entries = Vec::new();
+        let mut local_entries = Vec::new();
+        for (root_id, relative_path, recursive) in entries {
+            match workspace.remote_context(root_id)? {
+                Some(context) => remote_entries.push((root_id, context, relative_path, recursive)),
+                None => local_entries.push((root_id, relative_path, recursive)),
+            }
+        }
+        if !local_entries.is_empty() && !remote_entries.is_empty() {
+            return Err(workspace_delete_mixed_backend_unsupported());
+        }
+        if !remote_entries.is_empty() {
+            return self
+                .prepare_remote_delete(window_label, &workspace, remote_entries, remote)
+                .await;
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            let workspace = self.scope_for_window(window_label)?;
-            tauri::async_runtime::spawn_blocking(move || workspace.prepare_delete(entries))
+            tauri::async_runtime::spawn_blocking(move || workspace.prepare_delete(local_entries))
                 .await
                 .map_err(|_| workspace_delete_failed())?
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = (window_label, entries);
+            let _ = local_entries;
             Err(workspace_delete_unsupported())
         }
+    }
+
+    /// `F220` S3: `stat`s every remote entry (to classify file/directory/
+    /// symlink and, for a directory, produce a best-effort descendant-count
+    /// hint) before installing the batch — mirrors local `prepare_delete`'s
+    /// own "build the whole plan before any commit is possible" shape.
+    async fn prepare_remote_delete(
+        &self,
+        window_label: &str,
+        workspace: &Arc<WindowWorkspace>,
+        entries: Vec<(RootId, super::RemoteRootContext, RelativePath, bool)>,
+        remote: &RemoteSessionService,
+    ) -> Result<WorkspaceDeleteBatchPlan, CommandError> {
+        if entries.is_empty() || entries.len() > 64 {
+            return Err(workspace_delete_mixed_backend_unsupported());
+        }
+        let mut plans = Vec::with_capacity(entries.len());
+        let mut batch_entries = HashMap::with_capacity(entries.len());
+        for (root_id, context, relative_path, recursive) in entries {
+            let stat =
+                super::remote_backend::stat(remote, window_label, &context, &relative_path).await?;
+            let kind = match stat.kind() {
+                super::dto::WorkspaceEntryKind::Directory
+                | super::dto::WorkspaceEntryKind::SymlinkDirectory => {
+                    WorkspaceDeleteEntryKind::Directory
+                }
+                super::dto::WorkspaceEntryKind::Symlink => WorkspaceDeleteEntryKind::Symlink,
+                _ => WorkspaceDeleteEntryKind::File,
+            };
+            let descendants = if matches!(kind, WorkspaceDeleteEntryKind::Directory) {
+                super::remote_backend::count_descendants(
+                    remote,
+                    window_label,
+                    &context,
+                    &relative_path,
+                )
+                .await
+            } else {
+                0
+            };
+            let entry_id = DeleteEntryId::new();
+            plans.push(WorkspaceDeleteEntryPlan::new(entry_id, kind, descendants));
+            batch_entries.insert(entry_id, (root_id, relative_path, recursive));
+        }
+        let confirmation_id = DeleteConfirmationId::new();
+        workspace.install_remote_delete_batch(confirmation_id, batch_entries)?;
+        Ok(WorkspaceDeleteBatchPlan::new(confirmation_id, plans))
     }
 
     pub async fn cancel_delete(
         &self,
         window_label: &str,
         confirmation_id: DeleteConfirmationId,
+        _remote: &RemoteSessionService,
     ) -> Result<(), CommandError> {
+        let workspace = self.scope_for_window(window_label)?;
+        if workspace.cancel_remote_delete_if_matches(confirmation_id)? {
+            return Ok(());
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            let workspace = self.scope_for_window(window_label)?;
             tauri::async_runtime::spawn_blocking(move || workspace.cancel_delete(confirmation_id))
                 .await
                 .map_err(|_| workspace_delete_failed())?
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = (window_label, confirmation_id);
             Err(workspace_delete_unsupported())
         }
     }
@@ -628,17 +812,20 @@ impl WorkspaceService {
         &self,
         window_label: &str,
         confirmation_id: DeleteConfirmationId,
+        _remote: &RemoteSessionService,
     ) -> Result<(), CommandError> {
+        let workspace = self.scope_for_window(window_label)?;
+        if workspace.begin_remote_delete_if_matches(confirmation_id)? {
+            return Ok(());
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            let workspace = self.scope_for_window(window_label)?;
             tauri::async_runtime::spawn_blocking(move || workspace.begin_delete(confirmation_id))
                 .await
                 .map_err(|_| workspace_delete_failed())?
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = (window_label, confirmation_id);
             Err(workspace_delete_unsupported())
         }
     }
@@ -652,10 +839,38 @@ impl WorkspaceService {
         root_id: RootId,
         relative_path: RelativePath,
         recursive: bool,
+        remote: &RemoteSessionService,
     ) -> Result<WorkspaceDeleteResult, CommandError> {
+        let workspace = self.scope_for_window(window_label)?;
+        if let Some(context) = workspace.remote_context(root_id)? {
+            workspace.verify_remote_delete_entry_pending(
+                confirmation_id,
+                entry_id,
+                root_id,
+                &relative_path,
+                recursive,
+            )?;
+            let outcome = super::remote_backend::delete_entry(
+                remote,
+                window_label,
+                &context,
+                &relative_path,
+                recursive,
+            )
+            .await;
+            workspace.finish_remote_delete_entry(confirmation_id, entry_id);
+            let outcome = outcome?;
+            return Ok(if outcome.fully_deleted {
+                WorkspaceDeleteResult::Deleted
+            } else {
+                WorkspaceDeleteResult::incomplete(
+                    WorkspaceDeleteIncompleteReason::DeleteFailed,
+                    outcome.removed_entries,
+                )
+            });
+        }
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            let workspace = self.scope_for_window(window_label)?;
             tauri::async_runtime::spawn_blocking(move || {
                 workspace.commit_delete_entry(
                     confirmation_id,
@@ -670,14 +885,7 @@ impl WorkspaceService {
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
-            let _ = (
-                window_label,
-                confirmation_id,
-                entry_id,
-                root_id,
-                relative_path,
-                recursive,
-            );
+            let _ = (confirmation_id, entry_id, root_id, relative_path, recursive);
             Err(workspace_delete_unsupported())
         }
     }
@@ -687,16 +895,25 @@ impl WorkspaceService {
         window_label: &str,
         entries: Vec<(RootId, RelativePath)>,
     ) -> Result<WorkspaceTrashBatchPlan, CommandError> {
+        // `F220` S3 (ADR "系统 Trash 对远程 root 返回明确不支持"): checked
+        // before anything else — a remote root never reaches the system
+        // Trash even on macOS, since remote content has no local Finder/
+        // Trash concept to move it into.
+        let workspace = self.scope_for_window(window_label)?;
+        for (root_id, _) in &entries {
+            if workspace.remote_context(*root_id)?.is_some() {
+                return Err(remote_trash_unsupported());
+            }
+        }
         #[cfg(target_os = "macos")]
         {
-            let workspace = self.scope_for_window(window_label)?;
             tauri::async_runtime::spawn_blocking(move || workspace.prepare_trash(entries))
                 .await
                 .map_err(|_| workspace_trash_failed())?
         }
         #[cfg(not(target_os = "macos"))]
         {
-            let _ = (window_label, entries);
+            let _ = entries;
             Err(workspace_trash_unsupported())
         }
     }
@@ -1022,6 +1239,7 @@ impl WindowWorkspace {
                 active_delete_batch: None,
                 #[cfg(target_os = "macos")]
                 active_trash_batch: None,
+                active_remote_delete_batch: None,
                 active_text_search: None,
                 initial_restore_status: WorkspaceRestoreStatus::Pending,
                 closed: false,
@@ -1232,6 +1450,37 @@ impl WindowWorkspace {
         state.scope.root_canonical_path(root_id)
     }
 
+    fn remote_context(
+        &self,
+        root_id: RootId,
+    ) -> Result<Option<super::RemoteRootContext>, CommandError> {
+        let state = lock(&self.state)?;
+        ensure_open(&state)?;
+        state.scope.remote_context(root_id)
+    }
+
+    fn authorize_remote_root(
+        &self,
+        session_id: crate::remote::dto::RemoteSessionId,
+        host_key_fingerprint: &str,
+        canonical_path: &str,
+        display_name: &str,
+    ) -> Result<(RootId, WorkspaceSnapshot), CommandError> {
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        let root_id = state.scope.authorize_remote_root(
+            session_id,
+            host_key_fingerprint,
+            canonical_path,
+            display_name,
+        )?;
+        invalidate_delete_batch(&mut state);
+        invalidate_trash_batch(&mut state);
+        invalidate_remote_delete_batch(&mut state);
+        invalidate_text_search(&mut state);
+        Ok((root_id, state.scope.snapshot()))
+    }
+
     fn root_storage_identities(
         &self,
     ) -> Result<Vec<(RootId, WorkspaceRootsIdentity)>, CommandError> {
@@ -1341,6 +1590,7 @@ impl WindowWorkspace {
                 });
                 invalidate_delete_batch(&mut state);
                 invalidate_trash_batch(&mut state);
+                invalidate_remote_delete_batch(&mut state);
                 invalidate_text_search(&mut state);
                 (
                     WorkspacePickRootsResult::new(
@@ -1471,6 +1721,7 @@ impl WindowWorkspace {
                     .collect::<Result<Vec<_>, CommandError>>()?;
                 invalidate_delete_batch(&mut state);
                 invalidate_trash_batch(&mut state);
+                invalidate_remote_delete_batch(&mut state);
                 invalidate_text_search(&mut state);
                 if state.initial_restore_status == WorkspaceRestoreStatus::Pending {
                     state.initial_restore_status = WorkspaceRestoreStatus::None;
@@ -1574,6 +1825,7 @@ impl WindowWorkspace {
                 }
                 invalidate_delete_batch(&mut state);
                 invalidate_trash_batch(&mut state);
+                invalidate_remote_delete_batch(&mut state);
                 invalidate_text_search(&mut state);
                 if state.initial_restore_status == WorkspaceRestoreStatus::Pending {
                     state.initial_restore_status = WorkspaceRestoreStatus::None;
@@ -1763,6 +2015,7 @@ impl WindowWorkspace {
         let removed_registration = state.watch_registrations.remove(&root_id);
         invalidate_delete_batch(&mut state);
         invalidate_trash_batch(&mut state);
+        invalidate_remote_delete_batch(&mut state);
         invalidate_text_search(&mut state);
         let snapshot = state.scope.snapshot();
         let watcher = lock(&self.watcher)?.clone();
@@ -1790,6 +2043,7 @@ impl WindowWorkspace {
         let revoked = std::mem::take(&mut state.watch_registrations);
         invalidate_delete_batch(&mut state);
         invalidate_trash_batch(&mut state);
+        invalidate_remote_delete_batch(&mut state);
         invalidate_text_search(&mut state);
         let snapshot = state.scope.snapshot();
         let watcher = lock(&self.watcher)?.clone();
@@ -1823,6 +2077,138 @@ impl WindowWorkspace {
             Ok(())
         } else {
             Err(root_not_authorized())
+        }
+    }
+
+    /// `F220` S3: installs a freshly-built remote delete batch — the sole
+    /// mutator [`WorkspaceService::prepare_remote_delete`] uses once it has
+    /// finished `stat`-ing every entry. Fails with
+    /// [`workspace_delete_conflict`] if a batch (local *or* remote) is
+    /// already active, mirroring local `prepare_delete`'s own "one
+    /// delete/Trash confirmation per window" invariant.
+    fn install_remote_delete_batch(
+        &self,
+        confirmation_id: DeleteConfirmationId,
+        entries: HashMap<DeleteEntryId, (RootId, RelativePath, bool)>,
+    ) -> Result<(), CommandError> {
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        discard_expired_remote_delete_batch(&mut state, Instant::now());
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        discard_expired_delete_batch(&mut state, (self.delete_clock)());
+        if state.active_remote_delete_batch.is_some()
+            || mutation_receipt_active_including_remote(&state)
+        {
+            return Err(workspace_delete_conflict());
+        }
+        state.active_remote_delete_batch = Some(RemoteDeleteBatch {
+            confirmation_id,
+            entries,
+            begun: false,
+            idle_deadline: remote_delete_deadline(Instant::now())?,
+        });
+        Ok(())
+    }
+
+    /// `Ok(true)` when `confirmation_id` named the active remote batch (now
+    /// cancelled); `Ok(false)` when no remote batch matched, so the caller
+    /// should fall back to checking the local batch instead.
+    fn cancel_remote_delete_if_matches(
+        &self,
+        confirmation_id: DeleteConfirmationId,
+    ) -> Result<bool, CommandError> {
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        discard_expired_remote_delete_batch(&mut state, Instant::now());
+        let matches = state
+            .active_remote_delete_batch
+            .as_ref()
+            .is_some_and(|batch| batch.confirmation_id == confirmation_id);
+        if matches {
+            state.active_remote_delete_batch = None;
+        }
+        Ok(matches)
+    }
+
+    /// `Ok(true)` when `confirmation_id` named the active remote batch (now
+    /// marked begun); `Ok(false)` when no remote batch matched.
+    fn begin_remote_delete_if_matches(
+        &self,
+        confirmation_id: DeleteConfirmationId,
+    ) -> Result<bool, CommandError> {
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        discard_expired_remote_delete_batch(&mut state, Instant::now());
+        let Some(batch) = state.active_remote_delete_batch.as_mut() else {
+            return Ok(false);
+        };
+        if batch.confirmation_id != confirmation_id {
+            return Ok(false);
+        }
+        batch.begun = true;
+        batch.idle_deadline = remote_delete_deadline(Instant::now())?;
+        Ok(true)
+    }
+
+    /// Verifies `(confirmation_id, entry_id)` names a pending, begun entry
+    /// in the active remote batch, and that the caller's own
+    /// `(root_id, relative_path, recursive)` matches exactly what was
+    /// planned for it — mirrors local `commit_delete_entry`'s own defense
+    /// against a caller replaying a stale or mismatched commit request.
+    fn verify_remote_delete_entry_pending(
+        &self,
+        confirmation_id: DeleteConfirmationId,
+        entry_id: DeleteEntryId,
+        root_id: RootId,
+        relative_path: &RelativePath,
+        recursive: bool,
+    ) -> Result<(), CommandError> {
+        let state = lock(&self.state)?;
+        ensure_open(&state)?;
+        let Some(batch) = state.active_remote_delete_batch.as_ref() else {
+            return Err(workspace_delete_plan_invalid());
+        };
+        if batch.confirmation_id != confirmation_id || !batch.begun {
+            return Err(workspace_delete_plan_invalid());
+        }
+        match batch.entries.get(&entry_id) {
+            Some((expected_root, expected_path, expected_recursive))
+                if *expected_root == root_id
+                    && expected_path == relative_path
+                    && *expected_recursive == recursive =>
+            {
+                Ok(())
+            }
+            _ => Err(workspace_delete_plan_invalid()),
+        }
+    }
+
+    /// Removes `entry_id` from the active remote batch once its commit has
+    /// resolved (success or failure — an attempted commit is not retryable,
+    /// exactly like local's own single-shot-per-entry contract). Discards
+    /// the whole batch once every entry has been committed. Best-effort: a
+    /// lock-acquisition failure here never propagates, since the actual
+    /// delete outcome (already computed by the caller) must still be
+    /// returned to the frontend regardless.
+    fn finish_remote_delete_entry(
+        &self,
+        confirmation_id: DeleteConfirmationId,
+        entry_id: DeleteEntryId,
+    ) {
+        let Ok(mut state) = lock(&self.state) else {
+            return;
+        };
+        let Some(batch) = state.active_remote_delete_batch.as_mut() else {
+            return;
+        };
+        if batch.confirmation_id != confirmation_id {
+            return;
+        }
+        batch.entries.remove(&entry_id);
+        if batch.entries.is_empty() {
+            state.active_remote_delete_batch = None;
+        } else if let Ok(deadline) = remote_delete_deadline(Instant::now()) {
+            batch.idle_deadline = deadline;
         }
     }
 
@@ -2188,6 +2574,7 @@ impl WindowWorkspace {
         state.watch_registrations.clear();
         invalidate_delete_batch(&mut state);
         invalidate_trash_batch(&mut state);
+        invalidate_remote_delete_batch(&mut state);
         // Taken (not just cleared) so the search task's thread-join — bounded
         // and fast, but still a blocking operation — happens after the state
         // and mutation locks are released below, the same way `watcher.close()`
@@ -2217,9 +2604,32 @@ struct WindowWorkspaceState {
     active_delete_batch: Option<DeleteBatchReceipt>,
     #[cfg(target_os = "macos")]
     active_trash_batch: Option<TrashBatchReceipt>,
+    /// `F220` S3: the remote-root twin of `active_delete_batch` — kept as a
+    /// wholly separate field (rather than unifying the two) so the existing,
+    /// already-verified local delete state machine is never touched by this
+    /// slice; see [`workspace_delete_mixed_backend_unsupported`] for why a
+    /// batch can never straddle both. Available on every platform (remote
+    /// delete has no OS-specific dependency, unlike local's own `rustix`-
+    /// based implementation).
+    active_remote_delete_batch: Option<RemoteDeleteBatch>,
     active_text_search: Option<ActiveTextSearch>,
     initial_restore_status: WorkspaceRestoreStatus,
     closed: bool,
+}
+
+/// `F220` S3's own minimal delete-confirmation batch for remote-backed
+/// entries — deliberately much simpler than local's `DeleteBatchReceipt`
+/// (no device/inode race verification: that concept does not exist over
+/// SFTP). Each entry independently resolves its own root's
+/// [`super::RemoteRootContext`] at commit time, so — unlike a hypothetical
+/// single-root design — one batch may freely span multiple different
+/// remote roots (even different SSH sessions), exactly like local batches
+/// already may.
+struct RemoteDeleteBatch {
+    confirmation_id: DeleteConfirmationId,
+    entries: HashMap<DeleteEntryId, (RootId, RelativePath, bool)>,
+    begun: bool,
+    idle_deadline: Instant,
 }
 
 fn ensure_open(state: &WindowWorkspaceState) -> Result<(), CommandError> {
@@ -2251,6 +2661,25 @@ fn invalidate_delete_batch(state: &mut WindowWorkspaceState) {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn invalidate_delete_batch(_state: &mut WindowWorkspaceState) {}
 
+fn invalidate_remote_delete_batch(state: &mut WindowWorkspaceState) {
+    state.active_remote_delete_batch = None;
+}
+
+fn discard_expired_remote_delete_batch(state: &mut WindowWorkspaceState, now: Instant) {
+    if state
+        .active_remote_delete_batch
+        .as_ref()
+        .is_some_and(|batch| batch.idle_deadline <= now)
+    {
+        state.active_remote_delete_batch = None;
+    }
+}
+
+fn remote_delete_deadline(now: Instant) -> Result<Instant, CommandError> {
+    now.checked_add(DELETE_BATCH_IDLE_TTL)
+        .ok_or_else(workspace_delete_failed)
+}
+
 #[cfg(target_os = "macos")]
 fn invalidate_trash_batch(state: &mut WindowWorkspaceState) {
     state.active_trash_batch = None;
@@ -2265,6 +2694,23 @@ fn mutation_receipt_active(state: &WindowWorkspaceState) -> bool {
     #[cfg(target_os = "macos")]
     let active = active || state.active_trash_batch.is_some();
     active
+}
+
+/// `F220` S3: [`mutation_receipt_active`] extended to also cover the remote
+/// delete batch — available on every platform (unlike `mutation_receipt_active`
+/// itself, which stays local-delete/-Trash-only and unix-gated).
+fn mutation_receipt_active_including_remote(state: &WindowWorkspaceState) -> bool {
+    if state.active_remote_delete_batch.is_some() {
+        return true;
+    }
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        mutation_receipt_active(state)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        false
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -2381,12 +2827,10 @@ fn workspace_copy_failed() -> CommandError {
     CommandError::new("IO_FAILED", "The workspace entry could not be copied.")
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn workspace_delete_failed() -> CommandError {
     CommandError::new("IO_FAILED", "The workspace entry could not be deleted.")
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn workspace_delete_conflict() -> CommandError {
     CommandError::new(
         "WORKSPACE_CONFLICT",
@@ -2394,7 +2838,6 @@ fn workspace_delete_conflict() -> CommandError {
     )
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn workspace_delete_plan_invalid() -> CommandError {
     CommandError::new(
         "WORKSPACE_DELETE_PLAN_INVALID",
@@ -2407,6 +2850,19 @@ fn workspace_delete_unsupported() -> CommandError {
     CommandError::new(
         "IO_FAILED",
         "Permanent workspace delete is not supported on this platform.",
+    )
+}
+
+/// `F220` S3: a delete/trash batch may not mix local- and remote-backed
+/// entries — each backend's confirmation-chain state is independent and
+/// this slice deliberately does not unify them (a disclosed scope
+/// narrowing; the overwhelmingly common case is a single-root selection
+/// anyway). Distinct from [`workspace_delete_plan_invalid`] (a stale/
+/// consumed plan) — this is a plan that was never valid to request.
+fn workspace_delete_mixed_backend_unsupported() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_DELETE_PLAN_INVALID",
+        "A delete batch cannot mix local and remote workspace roots.",
     )
 }
 
@@ -2439,6 +2895,21 @@ fn workspace_trash_unsupported() -> CommandError {
     CommandError::new(
         "WORKSPACE_TRASH_UNAVAILABLE",
         "System Trash is not available on this platform.",
+    )
+}
+
+/// `F220` S3 (ADR "系统 Trash 对远程 root 返回明确不支持"): a remote root
+/// has no local Finder/Trash concept to move an entry into — distinct from
+/// [`workspace_trash_unsupported`] (Trash unavailable on this *platform*
+/// regardless of root) so the frontend/tests can tell "this OS has no
+/// Trash" from "this specific root cannot use Trash" if that distinction
+/// ever matters; today both map to the same wire code, matching the
+/// existing `WORKSPACE_TRASH_UNAVAILABLE` contract the frontend already
+/// handles.
+fn remote_trash_unsupported() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_TRASH_UNAVAILABLE",
+        "System Trash is not available for a remote workspace root.",
     )
 }
 

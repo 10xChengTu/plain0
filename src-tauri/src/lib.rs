@@ -162,6 +162,7 @@ pub fn run() {
             workspace::commands::workspace_cancel_trash,
             workspace::commands::workspace_begin_trash,
             workspace::commands::workspace_commit_trash_entry,
+            workspace::commands::remote_workspace_add_root,
             git::commands::git_status,
             git::commands::git_diff_files,
             git::commands::git_show_blob,
@@ -283,6 +284,7 @@ pub fn run() {
             remote::commands::remote_session_state,
             remote::commands::remote_host_key_forget,
             remote::commands::remote_host_key_list,
+            remote::commands::remote_workspace_pick_directory,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Plain")

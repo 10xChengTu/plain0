@@ -212,6 +212,8 @@ function fakeBridge(
 		remoteHostKeyForget: notImplemented,
 		remoteHostKeyList: notImplemented,
 		remoteSessionWatchEvent: notImplemented,
+		remoteWorkspacePickDirectory: notImplemented,
+		remoteWorkspaceAddRoot: notImplemented,
 	};
 }
 
@@ -439,6 +441,8 @@ function fakeTextSearchBridge(
 		remoteHostKeyForget: notImplemented,
 		remoteHostKeyList: notImplemented,
 		remoteSessionWatchEvent: notImplemented,
+		remoteWorkspacePickDirectory: notImplemented,
+		remoteWorkspaceAddRoot: notImplemented,
 	};
 
 	return {

@@ -240,6 +240,8 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		remoteHostKeyForget: notImplemented,
 		remoteHostKeyList: notImplemented,
 		remoteSessionWatchEvent: notImplemented,
+		remoteWorkspacePickDirectory: notImplemented,
+		remoteWorkspaceAddRoot: notImplemented,
 		...overrides,
 	};
 }

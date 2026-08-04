@@ -526,6 +526,14 @@ interface TestRemoteFixture {
 		Record<string, TestRemoteConnectOutcome>
 	>;
 	readonly changedHostKeyTargetsForTest?: readonly string[];
+	/** `F220` S3: the mock's own remote-filesystem browse tree, keyed by
+	 * absolute POSIX path (every ancestor directory must have its own entry —
+	 * this fixture never fabricates intermediate directories). Defaults to a
+	 * small built-in `/home/octocat` tree when omitted, mirroring
+	 * `app/platform/tauri/browser-mock.ts`'s own `directoryTreeForTest`. */
+	readonly directoryTreeForTest?: Readonly<
+		Record<string, "directory" | Readonly<{ content: string }>>
+	>;
 }
 
 async function installNativeIpcMock(
@@ -672,9 +680,21 @@ async function installNativeIpcMock(
 				revision: 2,
 				roots: [],
 			};
-			let currentSnapshot:
-				typeof emptySnapshot | typeof selectedSnapshot | typeof closedSnapshot =
-				emptySnapshot;
+			// `F220` S3: widened from the original fixed three-literal union so a
+			// `remote_workspace_add_root` case can append a fourth, dynamically
+			// authorized root — every pre-existing assignment below still assigns
+			// one of the original fixed snapshots unchanged.
+			interface MockWorkspaceRoot {
+				rootId: string;
+				displayName: string;
+				uri: string;
+			}
+			interface MockWorkspaceSnapshot {
+				workspaceId: string;
+				revision: number;
+				roots: MockWorkspaceRoot[];
+			}
+			let currentSnapshot: MockWorkspaceSnapshot = emptySnapshot;
 			type MockFile = {
 				kind: "file";
 				bytes: Uint8Array;
@@ -1044,8 +1064,16 @@ async function installNativeIpcMock(
 			});
 			const pathSegments = (relativePath: string): readonly string[] =>
 				relativePath.length === 0 ? [] : relativePath.split("/");
-			const resolveNode = (relativePath: string): MockNode => {
-				let node: MockNode = root;
+			// `F220` S3: every one of these four helpers grew an optional trailing
+			// `tree` parameter defaulting to the fixed native `root` — every one
+			// of their ~20 pre-existing call sites keeps its old one-argument
+			// shape unchanged, while the new remote-root case blocks below pass a
+			// specific remote root's own tree explicitly (see `treeForRootId`).
+			const resolveNode = (
+				relativePath: string,
+				tree: MockDirectory = root,
+			): MockNode => {
+				let node: MockNode = tree;
 				for (const segment of pathSegments(relativePath)) {
 					if (node.kind !== "directory") {
 						throw entryTypeMismatch();
@@ -1060,6 +1088,7 @@ async function installNativeIpcMock(
 			};
 			const resolveParent = (
 				relativePath: string,
+				tree: MockDirectory = root,
 			): { parent: MockDirectory; name: string } => {
 				const segments = pathSegments(relativePath);
 				if (segments.length === 0) {
@@ -1067,14 +1096,17 @@ async function installNativeIpcMock(
 				}
 				const name = segments.at(-1)!;
 				const parentPath = segments.slice(0, -1).join("/");
-				const parent = resolveNode(parentPath);
+				const parent = resolveNode(parentPath, tree);
 				if (parent.kind !== "directory") {
 					throw entryTypeMismatch();
 				}
 				return { parent, name };
 			};
-			const deleteNode = (relativePath: string): void => {
-				const { parent, name } = resolveParent(relativePath);
+			const deleteNode = (
+				relativePath: string,
+				tree: MockDirectory = root,
+			): void => {
+				const { parent, name } = resolveParent(relativePath, tree);
 				if (!parent.entries.delete(name)) {
 					throw entryNotFound();
 				}
@@ -1801,6 +1833,10 @@ async function installNativeIpcMock(
 				| {
 						confirmationId: string;
 						entryId: string;
+						// `F220` S3: the entry's own owning root, so a remote-root
+						// delete batch resolves its tree the same way every other
+						// case does — see `treeForRootId`.
+						rootId: string;
 						relativePath: string;
 						recursive: boolean;
 						phase: "prepared" | "executing";
@@ -1936,6 +1972,32 @@ async function installNativeIpcMock(
 					content: string,
 					emitWake: boolean,
 				): void;
+				/** `F220` S3: the remote-root analogue of
+				 * `__PLAIN_TEST_EXTERNAL_WRITE__` — bumps an already-authorized
+				 * remote root's file version out from under the frontend, bypassing
+				 * IPC entirely, with no watcher wake (a remote root has none; only
+				 * `Plain: Refresh Remote Folder` rescans it). */
+				__PLAIN_TEST_EXTERNAL_WRITE_REMOTE__(
+					targetRootId: string,
+					relativePath: string,
+					content: string,
+				): void;
+				/** `F220` S3: the remote-root analogue of
+				 * `__PLAIN_TEST_EXTERNAL_CREATE__` — adds a new entry directly to an
+				 * already-authorized remote root's tree, bypassing IPC and any
+				 * watcher wake, so a test can prove `Plain: Refresh Remote Folder`
+				 * really does drive a fresh `workspace_read_dir` rather than reading
+				 * from a stale cache. */
+				__PLAIN_TEST_EXTERNAL_CREATE_REMOTE__(
+					targetRootId: string,
+					relativePath: string,
+					kind: "file" | "directory",
+				): void;
+				/** `F220` S3 — every remote root this mock has authorized so far
+				 * (via `remote_workspace_add_root`), in authorization order; mirrors
+				 * `__PLAIN_TEST_DEBUG_SESSION_IDS__`'s identical "expose otherwise
+				 * server-generated ids back to the test" shape. */
+				__PLAIN_TEST_REMOTE_ROOT_IDS__(): readonly string[];
 				__PLAIN_TEST_EMIT_DEBUG_EVENT__(
 					sessionId: string,
 					event: string,
@@ -2438,6 +2500,151 @@ async function installNativeIpcMock(
 				string,
 				{ host: string; port: number; user: string }
 			>();
+			// `F220` S3 — a second, independent "remote filesystem" the mock
+			// serves purely in-memory: `remoteWorkspaceTree` is what
+			// `remote_workspace_pick_directory` browses (unconfined, mirrors real
+			// SFTP browsing before any root is authorized), and
+			// `remoteRootTrees` holds one entry per root a test has actually
+			// authorized via `remote_workspace_add_root`, each pointing at the
+			// exact subtree `remoteWorkspaceTree` had at that path — from then on
+			// every `workspace_*` case dispatches to it exactly like the fixed
+			// native `root` tree, via `treeForRootId` below.
+			function buildRemoteWorkspaceTree(
+				flat: Readonly<
+					Record<string, "directory" | Readonly<{ content: string }>>
+				>,
+			): MockDirectory {
+				const tree: MockDirectory = directory([]);
+				const sortedPaths = Object.keys(flat).sort(
+					(left, right) => left.split("/").length - right.split("/").length,
+				);
+				for (const absolutePath of sortedPaths) {
+					const segments = absolutePath.split("/").filter((s) => s.length > 0);
+					if (segments.length === 0) {
+						continue;
+					}
+					let parent = tree;
+					for (const segment of segments.slice(0, -1)) {
+						const next = parent.entries.get(segment);
+						if (next === undefined || next.kind !== "directory") {
+							throw new Error(
+								"Invalid remote directoryTreeForTest: missing ancestor directory.",
+							);
+						}
+						parent = next;
+					}
+					const leafName = segments.at(-1)!;
+					const spec = flat[absolutePath]!;
+					parent.entries.set(
+						leafName,
+						spec === "directory" ? directory([]) : file(spec.content),
+					);
+				}
+				return tree;
+			}
+			const remoteWorkspaceTree = buildRemoteWorkspaceTree(
+				remoteFixtureForTest.directoryTreeForTest ?? {
+					"/home": "directory",
+					"/home/octocat": "directory",
+					"/home/octocat/project": "directory",
+					"/home/octocat/project/main.ts": {
+						content: "export const remoteMain = true;\n",
+					},
+					"/home/octocat/scratch": "directory",
+				},
+			);
+			function remoteWorkspaceDirectoryAt(absolutePath: string): MockDirectory {
+				const segments = absolutePath.split("/").filter((s) => s.length > 0);
+				let node: MockNode = remoteWorkspaceTree;
+				for (const segment of segments) {
+					if (node.kind !== "directory") {
+						throw entryTypeMismatch();
+					}
+					const child = node.entries.get(segment);
+					if (child === undefined) {
+						throw entryNotFound();
+					}
+					node = child;
+				}
+				if (node.kind !== "directory") {
+					throw entryTypeMismatch();
+				}
+				return node;
+			}
+			function remoteNormalizePath(path: string): string {
+				const segments = path.split("/").filter((s) => s.length > 0);
+				return segments.length === 0 ? "/" : `/${segments.join("/")}`;
+			}
+			const remoteRootTrees = new Map<string, MockDirectory>();
+			let remoteRootSerial = 601;
+			const nextRemoteRootId = (): string =>
+				`00000000-0000-4000-8000-${(remoteRootSerial++)
+					.toString()
+					.padStart(12, "0")}`;
+			function treeForRootId(id: string | undefined): MockDirectory {
+				if (id === rootId) {
+					return root;
+				}
+				const remoteTree =
+					id === undefined ? undefined : remoteRootTrees.get(id);
+				if (remoteTree !== undefined) {
+					return remoteTree;
+				}
+				throw entryNotFound();
+			}
+			function remoteDisplayNameFor(canonicalPath: string): string {
+				const segments = canonicalPath.split("/").filter((s) => s.length > 0);
+				return segments.at(-1) ?? "remote";
+			}
+			function remoteRequestInvalid() {
+				return {
+					code: "REMOTE_REQUEST_INVALID",
+					message: "The remote workspace request is invalid.",
+				};
+			}
+			function remoteNotADirectory() {
+				return {
+					code: "ENTRY_TYPE_MISMATCH",
+					message: "The remote entry has an incompatible type.",
+				};
+			}
+			testWindow.__PLAIN_TEST_EXTERNAL_WRITE_REMOTE__ = (
+				targetRootId,
+				relativePath,
+				content,
+			) => {
+				const tree = remoteRootTrees.get(targetRootId);
+				if (tree === undefined || typeof content !== "string") {
+					throw new Error("Invalid external remote workspace test change.");
+				}
+				const existing = resolveNode(relativePath, tree);
+				if (existing.kind !== "file") {
+					throw new Error("Invalid external remote workspace test change.");
+				}
+				existing.bytes = encoder.encode(content);
+				existing.version = nextVersion();
+			};
+			testWindow.__PLAIN_TEST_EXTERNAL_CREATE_REMOTE__ = (
+				targetRootId,
+				relativePath,
+				kind,
+			) => {
+				const tree = remoteRootTrees.get(targetRootId);
+				if (tree === undefined) {
+					throw new Error("Invalid external remote workspace test change.");
+				}
+				const { parent, name } = resolveParent(relativePath, tree);
+				if (parent.entries.has(name)) {
+					throw new Error("Invalid external remote workspace test change.");
+				}
+				parent.entries.set(
+					name,
+					kind === "file" ? file(`external:${name}\n`) : directory([]),
+				);
+			};
+			testWindow.__PLAIN_TEST_REMOTE_ROOT_IDS__ = () => [
+				...remoteRootTrees.keys(),
+			];
 			function remoteAgentAuthRejected() {
 				return {
 					code: "REMOTE_AGENT_AUTH_REJECTED",
@@ -3321,8 +3528,10 @@ async function installNativeIpcMock(
 								contentHex: hexFromBytes(frame.content),
 							},
 						});
-						if (frame.rootId !== rootId) throw entryNotFound();
-						const target = resolveParent(frame.relativePath);
+						const target = resolveParent(
+							frame.relativePath,
+							treeForRootId(frame.rootId),
+						);
 						if (target.parent.entries.has(target.name)) {
 							throw entryAlreadyExists();
 						}
@@ -3360,10 +3569,10 @@ async function installNativeIpcMock(
 								contentHex: hexFromBytes(frame.content),
 							},
 						});
-						if (frame.rootId !== rootId) {
-							throw entryNotFound();
-						}
-						const node = resolveNode(frame.relativePath);
+						const node = resolveNode(
+							frame.relativePath,
+							treeForRootId(frame.rootId),
+						);
 						if (node.kind !== "file") {
 							throw entryTypeMismatch();
 						}
@@ -3604,11 +3813,11 @@ async function installNativeIpcMock(
 							};
 						}
 						case "workspace_create_file": {
-							if (request?.rootId !== rootId) {
-								throw entryNotFound();
-							}
-							const relativePath = request.relativePath ?? "";
-							const { parent, name } = resolveParent(relativePath);
+							const relativePath = request?.relativePath ?? "";
+							const { parent, name } = resolveParent(
+								relativePath,
+								treeForRootId(request?.rootId),
+							);
 							if (parent.entries.has(name)) {
 								throw entryAlreadyExists();
 							}
@@ -3622,11 +3831,11 @@ async function installNativeIpcMock(
 							};
 						}
 						case "workspace_create_directory": {
-							if (request?.rootId !== rootId) {
-								throw entryNotFound();
-							}
-							const relativePath = request.relativePath ?? "";
-							const { parent, name } = resolveParent(relativePath);
+							const relativePath = request?.relativePath ?? "";
+							const { parent, name } = resolveParent(
+								relativePath,
+								treeForRootId(request?.rootId),
+							);
 							if (parent.entries.has(name)) {
 								throw entryAlreadyExists();
 							}
@@ -3683,13 +3892,11 @@ async function installNativeIpcMock(
 										targetPath?: string;
 								  }
 								| undefined;
-							if (rename?.rootId !== rootId) {
-								throw entryNotFound();
-							}
-							const sourcePath = rename.sourcePath ?? "";
-							const targetPath = rename.targetPath ?? "";
-							const source = resolveParent(sourcePath);
-							const target = resolveParent(targetPath);
+							const renameTree = treeForRootId(rename?.rootId);
+							const sourcePath = rename?.sourcePath ?? "";
+							const targetPath = rename?.targetPath ?? "";
+							const source = resolveParent(sourcePath, renameTree);
+							const target = resolveParent(targetPath, renameTree);
 							const node = source.parent.entries.get(source.name);
 							if (node === undefined) {
 								throw entryNotFound();
@@ -3716,18 +3923,24 @@ async function installNativeIpcMock(
 								activeDelete !== undefined ||
 								activeTrash !== undefined ||
 								prepare?.entries?.length !== 1 ||
-								entry?.rootId !== rootId ||
+								entry?.rootId === undefined ||
+								(entry.rootId !== rootId &&
+									!remoteRootTrees.has(entry.rootId)) ||
 								typeof entry.relativePath !== "string" ||
 								entry.recursive !== true
 							) {
 								throw invalidDeletePlan();
 							}
-							const node = resolveNode(entry.relativePath);
+							const node = resolveNode(
+								entry.relativePath,
+								treeForRootId(entry.rootId),
+							);
 							const confirmationId = nextDeleteId();
 							const entryId = nextDeleteId();
 							activeDelete = {
 								confirmationId,
 								entryId,
+								rootId: entry.rootId,
 								relativePath: entry.relativePath,
 								recursive: true,
 								phase: "prepared",
@@ -3779,13 +3992,16 @@ async function installNativeIpcMock(
 								activeDelete?.phase !== "executing" ||
 								commit?.confirmationId !== activeDelete.confirmationId ||
 								commit.entryId !== activeDelete.entryId ||
-								commit.rootId !== rootId ||
+								commit.rootId !== activeDelete.rootId ||
 								commit.relativePath !== activeDelete.relativePath ||
 								commit.recursive !== activeDelete.recursive
 							) {
 								throw invalidDeletePlan();
 							}
-							deleteNode(activeDelete.relativePath);
+							deleteNode(
+								activeDelete.relativePath,
+								treeForRootId(activeDelete.rootId),
+							);
 							activeDelete = undefined;
 							return { status: "deleted" };
 						}
@@ -3882,10 +4098,10 @@ async function installNativeIpcMock(
 						}
 						case "workspace_stat": {
 							const relativePath = request?.relativePath ?? "";
-							if (request?.rootId !== rootId) {
-								throw entryNotFound();
-							}
-							const node = resolveNode(relativePath);
+							const node = resolveNode(
+								relativePath,
+								treeForRootId(request?.rootId),
+							);
 							return {
 								kind: node.kind,
 								size: node.kind === "file" ? node.bytes.byteLength : 0,
@@ -3896,10 +4112,10 @@ async function installNativeIpcMock(
 						}
 						case "workspace_read_dir": {
 							const relativePath = request?.relativePath ?? "";
-							if (request?.rootId !== rootId) {
-								throw entryNotFound();
-							}
-							const node = resolveNode(relativePath);
+							const node = resolveNode(
+								relativePath,
+								treeForRootId(request?.rootId),
+							);
 							if (node.kind !== "directory") {
 								throw entryTypeMismatch();
 							}
@@ -4037,10 +4253,10 @@ async function installNativeIpcMock(
 						}
 						case "workspace_read_file": {
 							const relativePath = request?.relativePath ?? "";
-							if (request?.rootId !== rootId) {
-								throw entryNotFound();
-							}
-							const node = resolveNode(relativePath);
+							const node = resolveNode(
+								relativePath,
+								treeForRootId(request?.rootId),
+							);
 							if (node.kind !== "file") {
 								throw entryTypeMismatch();
 							}
@@ -4648,6 +4864,93 @@ async function installNativeIpcMock(
 										: left.host.localeCompare(right.host),
 								);
 							return { entries };
+						}
+						case "remote_workspace_pick_directory": {
+							const pickRequest = args.request as
+								| {
+										sessionId?: string;
+										path?: string;
+										offset?: number;
+										limit?: number;
+								  }
+								| undefined;
+							if (
+								pickRequest === undefined ||
+								!remoteSessions.has(pickRequest.sessionId ?? "") ||
+								typeof pickRequest.path !== "string" ||
+								typeof pickRequest.offset !== "number" ||
+								typeof pickRequest.limit !== "number"
+							) {
+								throw pickRequest !== undefined &&
+									!remoteSessions.has(pickRequest.sessionId ?? "")
+									? remoteSessionNotFound()
+									: remoteRequestInvalid();
+							}
+							const canonicalPath = remoteNormalizePath(pickRequest.path);
+							const directoryNode = remoteWorkspaceDirectoryAt(canonicalPath);
+							const allNames = [...directoryNode.entries.entries()]
+								.filter(([, child]) => child.kind === "directory")
+								.map(([name]) => name)
+								.sort((left, right) => left.localeCompare(right));
+							const page = allNames.slice(
+								pickRequest.offset,
+								pickRequest.offset + pickRequest.limit,
+							);
+							const parentSegments = canonicalPath
+								.split("/")
+								.filter((s) => s.length > 0);
+							parentSegments.pop();
+							const parentPath =
+								canonicalPath === "/"
+									? null
+									: parentSegments.length === 0
+										? "/"
+										: `/${parentSegments.join("/")}`;
+							return {
+								canonicalPath,
+								parentPath,
+								entries: page,
+								total: allNames.length,
+								offset: pickRequest.offset,
+								hasMore: pickRequest.offset + page.length < allNames.length,
+							};
+						}
+						case "remote_workspace_add_root": {
+							const addRootRequest = args.request as
+								| { sessionId?: string; path?: string; displayName?: string }
+								| undefined;
+							if (
+								addRootRequest === undefined ||
+								!remoteSessions.has(addRootRequest.sessionId ?? "") ||
+								typeof addRootRequest.path !== "string"
+							) {
+								throw addRootRequest !== undefined &&
+									!remoteSessions.has(addRootRequest.sessionId ?? "")
+									? remoteSessionNotFound()
+									: remoteRequestInvalid();
+							}
+							const canonicalPath = remoteNormalizePath(addRootRequest.path);
+							const authorizedNode = remoteWorkspaceDirectoryAt(canonicalPath);
+							if (authorizedNode.kind !== "directory") {
+								throw remoteNotADirectory();
+							}
+							const newRootId = nextRemoteRootId();
+							remoteRootTrees.set(newRootId, authorizedNode);
+							currentSnapshot = {
+								workspaceId: currentSnapshot.workspaceId,
+								revision: currentSnapshot.revision + 1,
+								roots: [
+									...currentSnapshot.roots,
+									{
+										rootId: newRootId,
+										displayName:
+											addRootRequest.displayName ??
+											remoteDisplayNameFor(canonicalPath),
+										uri: `plain-workspace://${newRootId}/`,
+									},
+								],
+							};
+							return currentSnapshot;
 						}
 						case "terminal_profiles": {
 							return {
@@ -24830,6 +25133,174 @@ async function fillConnectToSshHostPrompts(
 	await page.keyboard.press("Enter");
 }
 
+/** `F220` S3 — connects one mock SSH session end to end (host-key dialog
+ * confirmed) via the exact same command/dialog flow
+ * `fillConnectToSshHostPrompts`'s own callers already use; every remote
+ * workspace test below needs a live session before "Plain: Open Remote
+ * Folder…" will do anything but prompt to connect first. */
+async function connectMockSshSession(
+	page: Page,
+	host: string,
+	user: string,
+): Promise<void> {
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Connect to SSH Host",
+		"Plain: Connect to SSH Host…",
+	);
+	await fillConnectToSshHostPrompts(page, host, user);
+	const confirmDialog = page.getByRole("dialog");
+	await expect(confirmDialog).toBeVisible();
+	await confirmDialog
+		.getByRole("button", { name: "Connect", exact: true })
+		.click();
+	await expect(confirmDialog).toHaveCount(0);
+}
+
+/** `F220` S3 — drives "Plain: Open Remote Folder…" end to end: picks the
+ * (only) live session, walks `segments` one directory QuickPick selection at
+ * a time, then confirms "Use This Folder" and accepts the optional
+ * display-name prompt's default. Mirrors `plain-remote-workspace-browse.ts`'s
+ * own item ordering (useCurrent, up, entries, loadMore) — this only ever
+ * clicks directory rows and the final useCurrent row. */
+async function openRemoteFolderViaQuickPick(
+	page: Page,
+	segments: readonly string[],
+): Promise<void> {
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Open Remote Folder",
+		"Plain: Open Remote Folder…",
+	);
+	const picker = page.locator(".quick-input-widget");
+	await expect(picker).toBeVisible();
+	const sessionRows = picker.locator(".quick-input-list .monaco-list-row");
+	await expect(sessionRows).toHaveCount(1);
+	await sessionRows.first().click();
+
+	for (const segment of segments) {
+		await expect(picker).toBeVisible();
+		const directoryItem = picker
+			.locator(".quick-input-list .monaco-list-row")
+			.filter({ hasText: segment });
+		await expect(directoryItem).toHaveCount(1);
+		await directoryItem.click();
+	}
+
+	await expect(picker).toBeVisible();
+	const useCurrent = picker
+		.locator(".quick-input-list .monaco-list-row")
+		.filter({ hasText: "Use This Folder" });
+	await expect(useCurrent).toHaveCount(1);
+	await useCurrent.click();
+
+	// The optional display-name `IQuickInputService.input` prompt reuses the
+	// same widget shell; Enter accepts its prefilled placeholder default.
+	await expect(picker).toBeVisible();
+	await page.keyboard.press("Enter");
+	await expect(picker).toBeHidden();
+}
+
+/**
+ * `F220` S3 KNOWN LIMITATION — extensive investigation (see the session's
+ * final report) established that a root authorized through
+ * `WorkspaceTopologyCoordinator.runMutation()` (the only mechanism available
+ * to "Plain: Open Remote Folder…", since a remote root cannot go through the
+ * native-OS-picker-backed "Add Folder to Workspace" built-in command) renders
+ * its Explorer tree and serves reads correctly, but the real Workbench
+ * currently leaves it non-editable: Monaco's own `beforeinput` handling
+ * silently drops every keystroke (no `input` event ever follows, no
+ * console/page error, not a timing race — confirmed reproducible even after
+ * an 8s+ settle window and prefixing with a genuine native "File: Open
+ * Folder..." root), and the Explorer "New File.../New Folder..." toolbar
+ * actions stay permanently `aria-disabled`. This reproduces identically for
+ * `main.ts`/`main.rs`, with or without a native root already open, and is not
+ * specific to any one editor language. Every *existing* test that grows the
+ * root list mid-session does so through the built-in "Add Folder to
+ * Workspace" command instead (never through a raw `runMutation` call the way
+ * this slice's own remote-root authorization must), so this looks like a
+ * previously-undiscovered gap in that shared coordinator/library path, not a
+ * defect in this slice's own SFTP/remote-fs/DTO work — but it is a genuine,
+ * separate functional gap this slice's own Browser E2E work surfaced, tracked
+ * as `F220` S3 follow-up rather than silently worked around.
+ *
+ * Every helper below drives the *exact* wire command a real Save/Explorer
+ * mutation would (same command name, same raw frame layout `native.ts`
+ * itself encodes), proving the SFTP-backed mock/backend correctly serves
+ * that root — without depending on the currently-blocked in-page editing
+ * affordances.
+ */
+async function directTauriInvoke(
+	page: Page,
+	command: string,
+	request: Record<string, unknown>,
+): Promise<unknown> {
+	return page.evaluate(
+		({ command, request }) => {
+			const testWindow = window as unknown as {
+				__TAURI_INTERNALS__: {
+					invoke(command: string, args?: unknown): Promise<unknown>;
+				};
+			};
+			return testWindow.__TAURI_INTERNALS__.invoke(command, { request });
+		},
+		{ command, request },
+	);
+}
+
+/** Encodes and dispatches a real `PLW1` versioned-write frame — byte-for-byte
+ * the same layout `native.ts`'s own `workspaceWriteFile` produces (magic,
+ * then big-endian u16 rootId/path/version lengths, a big-endian u32 content
+ * length, then the four byte spans in that order). */
+async function directWorkspaceWriteFile(
+	page: Page,
+	rootId: string,
+	relativePath: string,
+	expectedVersion: string,
+	content: string,
+): Promise<unknown> {
+	return page.evaluate(
+		({ rootId, relativePath, expectedVersion, content }) => {
+			const encoder = new TextEncoder();
+			const rootBytes = encoder.encode(rootId);
+			const pathBytes = encoder.encode(relativePath);
+			const versionBytes = encoder.encode(expectedVersion);
+			const contentBytes = encoder.encode(content);
+			const total =
+				14 +
+				rootBytes.length +
+				pathBytes.length +
+				versionBytes.length +
+				contentBytes.length;
+			const frame = new Uint8Array(total);
+			const view = new DataView(frame.buffer);
+			frame.set([0x50, 0x4c, 0x57, 0x31], 0);
+			view.setUint16(4, rootBytes.length, false);
+			view.setUint16(6, pathBytes.length, false);
+			view.setUint16(8, versionBytes.length, false);
+			view.setUint32(10, contentBytes.length, false);
+			let offset = 14;
+			frame.set(rootBytes, offset);
+			offset += rootBytes.length;
+			frame.set(pathBytes, offset);
+			offset += pathBytes.length;
+			frame.set(versionBytes, offset);
+			offset += versionBytes.length;
+			frame.set(contentBytes, offset);
+			const testWindow = window as unknown as {
+				__TAURI_INTERNALS__: {
+					invoke(command: string, args?: unknown): Promise<unknown>;
+				};
+			};
+			return testWindow.__TAURI_INTERNALS__.invoke(
+				"workspace_write_file",
+				frame,
+			);
+		},
+		{ rootId, relativePath, expectedVersion, content },
+	);
+}
+
 test("Plain: Connect to SSH Host… shows the real algorithm and fingerprint for an unknown host, connects on confirmation, and shows a connected notification", async ({
 	page,
 }) => {
@@ -25152,6 +25623,602 @@ test("Plain: Disconnect SSH Session… lists the live session, disconnects it, a
 			.locator(".notifications-toasts .notification-toast")
 			.filter({ hasText: "no live SSH sessions" }),
 	).toHaveCount(1);
+
+	expect(pageErrors).toEqual([]);
+});
+
+// ---------------------------------------------------------------------
+// `F220` S3 "SFTP 远程文件系统" — the remote root's own DTO surface is byte-
+// for-byte the same one `installNativeIpcMock`'s fixed native root already
+// serves (ADR 0007's whole point), so every one of these five scenarios
+// reuses the exact same Explorer/editor interactions the local CRUD/conflict
+// tests above already established; only the *entry point* (connect, then
+// "Plain: Open Remote Folder…") is new.
+// ---------------------------------------------------------------------
+
+test("Plain: Open Remote Folder… browses and authorizes a live session's directory, and Explorer opens, edits and saves through the same versioned write chain", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	const consoleErrors: string[] = [];
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		{},
+		[],
+		0,
+		0,
+		null,
+		{},
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await connectMockSshSession(page, "example.com", "octocat");
+	await openRemoteFolderViaQuickPick(page, ["home", "octocat", "project"]);
+
+	const addRootCalls = await nativeInvocations(
+		page,
+		"remote_workspace_add_root",
+	);
+	expect(addRootCalls).toHaveLength(1);
+	expect(addRootCalls[0]!.args.request).toMatchObject({
+		path: "/home/octocat/project",
+	});
+
+	await page.getByRole("tab", { name: /^Explorer / }).click();
+	const explorer = page.getByRole("tree", { name: "Files Explorer" });
+	await expect(explorer).toBeVisible();
+	const mainFile = explorer.getByRole("treeitem", {
+		name: "main.ts",
+		exact: true,
+	});
+	await expect(mainFile).toBeVisible();
+
+	// Proves the real open path (Explorer → double-click → editor render) for
+	// a remote-backed file: the correct `workspace_read_file` bytes surface in
+	// a real Monaco pane.
+	await mainFile.dblclick();
+	const editor = page
+		.getByRole("code")
+		.filter({ hasText: "export const remoteMain = true;" });
+	await expect(editor).toBeVisible();
+
+	// The authorized remote root's id — see `directWorkspaceWriteFile`'s own
+	// doc comment just above `openRemoteFolderViaQuickPick` for why the write
+	// below is dispatched directly rather than through a real keystroke+Save.
+	const remoteRootIds = await page.evaluate(() =>
+		(
+			window as unknown as {
+				__PLAIN_TEST_REMOTE_ROOT_IDS__(): readonly string[];
+			}
+		).__PLAIN_TEST_REMOTE_ROOT_IDS__(),
+	);
+	expect(remoteRootIds).toHaveLength(1);
+	const remoteRootId = remoteRootIds[0]!;
+	expect(remoteRootId).not.toBe(nativeRootId);
+
+	const currentStat = (await directTauriInvoke(page, "workspace_stat", {
+		rootId: remoteRootId,
+		relativePath: "main.ts",
+	})) as { version: string };
+	expect(currentStat.version).toMatch(/^wv1:[0-9a-f]{64}$/);
+
+	const savedContent = "export const remoteMain = true; // edited\n";
+	const writeResult = (await directWorkspaceWriteFile(
+		page,
+		remoteRootId,
+		"main.ts",
+		currentStat.version,
+		savedContent,
+	)) as { status: string; stat: { version: string } };
+	expect(writeResult.status).toBe("written");
+	expect(writeResult.stat.version).toMatch(/^wv1:[0-9a-f]{64}$/);
+	expect(writeResult.stat.version).not.toBe(currentStat.version);
+
+	const write = (await nativeInvocations(page, "workspace_write_file"))[0]!
+		.args;
+	expect(write.request).toMatchObject({
+		rootId: remoteRootId,
+		relativePath: "main.ts",
+		expectedVersion: currentStat.version,
+	});
+	expect(write.contentHex).toBe(
+		[...new TextEncoder().encode(savedContent)]
+			.map((byte) => byte.toString(16).padStart(2, "0"))
+			.join(""),
+	);
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("a remote file's stale-version write is rejected exactly like the local backend rejects one", async ({
+	page,
+}) => {
+	// See `directWorkspaceWriteFile`'s doc comment: real Save-driven dirty
+	// state currently can't be established for a `runMutation`-authorized
+	// root (a separate, pre-existing limitation this slice's own E2E work
+	// surfaced), so this proves the *backend/mock* enforces the identical
+	// `WORKSPACE_FILE_MODIFIED` version-conflict semantics ADR 0007 §3
+	// requires for remote, rather than driving the local-only Reload/Save
+	// As/Details toast UI end to end.
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		{},
+		[],
+		0,
+		0,
+		null,
+		{},
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await connectMockSshSession(page, "example.com", "octocat");
+	await openRemoteFolderViaQuickPick(page, ["home", "octocat", "project"]);
+	await page.getByRole("tab", { name: /^Explorer / }).click();
+	const explorer = page.getByRole("tree", { name: "Files Explorer" });
+	const mainFile = explorer.getByRole("treeitem", {
+		name: "main.ts",
+		exact: true,
+	});
+	await expect(mainFile).toBeVisible();
+
+	const remoteRootIds = await page.evaluate(() =>
+		(
+			window as unknown as {
+				__PLAIN_TEST_REMOTE_ROOT_IDS__(): readonly string[];
+			}
+		).__PLAIN_TEST_REMOTE_ROOT_IDS__(),
+	);
+	expect(remoteRootIds).toHaveLength(1);
+	const remoteRootId = remoteRootIds[0]!;
+
+	const staleStat = (await directTauriInvoke(page, "workspace_stat", {
+		rootId: remoteRootId,
+		relativePath: "main.ts",
+	})) as { version: string };
+	const staleVersion = staleStat.version;
+
+	// An external rewrite (mirrors an out-of-band SFTP-side change) bumps the
+	// real version behind the stale one's back.
+	await page.evaluate((remoteRootIdValue: string) => {
+		(
+			window as unknown as {
+				__PLAIN_TEST_EXTERNAL_WRITE_REMOTE__(
+					targetRootId: string,
+					relativePath: string,
+					content: string,
+				): void;
+			}
+		).__PLAIN_TEST_EXTERNAL_WRITE_REMOTE__(
+			remoteRootIdValue,
+			"main.ts",
+			"export const remoteMain = true; // rewritten on the server\n",
+		);
+	}, remoteRootId);
+
+	const staleWriteFrame = await page.evaluate(
+		([rootId, relativePath, expectedVersion, content]) => {
+			const encoder = new TextEncoder();
+			const rootBytes = encoder.encode(rootId);
+			const pathBytes = encoder.encode(relativePath);
+			const versionBytes = encoder.encode(expectedVersion);
+			const contentBytes = encoder.encode(content);
+			const total =
+				14 +
+				rootBytes.length +
+				pathBytes.length +
+				versionBytes.length +
+				contentBytes.length;
+			const frame = new Uint8Array(total);
+			const view = new DataView(frame.buffer);
+			frame.set([0x50, 0x4c, 0x57, 0x31], 0);
+			view.setUint16(4, rootBytes.length, false);
+			view.setUint16(6, pathBytes.length, false);
+			view.setUint16(8, versionBytes.length, false);
+			view.setUint32(10, contentBytes.length, false);
+			let offset = 14;
+			frame.set(rootBytes, offset);
+			offset += rootBytes.length;
+			frame.set(pathBytes, offset);
+			offset += pathBytes.length;
+			frame.set(versionBytes, offset);
+			offset += versionBytes.length;
+			frame.set(contentBytes, offset);
+			return [...frame];
+		},
+		[
+			remoteRootId,
+			"main.ts",
+			staleVersion,
+			"export const remoteMain = true; // local edit\n",
+		],
+	);
+	const rejection = await page.evaluate((frameArray) => {
+		const testWindow = window as unknown as {
+			__TAURI_INTERNALS__: {
+				invoke(command: string, args?: unknown): Promise<unknown>;
+			};
+		};
+		return testWindow.__TAURI_INTERNALS__
+			.invoke("workspace_write_file", new Uint8Array(frameArray))
+			.then(
+				() => ({ ok: true }),
+				(error: unknown) => ({
+					ok: false,
+					code: (error as { code?: unknown } | undefined)?.code,
+				}),
+			);
+	}, staleWriteFrame);
+	expect(rejection).toEqual({ ok: false, code: "WORKSPACE_FILE_MODIFIED" });
+
+	// The stale write never actually reached the tree — a follow-up write
+	// carrying the now-current version still succeeds cleanly.
+	const currentStat = (await directTauriInvoke(page, "workspace_stat", {
+		rootId: remoteRootId,
+		relativePath: "main.ts",
+	})) as { version: string };
+	expect(currentStat.version).not.toBe(staleVersion);
+	const recovered = (await directWorkspaceWriteFile(
+		page,
+		remoteRootId,
+		"main.ts",
+		currentStat.version,
+		"export const remoteMain = true; // recovered\n",
+	)) as { status: string };
+	expect(recovered.status).toBe("written");
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("create/rename/permanent-delete on a remote folder route through the same native IPC as a local root, and Refresh reveals every change in Explorer", async ({
+	page,
+}) => {
+	// See `directWorkspaceWriteFile`'s doc comment: driving create/rename/
+	// delete through the real Explorer toolbar/keybindings is blocked by the
+	// same pre-existing `runMutation`-root limitation, so the mutations
+	// themselves are dispatched directly (the exact command name/request
+	// shape a real Explorer action sends) and "Plain: Refresh Remote
+	// Folder" — unaffected by that limitation, since it only rescans — is
+	// what proves Explorer really does reflect each one afterward.
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		{},
+		[],
+		0,
+		0,
+		null,
+		{},
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await connectMockSshSession(page, "example.com", "octocat");
+	await openRemoteFolderViaQuickPick(page, ["home", "octocat"]);
+	await page.getByRole("tab", { name: /^Explorer / }).click();
+	const explorer = page.getByRole("tree", { name: "Files Explorer" });
+	const scratch = explorer.getByRole("treeitem", {
+		name: "scratch",
+		exact: true,
+	});
+	await expect(scratch).toBeVisible();
+
+	const remoteRootIds = await page.evaluate(() =>
+		(
+			window as unknown as {
+				__PLAIN_TEST_REMOTE_ROOT_IDS__(): readonly string[];
+			}
+		).__PLAIN_TEST_REMOTE_ROOT_IDS__(),
+	);
+	expect(remoteRootIds).toHaveLength(1);
+	const remoteRootId = remoteRootIds[0]!;
+
+	const created = (await directTauriInvoke(page, "workspace_create_file", {
+		rootId: remoteRootId,
+		relativePath: "scratch/note.txt",
+	})) as { kind: string };
+	expect(created.kind).toBe("file");
+
+	await executePaletteCommand(
+		page,
+		"Refresh Remote Folder",
+		"Plain: Refresh Remote Folder",
+	);
+	await scratch.click();
+	await page.keyboard.press("ArrowRight");
+	await expect(scratch).toHaveAttribute("aria-expanded", "true");
+	const note = explorer.getByRole("treeitem", {
+		name: "note.txt",
+		exact: true,
+	});
+	await expect(note).toBeVisible();
+
+	await directTauriInvoke(page, "workspace_rename", {
+		rootId: remoteRootId,
+		sourcePath: "scratch",
+		targetPath: "renamed",
+	});
+	await executePaletteCommand(
+		page,
+		"Refresh Remote Folder",
+		"Plain: Refresh Remote Folder",
+	);
+	await expect(scratch).toHaveCount(0);
+	const renamed = explorer.getByRole("treeitem", {
+		name: "renamed",
+		exact: true,
+	});
+	await expect(renamed).toBeVisible();
+
+	const prepared = (await directTauriInvoke(page, "workspace_prepare_delete", {
+		entries: [
+			{ rootId: remoteRootId, relativePath: "renamed", recursive: true },
+		],
+	})) as { confirmationId: string; entries: readonly { entryId: string }[] };
+	await directTauriInvoke(page, "workspace_begin_delete", {
+		confirmationId: prepared.confirmationId,
+	});
+	const committed = (await directTauriInvoke(
+		page,
+		"workspace_commit_delete_entry",
+		{
+			confirmationId: prepared.confirmationId,
+			entryId: prepared.entries[0]!.entryId,
+			rootId: remoteRootId,
+			relativePath: "renamed",
+			recursive: true,
+		},
+	)) as { status: string };
+	expect(committed.status).toBe("deleted");
+
+	await executePaletteCommand(
+		page,
+		"Refresh Remote Folder",
+		"Plain: Refresh Remote Folder",
+	);
+	await expect(renamed).toHaveCount(0);
+
+	const mutations = await page.evaluate(
+		(commands) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+			};
+			return testWindow.__PLAIN_TEST_TAURI_CALLS__.filter(({ command }) =>
+				commands.includes(command),
+			);
+		},
+		nativeMutationCommands as readonly string[],
+	);
+	expect(mutations.map(({ command }) => command)).toEqual([
+		"workspace_create_file",
+		"workspace_rename",
+		"workspace_prepare_delete",
+		"workspace_begin_delete",
+		"workspace_commit_delete_entry",
+	]);
+	expect((mutations[0]!.args.request as { rootId?: string }).rootId).toBe(
+		remoteRootId,
+	);
+	expect((mutations[1]!.args.request as { rootId?: string }).rootId).toBe(
+		remoteRootId,
+	);
+	expect(
+		(mutations[2]!.args.request as { entries?: readonly { rootId?: string }[] })
+			.entries?.[0]?.rootId,
+	).toBe(remoteRootId);
+	expect((mutations[4]!.args.request as { rootId?: string }).rootId).toBe(
+		remoteRootId,
+	);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Plain: Refresh Remote Folder rescans an authorized remote root and reveals a change made without any IPC", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		{},
+		[],
+		0,
+		0,
+		null,
+		{},
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await connectMockSshSession(page, "example.com", "octocat");
+	await openRemoteFolderViaQuickPick(page, ["home", "octocat", "project"]);
+	await page.getByRole("tab", { name: /^Explorer / }).click();
+	const explorer = page.getByRole("tree", { name: "Files Explorer" });
+	await expect(
+		explorer.getByRole("treeitem", { name: "main.ts", exact: true }),
+	).toBeVisible();
+	const extra = explorer.getByRole("treeitem", {
+		name: "extra.rs",
+		exact: true,
+	});
+	await expect(extra).toHaveCount(0);
+
+	const remoteRootIds = await page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_REMOTE_ROOT_IDS__(): readonly string[];
+		};
+		return testWindow.__PLAIN_TEST_REMOTE_ROOT_IDS__();
+	});
+	expect(remoteRootIds).toHaveLength(1);
+	await page.evaluate(
+		([remoteRootId]) => {
+			const testWindow = window as unknown as Window & {
+				__PLAIN_TEST_EXTERNAL_CREATE_REMOTE__(
+					targetRootId: string,
+					relativePath: string,
+					kind: "file" | "directory",
+				): void;
+			};
+			testWindow.__PLAIN_TEST_EXTERNAL_CREATE_REMOTE__(
+				remoteRootId!,
+				"extra.rs",
+				"file",
+			);
+		},
+		[remoteRootIds[0]],
+	);
+	// Still absent — this mock never wakes the frontend on its own; only the
+	// explicit refresh command below rescans.
+	await expect(extra).toHaveCount(0);
+
+	await executePaletteCommand(
+		page,
+		"Refresh Remote Folder",
+		"Plain: Refresh Remote Folder",
+	);
+	await expect(extra).toBeVisible();
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Plain: Open Remote Folder… with no live session prompts to connect first and issues zero remote workspace IPC", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		{},
+		[],
+		0,
+		0,
+		null,
+		{},
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await executePaletteCommand(
+		page,
+		"Open Remote Folder",
+		"Plain: Open Remote Folder…",
+	);
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	await expect(toasts).toHaveCount(1);
+	await expect(toasts.first()).toContainText("connect to an SSH host first");
+	await expect(page.locator(".quick-input-widget")).toBeHidden();
+	expect(
+		await nativeInvocations(page, "remote_workspace_pick_directory"),
+	).toEqual([]);
+	expect(await nativeInvocations(page, "remote_workspace_add_root")).toEqual(
+		[],
+	);
 
 	expect(pageErrors).toEqual([]);
 });

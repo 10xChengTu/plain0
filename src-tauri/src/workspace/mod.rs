@@ -28,6 +28,7 @@ pub(crate) mod new_file_publisher;
 pub mod picker;
 pub(crate) mod publish_frame;
 pub(crate) mod reader;
+pub(crate) mod remote_backend;
 pub mod service;
 #[cfg(target_os = "macos")]
 pub(crate) mod trash;
@@ -788,17 +789,58 @@ impl WorkspaceScope {
         })
     }
 
-    /// Test-only construction of a `RemoteSsh`-backed root, bypassing the
-    /// real (`F220` S3+) authorization flow entirely — `F220` S2 leaves
-    /// remote root creation with no user-reachable entry point (ADR 0007 §1:
-    /// "远程 root 由「连接会话 + 用户在远程目录选择器中显式选择」产生"), so
-    /// this is the sole way this slice's own tests construct one. Mirrors
-    /// [`Self::authorize_roots_atomically_with`]'s identity-dedup contract
-    /// (same `(host_key_fingerprint, base_path)` identity reuses the
-    /// existing root id) and the shared [`MAX_WORKSPACE_ROOTS`] ceiling.
+    /// `F220` S3 (ADR 0007 §1): the real, user-reachable remote-root
+    /// authorization entry point — `remote_workspace_add_root`'s own
+    /// backing call. `session_id`/`host_key_fingerprint` must already name a
+    /// live, trusted SSH session (the caller — `WorkspaceService::authorize_remote_root` —
+    /// resolves both from `remote::session::RemoteSessionService` before
+    /// reaching here); `canonical_path` must already be the *result* of a
+    /// real SFTP `realpath` call the caller made (`remote::remote_fs::canonicalize_for_root`),
+    /// never a raw user-typed string — this method itself performs no
+    /// filesystem I/O of any kind, exactly like [`Self::authorize_roots_atomically_with`]
+    /// never re-canonicalizes a local path a caller already resolved.
+    /// Mirrors that method's own identity-dedup contract (the same
+    /// `(host_key_fingerprint, canonical_path)` identity reuses the existing
+    /// root id rather than minting a duplicate) and the shared
+    /// [`MAX_WORKSPACE_ROOTS`] ceiling (local and remote roots share one
+    /// per-window budget).
+    pub(crate) fn authorize_remote_root(
+        &mut self,
+        session_id: RemoteSessionId,
+        host_key_fingerprint: &str,
+        canonical_path: &str,
+        display_name: &str,
+    ) -> Result<RootId, CommandError> {
+        self.authorize_remote_root_impl(
+            session_id,
+            host_key_fingerprint,
+            canonical_path,
+            display_name,
+        )
+    }
+
+    /// Test-only construction of a `RemoteSsh`-backed root that does not
+    /// need a real live session id (most tests only care about the identity/
+    /// dedup/limit contract, not session plumbing) — mirrors
+    /// [`Self::authorize_remote_root`]'s own dedup/limit contract.
     #[cfg(test)]
     pub(crate) fn authorize_remote_root_for_test(
         &mut self,
+        host_key_fingerprint: &str,
+        base_path: &str,
+        display_name: &str,
+    ) -> Result<RootId, CommandError> {
+        self.authorize_remote_root_impl(
+            RemoteSessionId::new(),
+            host_key_fingerprint,
+            base_path,
+            display_name,
+        )
+    }
+
+    fn authorize_remote_root_impl(
+        &mut self,
+        session_id: RemoteSessionId,
         host_key_fingerprint: &str,
         base_path: &str,
         display_name: &str,
@@ -824,7 +866,7 @@ impl WorkspaceScope {
             root_id,
             WorkspaceRoot {
                 backend: RootBackend::RemoteSsh {
-                    session_id: RemoteSessionId::new(),
+                    session_id,
                     base_path: base_path.to_owned(),
                     host_key_fingerprint: host_key_fingerprint.to_owned(),
                 },
@@ -836,6 +878,41 @@ impl WorkspaceScope {
         self.revision = next_revision;
         Ok(root_id)
     }
+
+    /// `F220` S3: the single accessor every remote-capable workspace FS
+    /// operation uses to decide which backend to dispatch to — `Ok(None)`
+    /// for a local root (the caller should keep using [`Self::lease`] as
+    /// before), `Ok(Some(context))` for a remote one, `Err` for a stale/
+    /// unauthorized `root_id`. Deliberately returns owned data (not
+    /// references into `RootBackend`) so a caller can hold it across an
+    /// `.await` without borrowing `self`.
+    pub(crate) fn remote_context(
+        &self,
+        root_id: RootId,
+    ) -> Result<Option<RemoteRootContext>, CommandError> {
+        let root = self.roots.get(&root_id).ok_or_else(root_not_authorized)?;
+        Ok(match &root.backend {
+            RootBackend::Local { .. } => None,
+            RootBackend::RemoteSsh {
+                session_id,
+                base_path,
+                host_key_fingerprint,
+            } => Some(RemoteRootContext {
+                session_id: *session_id,
+                base_path: base_path.clone(),
+                host_key_fingerprint: host_key_fingerprint.clone(),
+            }),
+        })
+    }
+}
+
+/// `F220` S3: the owned, backend-agnostic view [`WorkspaceScope::remote_context`]
+/// hands back — everything `remote::remote_fs`'s functions need to address a
+/// remote root, with no borrow tying it to the scope that produced it.
+pub(crate) struct RemoteRootContext {
+    pub(crate) session_id: RemoteSessionId,
+    pub(crate) base_path: String,
+    pub(crate) host_key_fingerprint: String,
 }
 
 struct WorkspaceRoot {
@@ -870,20 +947,18 @@ enum RootBackend {
         /// serialized to the WebView).
         canonical_path: PathBuf,
     },
-    /// No production caller constructs this variant until `F220` S3 adds a
-    /// real remote-root authorization entry point (ADR 0007 §1: this slice
-    /// deliberately leaves remote root creation with no user-reachable
-    /// command); today only [`WorkspaceScope::authorize_remote_root_for_test`]
-    /// does, mirroring `debug::protocol`'s own identical "no production
-    /// caller until a later slice" `#[allow(dead_code)]` precedent.
-    #[allow(dead_code)]
+    /// `F220` S3 (ADR 0007 §1): constructed by [`WorkspaceScope::authorize_remote_root`]
+    /// (`remote_workspace_add_root`'s own backing call) once a real remote
+    /// directory has been chosen and canonicalized over a live, trusted SSH
+    /// session.
     RemoteSsh {
-        /// Looked up against `remote::session::RemoteSessionService` by a
-        /// future SFTP-backed domain; this slice never dereferences it.
+        /// Looked up against `remote::session::RemoteSessionService` by
+        /// `remote::remote_fs`'s functions on every workspace FS operation
+        /// this root reaches.
         session_id: RemoteSessionId,
         /// The canonical remote path this root is rooted at — re-verified
-        /// via SFTP `realpath` on every path resolution once `F220` S3
-        /// lands. Part of this root's identity (ADR 0007 §2) alongside
+        /// via SFTP `realpath` on every path resolution (`remote::remote_fs::realpath_within_base`).
+        /// Part of this root's identity (ADR 0007 §2) alongside
         /// `host_key_fingerprint`.
         base_path: String,
         /// Part of this root's identity (ADR 0007 §2) alongside `base_path`.
@@ -954,10 +1029,6 @@ impl PreparedWorkspaceRoot {
 #[derive(Eq, PartialEq)]
 enum DirectoryIdentity {
     Local(LocalDirectoryIdentity),
-    /// See [`RootBackend::RemoteSsh`]'s identical `#[allow(dead_code)]`
-    /// justification — no production caller constructs this until `F220`
-    /// S3.
-    #[allow(dead_code)]
     RemoteSsh {
         host_key_fingerprint: String,
         canonical_path: String,

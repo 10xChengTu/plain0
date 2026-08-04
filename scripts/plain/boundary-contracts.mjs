@@ -1712,7 +1712,8 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "applyPersistedFileIconThemeSelection" ||
 				parent.expression.text === "applyPersistedProductIconThemeSelection" ||
 				parent.expression.text === "createAndConfigurePlainDebugRuntime" ||
-				parent.expression.text === "configurePlainRemoteSshBridge")
+				parent.expression.text === "configurePlainRemoteSshBridge" ||
+				parent.expression.text === "configurePlainRemoteWorkspaceBridge")
 		);
 	}
 	function isAllowedUserDataProviderIdentifier(node) {
@@ -1761,7 +1762,17 @@ export function validateWorkspaceProviderBootstrap(source) {
 			parent.arguments[2] === node &&
 			ts.isIdentifier(parent.expression) &&
 			parent.expression.text === "registerPlainUntitledWorkflow";
-		return isExistingConsumer || isUntitledConsumer;
+		// `F220` S3: `configurePlainRemoteWorkspaceBridge`'s third argument —
+		// the provider's own `PlainWorkspaceRemoteRefreshProvider` capability
+		// backs `Plain: Refresh Remote Folder`.
+		const isRemoteWorkspaceConsumer =
+			ts.isCallExpression(parent) &&
+			parent.arguments[2] === node &&
+			ts.isIdentifier(parent.expression) &&
+			parent.expression.text === "configurePlainRemoteWorkspaceBridge";
+		return (
+			isExistingConsumer || isUntitledConsumer || isRemoteWorkspaceConsumer
+		);
 	}
 	function visit(node) {
 		if (ts.isCallExpression(node)) {
@@ -2658,7 +2669,14 @@ export function validateWindowWorkflowBoundary(rustSources, appSources) {
 const WORKSPACE_RUST_SOURCE_PATTERN =
 	/^src-tauri\/src\/(?:path_policy\.rs|workspace\/.*\.rs|search\/.*\.rs)$/;
 const RUST_PRODUCTION_SOURCE_PATTERN = /^src-tauri\/src\/.*\.rs$/;
-const WORKSPACE_TEST_SOURCE_PATTERN = /(?:^|\/)tests\.rs$/;
+// `F220` S3: also exempts `remote/test_support.rs` — a `#[cfg(test)]`-gated
+// hermetic SFTP fixture module (declared `#[cfg(test)] pub(crate) mod
+// test_support;` in `remote/mod.rs`, so it never compiles into a production
+// build) that legitimately creates a real filesystem symlink for its own
+// escape-detection test setup. Named `test_support.rs` rather than
+// `tests.rs` because it holds shared fixture helpers `remote_fs::tests`
+// consumes, not `#[test]` functions of its own.
+const WORKSPACE_TEST_SOURCE_PATTERN = /(?:^|\/)(?:tests|test_support)\.rs$/;
 const WORKSPACE_VERSIONED_WRITER_PATH =
 	"src-tauri/src/workspace/versioned_writer.rs";
 const WORKSPACE_NEW_FILE_PUBLISHER_PATH =
@@ -4048,7 +4066,13 @@ export function validateWorkspaceRustBoundary(
 				(normalizedPath === "src-tauri/src/workspace/commands.rs" &&
 					match[1] === "WorkspaceService") ||
 				(normalizedPath === "src-tauri/src/workspace/service.rs" &&
-					match[1] === "writer");
+					// `F220` S3: `remote_backend::rename` routes to
+					// `remote::remote_fs::rename_entry`, which itself uses
+					// SFTP's own `SSH_FXP_RENAME` — already fail-if-exists,
+					// not overwrite-capable (see that function's own doc
+					// comment) — the identical non-overwrite contract
+					// `writer::rename` already gets exempted for here.
+					(match[1] === "writer" || match[1] === "remote_backend"));
 			return !allowedCall;
 		});
 		if (
@@ -6069,21 +6093,27 @@ function extractAuditedSyncTauriCommands(source, commandName) {
 
 function workspaceDeleteCommandBodyIsExact(body, contract) {
 	const normalized = body.replaceAll(/\s+/g, "").replace(/;$/, "");
+	// `F220` S3: every delete-protocol command now also threads
+	// `remote.inner()` through to `WorkspaceService` (which needs a
+	// `&RemoteSessionService` to dispatch a remote-backed entry — see
+	// `WorkspaceService::prepare_remote_delete`/`commit_delete_entry`'s own
+	// doc comments), so each expected call shape below gained that one
+	// extra trailing argument.
 	if (contract.adapter === "prepare") {
 		return (
 			normalized ===
-			`service.${contract.service}(window.label(),request.into_parts()?).await`
+			`service.${contract.service}(window.label(),request.into_parts()?,remote.inner()).await`
 		);
 	}
 	if (contract.adapter === "token") {
 		return (
 			normalized ===
-			`service.${contract.service}(window.label(),request.confirmation_id()).await`
+			`service.${contract.service}(window.label(),request.confirmation_id(),remote.inner()).await`
 		);
 	}
 	return (
 		normalized ===
-		`let(confirmation_id,entry_id,root_id,relative_path,recursive)=request.into_parts()?;service.${contract.service}(window.label(),confirmation_id,entry_id,root_id,relative_path,recursive,).await`
+		`let(confirmation_id,entry_id,root_id,relative_path,recursive)=request.into_parts()?;service.${contract.service}(window.label(),confirmation_id,entry_id,root_id,relative_path,recursive,remote.inner(),).await`
 	);
 }
 
@@ -6119,7 +6149,10 @@ export function validateWorkspaceDeleteCommandRegistration(rustSources) {
 		const normalizedParameters = command.parameters
 			.replaceAll(/\s+/g, "")
 			.replace(/,$/, "");
-		const expectedParameters = `window:WebviewWindow,service:State<'_,WorkspaceService>,request:${contract.request}`;
+		// `F220` S3: every delete-protocol command also takes
+		// `remote: State<'_, RemoteSessionService>` — see
+		// `workspaceDeleteCommandBodyIsExact`'s own doc comment for why.
+		const expectedParameters = `window:WebviewWindow,service:State<'_,WorkspaceService>,remote:State<'_,RemoteSessionService>,request:${contract.request}`;
 		const expectedReturn = `->Result<${contract.result},CommandError>`;
 		if (
 			normalizedParameters !== expectedParameters ||
@@ -12945,6 +12978,45 @@ function stageCleanupCallsAreExact(relativePath, source) {
 			removeDirectoryCalls.length === 0
 		);
 	}
+	if (relativePath === "src-tauri/src/remote/remote_fs.rs") {
+		// `F220` S3: every `remove_file`/`remove_dir` call is on the live SFTP
+		// session (`sftp.`), never an ambient path — locked by exact receiver
+		// plus exact per-argument occurrence counts (rather than local's
+		// single-shape lock) because this file legitimately deletes from
+		// several distinct call sites: `write_file`'s staged-then-remove-then-
+		// rename overwrite publish (`staged_path` cleanup ×3, plus the one
+		// pre-rename removal of the live `target.clone()` itself — see that
+		// function's own "Disclosed limitation" doc comment for why an
+		// overwrite needs a remove step SFTP's own rename does not), `publish_file`'s
+		// staged-name cleanup on a lost create race (`staged_path` ×1),
+		// `recursive_delete`'s bottom-up removal (`path` ×1 file, ×1 dir), and
+		// `delete_entry`'s own non-recursive single-entry removal (`target`
+		// ×1 file, ×1 dir).
+		const sftpReceiver = /\bsftp\s*\.\s*$/;
+		const argumentCounts = (calls) => {
+			const counts = new Map();
+			for (const call of calls) {
+				if (!call.closed || !sftpReceiver.test(source.slice(0, call.index))) {
+					return undefined;
+				}
+				const argument = call.arguments.replaceAll(/\s+/g, "");
+				counts.set(argument, (counts.get(argument) ?? 0) + 1);
+			}
+			return counts;
+		};
+		const removeFileArguments = argumentCounts(removeFileCalls);
+		const removeDirectoryArguments = argumentCounts(removeDirectoryCalls);
+		return (
+			removeFileCalls.length === 7 &&
+			removeFileArguments?.get("staged_path") === 4 &&
+			removeFileArguments?.get("target.clone()") === 1 &&
+			removeFileArguments?.get("path") === 1 &&
+			removeFileArguments?.get("target") === 1 &&
+			removeDirectoryCalls.length === 2 &&
+			removeDirectoryArguments?.get("path") === 1 &&
+			removeDirectoryArguments?.get("target") === 1
+		);
+	}
 	return removeFileCalls.length === 0 && removeDirectoryCalls.length === 0;
 }
 
@@ -17325,6 +17397,10 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		["PlainWorkspaceMutationPolicy", { kind: "interface", exported: false }],
 		["PlainWorkspaceDeleteResource", { kind: "interface", exported: true }],
 		["PlainWorkspaceDeleteProvider", { kind: "interface", exported: true }],
+		[
+			"PlainWorkspaceRemoteRefreshProvider",
+			{ kind: "interface", exported: true },
+		],
 		["PlainWorkspaceProviderStat", { kind: "interface", exported: true }],
 		["PlainWorkspaceReadFileResult", { kind: "interface", exported: true }],
 		["PlainWorkspaceWriteFileResult", { kind: "type", exported: true }],
@@ -18266,6 +18342,7 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		"delete",
 		"plainSnapshotDeleteResource",
 		"plainRefreshDeleteRoots",
+		"plainRefreshRoot",
 		"copy",
 		"rename",
 		"requireMutationDispatchAllowed",
@@ -20200,7 +20277,9 @@ export function validateWorkspaceProviderCopyBoundary(source) {
 		fireCreatedCallCount !== 5 ||
 		fireDeletedCallCount !== 2 ||
 		fireMovedCallCount !== 2 ||
-		fireRootUpdatedCallCount !== 10 ||
+		// `F220` S3: `plainRefreshRoot` (`Plain: Refresh Remote Folder`'s own
+		// backing call) adds the eleventh `this.fireRootUpdated(...)` site.
+		fireRootUpdatedCallCount !== 11 ||
 		fireRootsUpdatedCallCount !== 2 ||
 		changeEmitterFireCallCount !== 7
 	) {
@@ -21515,7 +21594,10 @@ function validateVersionedWriteRustBoundary(rustSources) {
 			const command = normalizedRustFunction(commands[0]);
 			if (
 				command.parameters !==
-					"window:WebviewWindow,service:State<'_,WorkspaceService>,request:tauri::ipc::Request<'_>" ||
+					// `F220` S3: also takes `remote: State<'_, RemoteSessionService>`
+					// — `WorkspaceService::write_file` needs it to dispatch a
+					// remote-backed root.
+					"window:WebviewWindow,service:State<'_,WorkspaceService>,remote:State<'_,RemoteSessionService>,request:tauri::ipc::Request<'_>" ||
 				command.returnType !== "->Result<WorkspaceWriteResult,CommandError>"
 			) {
 				failures.push(
@@ -25105,24 +25187,31 @@ export function validateGitHunkStageUiBoundary(appSources) {
 }
 
 /**
- * `F220` S1 (ADR 0006 §1's "SSH 会话建立由进程内 Rust 实现拥有" decision): the
- * `remote` domain is the sole importer of the `russh`/`russh::keys` crate
- * anywhere in this codebase — mirrors `FORBIDDEN_GIT_LIBRARY_DEPENDENCIES`'s
+ * `F220` S1 (ADR 0006 §1's "SSH 会话建立由进程内 Rust 实现拥有" decision) and
+ * `F220` S3 (ADR 0007 §1's "SFTP 使用唯一归属 remote 域" guard): the `remote`
+ * domain is the sole importer of the `russh`/`russh::keys`/`russh_sftp`
+ * crates anywhere in this codebase — mirrors `FORBIDDEN_GIT_LIBRARY_DEPENDENCIES`'s
  * own "single-owner dependency" discipline, applied to an *import
  * statement/path reference* rather than a `Cargo.toml` dependency line
- * (russh is a legitimate `[dependencies]` entry either way; what this locks
- * is which *modules* may actually name it in code). Deliberately does not
- * also forbid `std::net::TcpStream`/`tokio::net::TcpStream` crate-wide: the
- * `debug` domain already has its own audited, unrelated TCP use
- * (`debug::tcp`'s DAP TCP transport) that this guard must not conflict
- * with — confining `russh` itself is the correct, sufficient proxy for "SSH
- * transport is `remote`'s alone", since `russh` is the only thing in this
- * crate that actually speaks the SSH protocol.
+ * (both crates are legitimate `[dependencies]` entries either way; what
+ * this locks is which *modules* may actually name them in code). The
+ * pattern matches `russh` and `russh_sftp` as whole tokens only (not, say,
+ * an unrelated identifier that merely starts with those letters), so
+ * `workspace::remote_backend`'s own plain wrapper functions around
+ * `remote::remote_fs` — which never import either crate, only call its
+ * already-audited async functions — stay outside this domain without
+ * needing an exemption. Deliberately does not also forbid
+ * `std::net::TcpStream`/`tokio::net::TcpStream` crate-wide: the `debug`
+ * domain already has its own audited, unrelated TCP use (`debug::tcp`'s DAP
+ * TCP transport) that this guard must not conflict with — confining
+ * `russh`/`russh_sftp` themselves is the correct, sufficient proxy for "SSH
+ * transport is `remote`'s alone", since they are the only things in this
+ * crate that actually speak the SSH/SFTP protocols.
  */
 export function validateRemoteSshLibraryOwnershipBoundary(rustSources) {
 	const failures = [];
 	const remoteDomainPattern = /^src-tauri\/src\/remote\/.*\.rs$/;
-	const russhTokenPattern = /(?<![A-Za-z0-9_])russh(?![A-Za-z0-9_])/;
+	const russhTokenPattern = /(?<![A-Za-z0-9_])russh(?:_sftp)?(?![A-Za-z0-9_])/;
 	for (const { relativePath, source } of rustSources) {
 		const normalizedPath = relativePath.replaceAll("\\", "/");
 		if (remoteDomainPattern.test(normalizedPath)) {
@@ -25131,7 +25220,7 @@ export function validateRemoteSshLibraryOwnershipBoundary(rustSources) {
 		const executable = stripRustCommentsAndLiterals(source);
 		if (russhTokenPattern.test(executable)) {
 			failures.push(
-				`${normalizedPath} must not reference russh — SSH transport is owned exclusively by src-tauri/src/remote/`,
+				`${normalizedPath} must not reference russh/russh_sftp — SSH/SFTP transport is owned exclusively by src-tauri/src/remote/`,
 			);
 		}
 	}
@@ -25198,6 +25287,7 @@ const REMOTE_COMMAND_NAMES = Object.freeze([
 	"remote_session_state",
 	"remote_host_key_forget",
 	"remote_host_key_list",
+	"remote_workspace_pick_directory",
 ]);
 
 export function validateRemoteCommandRegistration(rustSources) {

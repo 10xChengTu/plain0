@@ -36,7 +36,10 @@ pub(crate) mod agent;
 pub mod commands;
 pub mod dto;
 pub(crate) mod known_hosts;
+pub(crate) mod remote_fs;
 pub mod session;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub(crate) fn remote_request_invalid() -> CommandError {
     CommandError::new(
@@ -168,6 +171,118 @@ pub(crate) fn remote_session_limit_reached() -> CommandError {
     CommandError::new(
         "REMOTE_SESSION_LIMIT_REACHED",
         "This window already has the maximum number of live SSH sessions open.",
+    )
+}
+
+/// `F220` S3: returned whenever an SFTP subsystem channel cannot be opened,
+/// initialized, or completes a request with a transport-level failure this
+/// domain does not have a more specific code for — folds "channel open
+/// rejected", "subsystem request rejected", "SFTP protocol handshake
+/// failed", and "the channel died mid-request" into one caller-facing code,
+/// mirroring `remote_host_key_store_unavailable`'s identical "fold every
+/// unrecoverable-differently case together" precedent.
+pub(crate) fn remote_sftp_unavailable() -> CommandError {
+    CommandError::new(
+        "REMOTE_SFTP_UNAVAILABLE",
+        "The remote SFTP channel is not available.",
+    )
+}
+
+/// `F220` S3 (ADR 0007 §1): returned when a resolved remote path's SFTP
+/// `realpath` re-validation lands outside the root's canonical base path —
+/// the symlink-escape / TOCTOU rejection this domain's every path resolution
+/// funnels through. Deliberately accurate and path-free, mirroring the local
+/// backend's own `path_outside_root`.
+pub(crate) fn remote_path_outside_root() -> CommandError {
+    CommandError::new(
+        "PATH_OUTSIDE_ROOT",
+        "The workspace path is outside the authorized root.",
+    )
+}
+
+/// `F220` S3: returned when a remote entry a filesystem operation named does
+/// not exist — mirrors the local backend's own `ENTRY_NOT_FOUND`.
+pub(crate) fn remote_entry_not_found() -> CommandError {
+    CommandError::new("ENTRY_NOT_FOUND", "The workspace entry does not exist.")
+}
+
+/// `F220` S3: returned when a remote entry exists but has an incompatible
+/// type for the requested operation (e.g. `stat`-ing a directory as a file)
+/// — mirrors the local backend's own `ENTRY_TYPE_MISMATCH`.
+pub(crate) fn remote_entry_type_mismatch() -> CommandError {
+    CommandError::new(
+        "ENTRY_TYPE_MISMATCH",
+        "The workspace entry has an incompatible type.",
+    )
+}
+
+/// `F220` S3: returned when a remote create/rename/publish target already
+/// exists — mirrors the local backend's own `ENTRY_ALREADY_EXISTS`.
+pub(crate) fn remote_entry_already_exists() -> CommandError {
+    CommandError::new(
+        "ENTRY_ALREADY_EXISTS",
+        "The workspace entry already exists.",
+    )
+}
+
+/// `F220` S3: returned when a remote directory listing or a recursive
+/// delete would exceed this domain's bounded entry-count ceiling — mirrors
+/// the local backend's own `DIRECTORY_TOO_LARGE`.
+pub(crate) fn remote_directory_too_large() -> CommandError {
+    CommandError::new(
+        "DIRECTORY_TOO_LARGE",
+        "The workspace directory exceeds the supported listing limits.",
+    )
+}
+
+/// `F220` S3: returned when a remote file read/write would exceed this
+/// domain's bounded size ceiling — mirrors the local backend's own
+/// `FILE_TOO_LARGE`.
+pub(crate) fn remote_file_too_large() -> CommandError {
+    CommandError::new(
+        "FILE_TOO_LARGE",
+        "The workspace file exceeds the supported read/write limit.",
+    )
+}
+
+/// `F220` S3: returned when a remote versioned write's `expected_version`
+/// receipt no longer matches the live target (or the live target vanished
+/// out from under an overwrite) — mirrors the local backend's own
+/// `WORKSPACE_FILE_MODIFIED`.
+pub(crate) fn remote_file_modified() -> CommandError {
+    CommandError::new(
+        "WORKSPACE_FILE_MODIFIED",
+        "The workspace file changed before it could be written.",
+    )
+}
+
+/// `F220` S3: a catch-all for a remote filesystem operation that failed for
+/// a reason none of this domain's more specific codes name — mirrors the
+/// local backend's own `IO_FAILED`.
+pub(crate) fn remote_io_failed() -> CommandError {
+    CommandError::new("IO_FAILED", "The workspace entry could not be accessed.")
+}
+
+/// `F220` S3: returned when a remote versioned-write/publish request names
+/// the workspace root itself (a file operation cannot target a directory) —
+/// mirrors the local backend's own `INVALID_WORKSPACE_WRITE_REQUEST`.
+pub(crate) fn remote_invalid_write_request() -> CommandError {
+    CommandError::new(
+        "INVALID_WORKSPACE_WRITE_REQUEST",
+        "The workspace write request is invalid.",
+    )
+}
+
+/// `F220` S3: returned when a remote-directory-picker or add-root request
+/// names an absolute remote path this domain's own defensive shape check
+/// (bounded length, no NUL bytes) rejects — deliberately independent of
+/// [`remote_request_invalid`] (a different request shape) even though both
+/// share the same wire code family.
+pub(crate) fn remote_path_request_invalid() -> CommandError {
+    CommandError::new(
+        "REMOTE_REQUEST_INVALID",
+        "The remote path request is missing required fields, exceeds a size limit, or contains \
+         a character this domain does not accept.",
     )
 }
 

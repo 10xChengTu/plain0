@@ -836,7 +836,6 @@ pub enum WorkspaceMoveResult {
 pub struct DeleteConfirmationId(Uuid);
 
 impl DeleteConfirmationId {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn new() -> Self {
         Self(Uuid::new_v4())
     }
@@ -850,7 +849,6 @@ impl DeleteConfirmationId {
 pub struct DeleteEntryId(Uuid);
 
 impl DeleteEntryId {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn new() -> Self {
         Self(Uuid::new_v4())
     }
@@ -959,7 +957,6 @@ pub struct WorkspaceDeleteEntryPlan {
 }
 
 impl WorkspaceDeleteEntryPlan {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) const fn new(
         entry_id: DeleteEntryId,
         kind: WorkspaceDeleteEntryKind,
@@ -985,7 +982,6 @@ pub struct WorkspaceDeleteBatchPlan {
 }
 
 impl WorkspaceDeleteBatchPlan {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) const fn new(
         confirmation_id: DeleteConfirmationId,
         entries: Vec<WorkspaceDeleteEntryPlan>,
@@ -1080,7 +1076,6 @@ pub enum WorkspaceDeleteResult {
 }
 
 impl WorkspaceDeleteResult {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) const fn incomplete(
         reason: WorkspaceDeleteIncompleteReason,
         removed_entries: u32,

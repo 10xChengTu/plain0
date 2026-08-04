@@ -22,6 +22,7 @@ use super::dto::{
 use super::picker::{TauriDirectoryPicker, TauriFilePicker};
 use super::service::WorkspaceService;
 use crate::recent::service::{WorkspaceHistoryRoot, WorkspaceHistoryService};
+use crate::remote::session::RemoteSessionService;
 
 pub(crate) const WORKSPACE_WATCH_WAKE_EVENT: &str = "plain://workspace-watch-wake";
 
@@ -266,21 +267,25 @@ pub(crate) async fn workspace_close_folder(
 pub(crate) async fn workspace_stat(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
+    remote: State<'_, RemoteSessionService>,
     request: WorkspaceEntryRequest,
 ) -> Result<WorkspaceEntryStat, CommandError> {
     let (root_id, relative_path) = request.into_parts()?;
-    service.stat(window.label(), root_id, relative_path).await
+    service
+        .stat(window.label(), root_id, relative_path, remote.inner())
+        .await
 }
 
 #[tauri::command]
 pub(crate) async fn workspace_read_dir(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
+    remote: State<'_, RemoteSessionService>,
     request: WorkspaceEntryRequest,
 ) -> Result<WorkspaceReadDirectoryResult, CommandError> {
     let (root_id, relative_path) = request.into_parts()?;
     service
-        .read_directory(window.label(), root_id, relative_path)
+        .read_directory(window.label(), root_id, relative_path, remote.inner())
         .await
 }
 
@@ -288,11 +293,12 @@ pub(crate) async fn workspace_read_dir(
 pub(crate) async fn workspace_read_file(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
+    remote: State<'_, RemoteSessionService>,
     request: WorkspaceEntryRequest,
 ) -> Result<tauri::ipc::Response, CommandError> {
     let (root_id, relative_path) = request.into_parts()?;
     let bytes = service
-        .read_file(window.label(), root_id, relative_path)
+        .read_file(window.label(), root_id, relative_path, remote.inner())
         .await?;
     Ok(raw_bytes_response(bytes))
 }
@@ -301,6 +307,7 @@ pub(crate) async fn workspace_read_file(
 pub(crate) async fn workspace_write_file(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
+    remote: State<'_, RemoteSessionService>,
     request: tauri::ipc::Request<'_>,
 ) -> Result<WorkspaceWriteResult, CommandError> {
     let frame = super::write_frame::WorkspaceWriteFileFrame::parse_invoke_body(request.body())?;
@@ -312,6 +319,7 @@ pub(crate) async fn workspace_write_file(
             relative_path,
             expected_version,
             content,
+            remote.inner(),
         )
         .await
 }
@@ -320,12 +328,19 @@ pub(crate) async fn workspace_write_file(
 pub(crate) async fn workspace_publish_file(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
+    remote: State<'_, RemoteSessionService>,
     request: tauri::ipc::Request<'_>,
 ) -> Result<WorkspaceWriteResult, CommandError> {
     let frame = super::publish_frame::WorkspacePublishFileFrame::parse_invoke_body(request.body())?;
     let (root_id, relative_path, content) = frame.into_parts();
     service
-        .publish_file(window.label(), root_id, relative_path, content)
+        .publish_file(
+            window.label(),
+            root_id,
+            relative_path,
+            content,
+            remote.inner(),
+        )
         .await
 }
 
@@ -333,11 +348,12 @@ pub(crate) async fn workspace_publish_file(
 pub(crate) async fn workspace_create_file(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
+    remote: State<'_, RemoteSessionService>,
     request: WorkspaceEntryRequest,
 ) -> Result<WorkspaceEntryStat, CommandError> {
     let (root_id, relative_path) = request.into_parts()?;
     service
-        .create_file(window.label(), root_id, relative_path)
+        .create_file(window.label(), root_id, relative_path, remote.inner())
         .await
 }
 
@@ -345,11 +361,12 @@ pub(crate) async fn workspace_create_file(
 pub(crate) async fn workspace_create_directory(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
+    remote: State<'_, RemoteSessionService>,
     request: WorkspaceEntryRequest,
 ) -> Result<WorkspaceEntryStat, CommandError> {
     let (root_id, relative_path) = request.into_parts()?;
     service
-        .create_directory(window.label(), root_id, relative_path)
+        .create_directory(window.label(), root_id, relative_path, remote.inner())
         .await
 }
 
@@ -357,6 +374,7 @@ pub(crate) async fn workspace_create_directory(
 pub(crate) async fn workspace_rename(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
+    remote: State<'_, RemoteSessionService>,
     request: WorkspaceRenameRequest,
 ) -> Result<(), CommandError> {
     let (root_id, source_path, target_path) = request.into_parts()?;
@@ -366,6 +384,7 @@ pub(crate) async fn workspace_rename(
         root_id,
         source_path,
         target_path,
+        remote.inner(),
     )
     .await
 }
@@ -410,10 +429,11 @@ pub(crate) async fn workspace_move(
 pub(crate) async fn workspace_prepare_delete(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
+    remote: State<'_, RemoteSessionService>,
     request: WorkspacePrepareDeleteRequest,
 ) -> Result<WorkspaceDeleteBatchPlan, CommandError> {
     service
-        .prepare_delete(window.label(), request.into_parts()?)
+        .prepare_delete(window.label(), request.into_parts()?, remote.inner())
         .await
 }
 
@@ -421,10 +441,11 @@ pub(crate) async fn workspace_prepare_delete(
 pub(crate) async fn workspace_cancel_delete(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
+    remote: State<'_, RemoteSessionService>,
     request: WorkspaceDeleteBatchRequest,
 ) -> Result<(), CommandError> {
     service
-        .cancel_delete(window.label(), request.confirmation_id())
+        .cancel_delete(window.label(), request.confirmation_id(), remote.inner())
         .await
 }
 
@@ -432,10 +453,11 @@ pub(crate) async fn workspace_cancel_delete(
 pub(crate) async fn workspace_begin_delete(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
+    remote: State<'_, RemoteSessionService>,
     request: WorkspaceDeleteBatchRequest,
 ) -> Result<(), CommandError> {
     service
-        .begin_delete(window.label(), request.confirmation_id())
+        .begin_delete(window.label(), request.confirmation_id(), remote.inner())
         .await
 }
 
@@ -443,6 +465,7 @@ pub(crate) async fn workspace_begin_delete(
 pub(crate) async fn workspace_commit_delete_entry(
     window: WebviewWindow,
     service: State<'_, WorkspaceService>,
+    remote: State<'_, RemoteSessionService>,
     request: WorkspaceCommitDeleteEntryRequest,
 ) -> Result<WorkspaceDeleteResult, CommandError> {
     let (confirmation_id, entry_id, root_id, relative_path, recursive) = request.into_parts()?;
@@ -454,6 +477,7 @@ pub(crate) async fn workspace_commit_delete_entry(
             root_id,
             relative_path,
             recursive,
+            remote.inner(),
         )
         .await
 }
@@ -511,6 +535,54 @@ pub(crate) async fn workspace_commit_trash_entry(
 
 fn raw_bytes_response(bytes: Vec<u8>) -> tauri::ipc::Response {
     tauri::ipc::Response::new(bytes)
+}
+
+/// `F220` S3 (ADR 0007 §1): authorizes a remote directory (already browsed
+/// via `remote_workspace_pick_directory`) as a new workspace root — the
+/// real, user-reachable twin of `WorkspaceScope::authorize_remote_root_for_test`.
+/// No Recent-history recording here: ADR 0007 §4's "Recent 记录远程 root"
+/// contract is `F220` S4's own scope (cold-start "needs reconnect" state
+/// this slice does not yet build), so this deliberately does not call
+/// `record_current_workspace`.
+#[tauri::command]
+pub(crate) async fn remote_workspace_add_root(
+    window: WebviewWindow,
+    service: State<'_, WorkspaceService>,
+    remote: State<'_, crate::remote::session::RemoteSessionService>,
+    request: crate::remote::dto::RemoteWorkspaceAddRootRequest,
+) -> Result<WorkspaceSnapshot, CommandError> {
+    let parts = request.into_parts()?;
+    let canonical_path = super::remote_backend::canonicalize_for_root(
+        remote.inner(),
+        window.label(),
+        parts.session_id,
+        &parts.path,
+    )
+    .await?;
+    let host_key_fingerprint = remote
+        .inner()
+        .session_host_key_fingerprint(window.label(), parts.session_id)?;
+    let display_name = parts
+        .display_name
+        .unwrap_or_else(|| remote_root_display_name(&canonical_path));
+    let (_root_id, snapshot) = service.authorize_remote_root(
+        window.label(),
+        parts.session_id,
+        &host_key_fingerprint,
+        &canonical_path,
+        &display_name,
+    )?;
+    Ok(snapshot)
+}
+
+/// Mirrors `workspace::root_display_name`'s own "last path segment, or a
+/// generic fallback for the root" shape, adapted to a `/`-separated remote
+/// path string instead of an ambient `Path`.
+fn remote_root_display_name(canonical_path: &str) -> String {
+    match canonical_path.trim_end_matches('/').rsplit('/').next() {
+        Some(segment) if !segment.is_empty() => segment.to_owned(),
+        _ => "Remote Root".to_owned(),
+    }
 }
 
 #[cfg(test)]

@@ -359,6 +359,101 @@ pub enum RemoteSessionDisconnectReason {
     WindowClosed,
 }
 
+/// `F220` S3: the remote directory picker's own bounds — a page cannot be
+/// larger than this, and a raw picker/add-root `path` string cannot be
+/// longer than this either (mirrors `remote::remote_fs::MAX_REMOTE_PATH_CHARS`
+/// numerically; kept as its own constant rather than importing that one
+/// since `dto` intentionally never depends on `remote_fs`).
+pub(crate) const MAX_REMOTE_PICK_PATH_CHARS: usize = 8_192;
+pub(crate) const MAX_REMOTE_PICK_PAGE_SIZE: u32 = 500;
+
+/// `remote_workspace_pick_directory`'s request — `path` is an absolute
+/// remote path (not workspace-relative: this browses *before* any root
+/// exists), `offset`/`limit` page through the (bounded) directory listing.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWorkspacePickDirectoryRequest {
+    session_id: RemoteSessionId,
+    path: String,
+    offset: u32,
+    limit: u32,
+}
+
+pub(crate) struct RemoteWorkspacePickDirectoryParts {
+    pub(crate) session_id: RemoteSessionId,
+    pub(crate) path: String,
+    pub(crate) offset: usize,
+    pub(crate) limit: usize,
+}
+
+impl RemoteWorkspacePickDirectoryRequest {
+    pub(crate) fn into_parts(self) -> Result<RemoteWorkspacePickDirectoryParts, CommandError> {
+        if self.path.is_empty() || self.path.len() > MAX_REMOTE_PICK_PATH_CHARS {
+            return Err(remote_request_invalid());
+        }
+        if self.limit == 0 || self.limit > MAX_REMOTE_PICK_PAGE_SIZE {
+            return Err(remote_request_invalid());
+        }
+        Ok(RemoteWorkspacePickDirectoryParts {
+            session_id: self.session_id,
+            path: self.path,
+            offset: self.offset as usize,
+            limit: self.limit as usize,
+        })
+    }
+}
+
+/// `remote_workspace_pick_directory`'s response — every entry is a
+/// directory (or a symlink resolving to one) by construction; there is
+/// nothing else worth listing in a *root* picker.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWorkspaceDirectoryPage {
+    pub canonical_path: String,
+    /// `None` only when `canonical_path` is the filesystem root (`"/"`).
+    pub parent_path: Option<String>,
+    pub entries: Vec<String>,
+    pub total: u32,
+    pub offset: u32,
+    pub has_more: bool,
+}
+
+/// `remote_workspace_add_root`'s request — `path` is an absolute remote
+/// path (typically the `canonicalPath` a prior `remote_workspace_pick_directory`
+/// page reported); `display_name` is optional (defaults to the path's own
+/// last segment, mirroring the local root picker's own default).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWorkspaceAddRootRequest {
+    session_id: RemoteSessionId,
+    path: String,
+    display_name: Option<String>,
+}
+
+pub(crate) struct RemoteWorkspaceAddRootParts {
+    pub(crate) session_id: RemoteSessionId,
+    pub(crate) path: String,
+    pub(crate) display_name: Option<String>,
+}
+
+impl RemoteWorkspaceAddRootRequest {
+    pub(crate) fn into_parts(self) -> Result<RemoteWorkspaceAddRootParts, CommandError> {
+        if self.path.is_empty() || self.path.len() > MAX_REMOTE_PICK_PATH_CHARS {
+            return Err(remote_request_invalid());
+        }
+        if let Some(name) = &self.display_name {
+            if name.is_empty() || name.len() > 512 {
+                return Err(remote_request_invalid());
+            }
+        }
+        Ok(RemoteWorkspaceAddRootParts {
+            session_id: self.session_id,
+            path: self.path,
+            display_name: self.display_name,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

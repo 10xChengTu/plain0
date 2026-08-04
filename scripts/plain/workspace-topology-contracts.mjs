@@ -270,6 +270,10 @@ const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 		relativePath: "app/features/remote/plain-remote-ssh-commands.ts",
 		count: 3,
 	}),
+	Object.freeze({
+		relativePath: "app/features/remote/plain-remote-workspace-commands.ts",
+		count: 2,
+	}),
 ]);
 
 // The pinned 35.0.1 packages expose deep wildcard modules, including modules
@@ -737,6 +741,11 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/remote/plain-remote-ssh-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
 	"app/features/remote/plain-remote-ssh-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
 	"app/features/remote/plain-remote-ssh-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput",
+	"app/features/remote/plain-remote-workspace-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions",
+	"app/features/remote/plain-remote-workspace-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
+	"app/features/remote/plain-remote-workspace-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
+	"app/features/remote/plain-remote-workspace-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
+	"app/features/remote/plain-remote-workspace-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput",
 	"app/features/debug/plain-debug-root.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
 	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service",
@@ -5149,6 +5158,31 @@ function configurationPathUriContext(identifier, property) {
 	return configurationUriContext(identifier, property, "path");
 }
 
+/**
+ * `F220` S3: `PlainWorkspaceFileSystemProvider.plainRefreshRoot`'s own
+ * `URI.from({ scheme: PLAIN_WORKSPACE_SCHEME, ... }, true)` construction —
+ * a third audited reference to `PLAIN_WORKSPACE_SCHEME` alongside the two
+ * `resolveMutationResource`/`resolveResource` comparisons already tracked.
+ * Simpler than `configurationUriContext` (no sibling-property/receipt
+ * shape to also verify): this only confirms the property assignment sits
+ * inside an object literal passed as `URI.from`'s first argument with a
+ * literal `true` second argument, matching that one call site exactly.
+ */
+function plainRefreshRootUriContext(_identifier, property) {
+	const objectLiteral = property.parent;
+	if (!ts.isObjectLiteralExpression(objectLiteral)) {
+		return false;
+	}
+	const call = objectLiteral.parent;
+	return (
+		ts.isCallExpression(call) &&
+		sameChain(call.expression, ["URI", "from"]) &&
+		call.arguments.length === 2 &&
+		call.arguments[0] === objectLiteral &&
+		call.arguments[1].kind === ts.SyntaxKind.TrueKeyword
+	);
+}
+
 function boundFileRejectionContext(identifier, comparison) {
 	const owner = nearestFunctionLike(identifier);
 	if (
@@ -5292,6 +5326,14 @@ function validateProviderProducerBindings(authority) {
 								"PlainWorkspaceFileSystemProvider",
 							),
 							rejectionGateContext,
+						),
+						propertyInitializerReference(
+							"scheme",
+							callableOwner(
+								"plainRefreshRoot",
+								"PlainWorkspaceFileSystemProvider",
+							),
+							plainRefreshRootUriContext,
 						),
 					],
 				},
@@ -5547,6 +5589,16 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 		"registerPlainUntitledWorkflow",
 		bootstrapOwner,
 	);
+	// `F220` S3: `configurePlainRemoteWorkspaceBridge`'s third argument is
+	// the same `workspaceFileSystemProvider` instance, narrowed to its own
+	// `PlainWorkspaceRemoteRefreshProvider` capability — a fourth audited
+	// reference alongside the delete coordinator/custom-provider
+	// registration/untitled-workflow ones already tracked below.
+	const remoteWorkspaceBridgeCalls = directCallsNamed(
+		mainSource,
+		"configurePlainRemoteWorkspaceBridge",
+		bootstrapOwner,
+	);
 
 	const userDataDeclaration = declarationInitializedByExactCall(
 		mainAnalysis,
@@ -5647,6 +5699,12 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 	const untitledWorkflowProviderArgument = unwrapExpression(
 		untitledWorkflowCalls[0].arguments[2],
 	);
+	if (remoteWorkspaceBridgeCalls.length !== 1) {
+		return false;
+	}
+	const remoteWorkspaceBridgeProviderArgument = unwrapExpression(
+		remoteWorkspaceBridgeCalls[0].arguments[2],
+	);
 	return (
 		exactBindingReferences(mainSource, mainAnalysis, userDataSchemeName, [
 			namedImportLocalIdentifier(
@@ -5677,6 +5735,7 @@ function validateProviderBindingAuthority(authority, moduleImports) {
 			deleteCoordinatorProviderArgument,
 			rootRegistrationArgument,
 			untitledWorkflowProviderArgument,
+			remoteWorkspaceBridgeProviderArgument,
 		]) &&
 		exactBindingReferences(mainSource, mainAnalysis, configurationName, [
 			configurationDeclaration.name,

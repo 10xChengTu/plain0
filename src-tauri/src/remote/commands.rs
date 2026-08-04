@@ -10,8 +10,10 @@ use crate::error::CommandError;
 use super::dto::{
     RemoteHostKeyConfirmRequest, RemoteHostKeyListResult, RemoteHostTarget,
     RemoteSessionConnectRequest, RemoteSessionConnectResult, RemoteSessionEventPayload,
-    RemoteSessionIdRequest, RemoteSessionStateResult,
+    RemoteSessionIdRequest, RemoteSessionStateResult, RemoteWorkspaceDirectoryPage,
+    RemoteWorkspacePickDirectoryRequest,
 };
+use super::remote_fs;
 use super::session::{RemoteSessionEventSink, RemoteSessionService};
 
 /// Window-targeted session-lifecycle event stream — mirrors
@@ -138,6 +140,38 @@ pub(crate) async fn remote_host_key_list(
     remote: State<'_, RemoteSessionService>,
 ) -> Result<RemoteHostKeyListResult, CommandError> {
     remote.inner().list_host_keys().await
+}
+
+/// `F220` S3: the remote directory picker's own IPC entry point — browses
+/// an arbitrary absolute remote path (bounded to
+/// [`super::dto::MAX_REMOTE_PICK_PAGE_SIZE`] directories per page), used by
+/// the `Plain: Open Remote Folder…` QuickPick flow before any root exists
+/// yet. Never touches `WorkspaceService`: this is purely a remote-session-
+/// scoped read, exactly like `remote_session_state`.
+#[tauri::command]
+pub(crate) async fn remote_workspace_pick_directory(
+    window: WebviewWindow,
+    remote: State<'_, RemoteSessionService>,
+    request: RemoteWorkspacePickDirectoryRequest,
+) -> Result<RemoteWorkspaceDirectoryPage, CommandError> {
+    let parts = request.into_parts()?;
+    let page = remote_fs::pick_directory(
+        remote.inner(),
+        window.label(),
+        parts.session_id,
+        &parts.path,
+        parts.offset,
+        parts.limit,
+    )
+    .await?;
+    Ok(RemoteWorkspaceDirectoryPage {
+        canonical_path: page.canonical_path,
+        parent_path: page.parent_path,
+        entries: page.entries.into_iter().map(|entry| entry.name).collect(),
+        total: u32::try_from(page.total).unwrap_or(u32::MAX),
+        offset: u32::try_from(page.offset).unwrap_or(u32::MAX),
+        has_more: page.has_more,
+    })
 }
 
 #[cfg(test)]

@@ -2635,6 +2635,39 @@ export interface PlainBridge {
 	remoteSessionWatchEvent(
 		listener: (event: RemoteSessionEventPayload) => void,
 	): Unlisten;
+	/** `F220` S3: browses an arbitrary absolute remote path on a live
+	 * session — the `Plain: Open Remote Folder…` QuickPick's own data
+	 * source, used *before* any root exists (unlike every `workspace*`
+	 * method, which always addresses an already-authorized root). Every
+	 * entry in the returned page is a directory. */
+	remoteWorkspacePickDirectory(
+		sessionId: string,
+		path: string,
+		offset: number,
+		limit: number,
+	): Promise<RemoteWorkspaceDirectoryPage>;
+	/** `F220` S3 (ADR 0007 §1): authorizes `path` (typically a prior
+	 * `remoteWorkspacePickDirectory` page's own `canonicalPath`) as a new —
+	 * or, by identity, already-existing — workspace root on `sessionId`'s
+	 * live session. */
+	remoteWorkspaceAddRoot(
+		sessionId: string,
+		path: string,
+		displayName?: string,
+	): Promise<WorkspaceSnapshot>;
+}
+
+// --- Remote SSH workspace filesystem (F220 S3) ------------------------------
+
+/** `remoteWorkspacePickDirectory`'s response. */
+export interface RemoteWorkspaceDirectoryPage {
+	readonly canonicalPath: string;
+	/** `null` only when `canonicalPath` is the filesystem root (`"/"`). */
+	readonly parentPath: string | null;
+	readonly entries: readonly string[];
+	readonly total: number;
+	readonly offset: number;
+	readonly hasMore: boolean;
 }
 
 // --- Remote SSH (F220 S1: session + host-key trust foundation) -------------

@@ -54,7 +54,12 @@ pub(crate) struct WorkspaceReadFileReceipt {
 }
 
 impl WorkspaceReadFileReceipt {
-    fn new(stat: WorkspaceEntryStat, content: Vec<u8>) -> Result<Self, CommandError> {
+    /// `pub(crate)` (rather than private) because `F220` S3's remote backend
+    /// (`workspace::remote_backend::read_file`) also needs to produce the
+    /// exact same validated receipt — and therefore the exact same `PLR1`
+    /// wire frame via [`Self::into_plr1_frame`] — for a remote-backed read,
+    /// so the frontend's decoder stays identical across both backends.
+    pub(crate) fn new(stat: WorkspaceEntryStat, content: Vec<u8>) -> Result<Self, CommandError> {
         let content_size = u64::try_from(content.len()).map_err(|_| file_too_large())?;
         if content.len() > MAX_FILE_BYTES {
             return Err(file_too_large());

@@ -115,10 +115,13 @@ import {
 	decodeRemoteSessionEventPayload,
 	decodeRemoteSessionStateResult,
 	decodeRemoteVoid,
+	decodeRemoteWorkspaceDirectoryPage,
 	frozenRemoteHostKeyConfirmRequest,
 	frozenRemoteHostTargetRequest,
 	frozenRemoteSessionConnectRequest,
 	frozenRemoteSessionIdRequest,
+	frozenRemoteWorkspaceAddRootRequest,
+	frozenRemoteWorkspacePickDirectoryRequest,
 } from "./remote-codec";
 import {
 	decodeWorkspaceSearchExpandReplacementsResult,
@@ -1616,6 +1619,27 @@ export function createNativeBridge(): PlainBridge {
 				disposed = true;
 				unlisten?.();
 			};
+		},
+		remoteWorkspacePickDirectory: async (sessionId, path, offset, limit) => {
+			const request = frozenRemoteWorkspacePickDirectoryRequest(
+				sessionId,
+				path,
+				offset,
+				limit,
+			);
+			return decodeRemoteWorkspaceDirectoryPage(
+				await invoke<unknown>("remote_workspace_pick_directory", { request }),
+			);
+		},
+		remoteWorkspaceAddRoot: async (sessionId, path, displayName) => {
+			const request = frozenRemoteWorkspaceAddRootRequest(
+				sessionId,
+				path,
+				displayName,
+			);
+			return decodeWorkspaceSnapshot(
+				await invoke<unknown>("remote_workspace_add_root", { request }),
+			);
 		},
 	};
 }
