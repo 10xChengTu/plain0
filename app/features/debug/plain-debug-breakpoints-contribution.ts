@@ -17,14 +17,18 @@
  * A left-click toggles a plain breakpoint unconditionally (every real DAP
  * adapter must support at least unconditional line breakpoints). A
  * right-click on an *existing* breakpoint's glyph opens a small popup to
- * edit its condition/log-message — but the two inputs are disabled (with an
- * explanatory placeholder, never silently accepted and silently ignored)
- * whenever the live session's negotiated `Capabilities` do not advertise
- * `supportsConditionalBreakpoints`/`supportsLogPoints` respectively. Before
- * any session has ever started, both are enabled (there is no adapter yet to
+ * edit its condition/log-message/hit-count — but the three inputs are
+ * disabled (with an explanatory placeholder, never silently accepted and
+ * silently ignored) whenever the live session's negotiated `Capabilities` do
+ * not advertise `supportsConditionalBreakpoints`/`supportsLogPoints`/
+ * `supportsHitConditionalBreakpoints` respectively. Before any session has
+ * ever started, all three are enabled (there is no adapter yet to
  * contradict) — the real gate only engages once a live session's
  * capabilities are known, matching this feature's "不得假设支持" requirement
- * without blocking editing before a session even exists.
+ * without blocking editing before a session even exists. The hit-count
+ * expression itself (e.g. `"5"`, `">=3"`) is never parsed by Plain — it is
+ * sent verbatim to the adapter, which is the only party that understands its
+ * grammar (`docs/research/2026-08-04-complete-debug.md`'s "架构裁定 §3").
  */
 
 import { addDisposableListener } from "@codingame/monaco-vscode-api/vscode/vs/base/browser/dom";
@@ -114,6 +118,9 @@ function glyphHoverText(view: DebugBreakpointView): string {
 	if (view.logMessage !== null && view.logMessage.length > 0) {
 		parts.push(`Log message: ${view.logMessage}`);
 	}
+	if (view.hitCondition !== null && view.hitCondition.length > 0) {
+		parts.push(`Hit count: ${view.hitCondition}`);
+	}
 	if (view.verification !== null) {
 		if (!view.verification.verified) {
 			parts.push(
@@ -176,7 +183,12 @@ function createBreakpointPopup(
 	view: DebugBreakpointView,
 	conditionSupported: boolean,
 	logPointSupported: boolean,
-	onSave: (condition: string | null, logMessage: string | null) => void,
+	hitConditionSupported: boolean,
+	onSave: (
+		condition: string | null,
+		logMessage: string | null,
+		hitCondition: string | null,
+	) => void,
 	onRemove: () => void,
 ): BreakpointPopupHandle {
 	const element = document.createElement("div");
@@ -208,6 +220,18 @@ function createBreakpointPopup(
 		: "Not supported by this adapter";
 	logMessageLabel.append(logMessageInput);
 
+	const hitConditionLabel = document.createElement("label");
+	hitConditionLabel.textContent = "Hit Count";
+	const hitConditionInput = document.createElement("input");
+	hitConditionInput.type = "text";
+	hitConditionInput.className = "plain-debug-breakpoint-popup-hit-condition";
+	hitConditionInput.value = view.hitCondition ?? "";
+	hitConditionInput.disabled = !hitConditionSupported;
+	hitConditionInput.placeholder = hitConditionSupported
+		? "e.g. 5 or >=3"
+		: "Not supported by this adapter";
+	hitConditionLabel.append(hitConditionInput);
+
 	const saveButton = document.createElement("button");
 	saveButton.type = "button";
 	saveButton.textContent = "Save";
@@ -220,12 +244,16 @@ function createBreakpointPopup(
 
 	const disposables = [
 		addDisposableListener(saveButton, "click", () => {
+			const trimmedHitCondition = hitConditionInput.value.trim();
 			onSave(
 				conditionSupported && conditionInput.value.length > 0
 					? conditionInput.value
 					: null,
 				logPointSupported && logMessageInput.value.length > 0
 					? logMessageInput.value
+					: null,
+				hitConditionSupported && trimmedHitCondition.length > 0
+					? trimmedHitCondition
 					: null,
 			);
 		}),
@@ -234,7 +262,13 @@ function createBreakpointPopup(
 		}),
 	];
 
-	element.append(conditionLabel, logMessageLabel, saveButton, removeButton);
+	element.append(
+		conditionLabel,
+		logMessageLabel,
+		hitConditionLabel,
+		saveButton,
+		removeButton,
+	);
 	container.append(element);
 
 	return {
@@ -313,24 +347,31 @@ export function createPlainDebugBreakpointsContribution(
 			capabilities,
 			"supportsLogPoints",
 		);
+		const hitConditionSupported = capabilitySupported(
+			capabilities,
+			"supportsHitConditionalBreakpoints",
+		);
 		const popup = createBreakpointPopup(
 			domNode,
 			line,
 			view,
 			conditionSupported,
 			logPointSupported,
-			(condition, logMessage) => {
+			hitConditionSupported,
+			(condition, logMessage, hitCondition) => {
 				// A single atomic update (see `DebugBreakpointStore.setDetails`'s
-				// own doc comment for why this must not be two separate
-				// `setCondition`/`setLogMessage` calls) — an unsupported field
-				// keeps its existing value rather than being overwritten with
-				// whatever the (disabled, unusable) input happened to hold.
+				// own doc comment for why this must not be separate
+				// `setCondition`/`setLogMessage`/`setHitCondition` calls) — an
+				// unsupported field keeps its existing value rather than being
+				// overwritten with whatever the (disabled, unusable) input
+				// happened to hold.
 				breakpoints.setDetails(
 					source.rootId,
 					source.path,
 					line,
 					conditionSupported ? condition : view.condition,
 					logPointSupported ? logMessage : view.logMessage,
+					hitConditionSupported ? hitCondition : view.hitCondition,
 				);
 				closePopup(editor);
 			},

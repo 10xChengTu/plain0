@@ -735,16 +735,21 @@ export interface DebugSessionStartResult {
 }
 
 /** One line breakpoint sent to `debugSetBreakpoints` — `condition`/
- * `logMessage` are sent regardless of whether the adapter actually
- * advertised `supportsConditionalBreakpoints`/`supportsLogPoints` (the Rust
- * side does not gate this — see `SourceBreakpointsRequest`'s own doc
- * comment); the frontend's own breakpoint-editing UI is what must consult
+ * `logMessage`/`hitCondition` are sent regardless of whether the adapter
+ * actually advertised `supportsConditionalBreakpoints`/`supportsLogPoints`/
+ * `supportsHitConditionalBreakpoints` (the Rust side does not gate this —
+ * see `SourceBreakpointsRequest`'s own doc comment); the frontend's own
+ * breakpoint-editing UI is what must consult
  * `DebugSessionStartResult.capabilities` before ever *offering* the
- * condition/log-message input, per this feature's own acceptance criteria. */
+ * condition/log-message/hit-count input, per this feature's own acceptance
+ * criteria. `hitCondition` is an adapter-interpreted expression (e.g.
+ * `"5"`/`">=3"`) Plain never parses — see
+ * `docs/research/2026-08-04-complete-debug.md`'s "架构裁定 §3". */
 export interface DebugBreakpointRequest {
 	readonly line: number;
 	readonly condition: string | null;
 	readonly logMessage: string | null;
+	readonly hitCondition: string | null;
 }
 
 /** One DAP `Breakpoint` reply entry — `verified`/`line` may legitimately

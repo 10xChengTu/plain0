@@ -29,6 +29,7 @@ export interface DebugBreakpointDescriptor {
 	readonly line: number;
 	readonly condition: string | null;
 	readonly logMessage: string | null;
+	readonly hitCondition: string | null;
 }
 
 export interface DebugBreakpointVerification {
@@ -63,8 +64,9 @@ export type DebugBreakpointChangeListener = (
 
 /**
  * One (path, line) breakpoint's complete client-side state — what the
- * `debugSetBreakpoints` request already carries (`condition`/`logMessage`)
- * merged with whatever verification response the store has recorded for it.
+ * `debugSetBreakpoints` request already carries (`condition`/`logMessage`/
+ * `hitCondition`) merged with whatever verification response the store has
+ * recorded for it.
  * `verification` is `null` until a live session has actually reported on
  * this exact line at least once (no session yet, or the session has not
  * been asked about this path yet) — never a default guess.
@@ -73,6 +75,7 @@ export interface DebugBreakpointView {
 	readonly line: number;
 	readonly condition: string | null;
 	readonly logMessage: string | null;
+	readonly hitCondition: string | null;
 	readonly verification: DebugBreakpointVerification | null;
 }
 
@@ -147,7 +150,12 @@ export class DebugBreakpointStore {
 			return;
 		}
 		const map = forPath ?? new Map<number, DebugBreakpointDescriptor>();
-		map.set(line, { line, condition: null, logMessage: null });
+		map.set(line, {
+			line,
+			condition: null,
+			logMessage: null,
+			hitCondition: null,
+		});
 		root.set(path, map);
 		this.#verification.get(rootId)?.get(path)?.delete(line);
 		this.#notify(rootId, path, "breakpoints");
@@ -199,28 +207,51 @@ export class DebugBreakpointStore {
 		this.#notify(rootId, path, "breakpoints");
 	}
 
-	/** Sets both `condition` and `logMessage` in one atomic update — a single
-	 * notification, not two. This is what the breakpoint popup's own "Save"
-	 * button calls (rather than `setCondition` then `setLogMessage`
-	 * separately): a real E2E run caught that calling both individually for
-	 * one logical edit fired two independent `DebugSessionController`
-	 * re-syncs (two real `debug_set_breakpoints` round trips for what the
-	 * user experienced as a single save), which is wasteful even though
-	 * harmless (DAP's own `setBreakpoints` replaces the whole set each time,
-	 * so it is not *incorrect*, just redundant chatter this method avoids). */
-	setDetails(
+	/** Same contract as {@link setCondition}, for the DAP `hitCondition`
+	 * expression (e.g. `"5"`/`">=3"`) — always accepted regardless of whether
+	 * the current session advertises `supportsHitConditionalBreakpoints`; the
+	 * adapter interprets the expression itself, this store never parses it
+	 * (see `plain-debug-breakpoints-contribution.ts`'s own capability-gating
+	 * doc comment). A line with no existing breakpoint is a no-op. */
+	setHitCondition(
 		rootId: string,
 		path: string,
 		line: number,
-		condition: string | null,
-		logMessage: string | null,
+		hitCondition: string | null,
 	): void {
 		const forPath = this.#descriptors.get(rootId)?.get(path);
 		const existing = forPath?.get(line);
 		if (forPath === undefined || existing === undefined) {
 			return;
 		}
-		forPath.set(line, { ...existing, condition, logMessage });
+		forPath.set(line, { ...existing, hitCondition });
+		this.#notify(rootId, path, "breakpoints");
+	}
+
+	/** Sets `condition`, `logMessage`, and `hitCondition` in one atomic
+	 * update — a single notification, not three. This is what the breakpoint
+	 * popup's own "Save" button calls (rather than `setCondition`/
+	 * `setLogMessage`/`setHitCondition` separately): a real E2E run caught
+	 * that calling multiple setters individually for one logical edit fired
+	 * as many independent `DebugSessionController` re-syncs (one real
+	 * `debug_set_breakpoints` round trip per setter for what the user
+	 * experienced as a single save), which is wasteful even though harmless
+	 * (DAP's own `setBreakpoints` replaces the whole set each time, so it is
+	 * not *incorrect*, just redundant chatter this method avoids). */
+	setDetails(
+		rootId: string,
+		path: string,
+		line: number,
+		condition: string | null,
+		logMessage: string | null,
+		hitCondition: string | null,
+	): void {
+		const forPath = this.#descriptors.get(rootId)?.get(path);
+		const existing = forPath?.get(line);
+		if (forPath === undefined || existing === undefined) {
+			return;
+		}
+		forPath.set(line, { ...existing, condition, logMessage, hitCondition });
 		this.#notify(rootId, path, "breakpoints");
 	}
 

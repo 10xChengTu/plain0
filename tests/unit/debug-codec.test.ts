@@ -177,13 +177,15 @@ describe("root-scoped debug request encoders", () => {
 				VALID_SESSION_ID,
 				VALID_ROOT_ID,
 				"src/main.py",
-				[{ line: 7, condition: null, logMessage: null }],
+				[{ line: 7, condition: null, logMessage: null, hitCondition: null }],
 			),
 		).toEqual({
 			sessionId: VALID_SESSION_ID,
 			rootId: VALID_ROOT_ID,
 			path: "src/main.py",
-			breakpoints: [{ line: 7, condition: null, logMessage: null }],
+			breakpoints: [
+				{ line: 7, condition: null, logMessage: null, hitCondition: null },
+			],
 		});
 		expect(() =>
 			frozenDebugSessionStartRequest(
@@ -199,6 +201,46 @@ describe("root-scoped debug request encoders", () => {
 				"not-a-root-id",
 				"main.py",
 				[],
+			),
+		).toThrow();
+	});
+
+	it("encodes a non-null hitCondition and rejects an oversized one", () => {
+		expect(
+			frozenDebugSetBreakpointsRequest(
+				VALID_SESSION_ID,
+				VALID_ROOT_ID,
+				"src/main.py",
+				[
+					{
+						line: 7,
+						condition: null,
+						logMessage: null,
+						hitCondition: ">=3",
+					},
+				],
+			),
+		).toEqual({
+			sessionId: VALID_SESSION_ID,
+			rootId: VALID_ROOT_ID,
+			path: "src/main.py",
+			breakpoints: [
+				{ line: 7, condition: null, logMessage: null, hitCondition: ">=3" },
+			],
+		});
+		expect(() =>
+			frozenDebugSetBreakpointsRequest(
+				VALID_SESSION_ID,
+				VALID_ROOT_ID,
+				"src/main.py",
+				[
+					{
+						line: 7,
+						condition: null,
+						logMessage: null,
+						hitCondition: "x".repeat(8_193),
+					},
+				],
 			),
 		).toThrow();
 	});

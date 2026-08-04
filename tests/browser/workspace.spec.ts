@@ -21536,7 +21536,9 @@ test("Debug requires an explicit multi-root choice and keeps launch plus same-pa
 		sessionId: firstSessionId,
 		rootId: nativeSecondaryRootId,
 		path: "main.py",
-		breakpoints: [{ line: 3, condition: null, logMessage: null }],
+		breakpoints: [
+			{ line: 3, condition: null, logMessage: null, hitCondition: null },
+		],
 	});
 	let launchReads = (await launchConfigReads()).slice(
 		launchReadsBeforeCancelledStart,
@@ -21573,8 +21575,8 @@ test("Debug requires an explicit multi-root choice and keeps launch plus same-pa
 		rootId: nativeRootId,
 		path: "main.py",
 		breakpoints: [
-			{ line: 2, condition: null, logMessage: null },
-			{ line: 3, condition: null, logMessage: null },
+			{ line: 2, condition: null, logMessage: null, hitCondition: null },
+			{ line: 3, condition: null, logMessage: null, hitCondition: null },
 		],
 	});
 	launchReads = (await launchConfigReads()).slice(
@@ -21960,7 +21962,9 @@ test("places a breakpoint the adapter moves to another line, starts a session th
 		sessionId,
 		rootId: nativeRootId,
 		path: "main.py",
-		breakpoints: [{ line: 6, condition: null, logMessage: null }],
+		breakpoints: [
+			{ line: 6, condition: null, logMessage: null, hitCondition: null },
+		],
 	});
 	await expect(glyph).toHaveClass(/plain-debug-breakpoint-glyph-verified/);
 	await expect(glyph).not.toHaveClass(
@@ -22459,7 +22463,7 @@ test("Watch results with a variablesReference expand through the shared variable
 	expect(pageErrors).toEqual([]);
 });
 
-test("breakpoint popup disables condition/log-point inputs when the adapter's capabilities do not advertise support, and a rejected breakpoint renders distinctly", async ({
+test("breakpoint popup disables condition/log-point/hit-count inputs when the adapter's capabilities do not advertise support, and a rejected breakpoint renders distinctly", async ({
 	page,
 }) => {
 	const pageErrors: string[] = [];
@@ -22525,8 +22529,12 @@ test("breakpoint popup disables condition/log-point inputs when the adapter's ca
 		".plain-debug-breakpoint-popup-condition",
 	);
 	const logInput = popup.locator(".plain-debug-breakpoint-popup-log-message");
+	const hitConditionInput = popup.locator(
+		".plain-debug-breakpoint-popup-hit-condition",
+	);
 	await expect(conditionInput).toBeDisabled();
 	await expect(logInput).toBeDisabled();
+	await expect(hitConditionInput).toBeDisabled();
 	await expect(conditionInput).toHaveAttribute(
 		"placeholder",
 		"Not supported by this adapter",
@@ -22535,11 +22543,15 @@ test("breakpoint popup disables condition/log-point inputs when the adapter's ca
 		"placeholder",
 		"Not supported by this adapter",
 	);
+	await expect(hitConditionInput).toHaveAttribute(
+		"placeholder",
+		"Not supported by this adapter",
+	);
 
 	expect(pageErrors).toEqual([]);
 });
 
-test("breakpoint popup enables condition/log-point inputs when the adapter advertises support, and saving re-syncs the live session", async ({
+test("breakpoint popup enables condition/log-point/hit-count inputs when the adapter advertises support, and saving re-syncs the live session", async ({
 	page,
 }) => {
 	const pageErrors: string[] = [];
@@ -22564,6 +22576,7 @@ test("breakpoint popup enables condition/log-point inputs when the adapter adver
 			capabilities: {
 				supportsConditionalBreakpoints: true,
 				supportsLogPoints: true,
+				supportsHitConditionalBreakpoints: true,
 			},
 		},
 	);
@@ -22592,7 +22605,7 @@ test("breakpoint popup enables condition/log-point inputs when the adapter adver
 
 	// Control-group counterpart to the previous test: same feature, same
 	// popup, but the live session's capabilities now really advertise
-	// support — the exact two inputs the previous test proved disabled are
+	// support — the exact three inputs the previous test proved disabled are
 	// now genuinely enabled.
 	await clickGlyphMargin(page, "total = add(3, 4)", "right");
 	const popup = page.locator(".plain-debug-breakpoint-popup");
@@ -22601,13 +22614,21 @@ test("breakpoint popup enables condition/log-point inputs when the adapter adver
 		".plain-debug-breakpoint-popup-condition",
 	);
 	const logInput = popup.locator(".plain-debug-breakpoint-popup-log-message");
+	const hitConditionInput = popup.locator(
+		".plain-debug-breakpoint-popup-hit-condition",
+	);
 	await expect(conditionInput).toBeEnabled();
 	await expect(logInput).toBeEnabled();
+	await expect(hitConditionInput).toBeEnabled();
 
-	// Meaningful interaction: typing a condition and saving re-syncs the
-	// breakpoint with the live session — a real second `debug_set_breakpoints`
-	// call carrying the real condition text, not just a local UI update.
+	// Meaningful interaction: typing a condition and a hit-count expression
+	// and saving re-syncs the breakpoint with the live session — a real
+	// second `debug_set_breakpoints` call carrying the real text, not just a
+	// local UI update. Leading/trailing whitespace in the hit-count input is
+	// trimmed before it is ever sent (Plain never parses the expression
+	// itself, but it does not forward incidental whitespace either).
 	await conditionInput.fill("total > 5");
+	await hitConditionInput.fill("  >= 3  ");
 	await popup.locator(".plain-debug-breakpoint-popup-save").click();
 	await expect(popup).toHaveCount(0);
 
@@ -22622,7 +22643,118 @@ test("breakpoint popup enables condition/log-point inputs when the adapter adver
 		sessionId,
 		rootId: nativeRootId,
 		path: "main.py",
-		breakpoints: [{ line: 6, condition: "total > 5", logMessage: null }],
+		breakpoints: [
+			{
+				line: 6,
+				condition: "total > 5",
+				logMessage: null,
+				hitCondition: ">= 3",
+			},
+		],
+	});
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("editing then clearing a breakpoint's hit-count re-syncs the live session each time, and its line stays the stable identity", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "main.py": DEBUG_MAIN_PY, ".vscode/launch.json": DEBUG_LAUNCH_JSON },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{},
+		{},
+		{
+			capabilities: { supportsHitConditionalBreakpoints: true },
+		},
+	);
+	await openMainPy(page);
+	await clickGlyphMargin(page, "total = add(3, 4)");
+
+	await executePaletteCommand(
+		page,
+		"Start Debugging",
+		"Plain: Start Debugging",
+	);
+	const adapterDialog = page.getByRole("dialog");
+	await expect(adapterDialog).toBeVisible();
+	await adapterDialog
+		.getByRole("button", { name: "Run Adapter", exact: true })
+		.click();
+	await expect(adapterDialog).toHaveCount(0);
+	const sessionId = await currentDebugSessionId(page);
+
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "debug_set_breakpoints")).length,
+		)
+		.toBe(1);
+
+	// First edit: set a hit-count expression.
+	await clickGlyphMargin(page, "total = add(3, 4)", "right");
+	let popup = page.locator(".plain-debug-breakpoint-popup");
+	await expect(popup).toBeVisible();
+	await popup.locator(".plain-debug-breakpoint-popup-hit-condition").fill("5");
+	await popup.locator(".plain-debug-breakpoint-popup-save").click();
+	await expect(popup).toHaveCount(0);
+
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "debug_set_breakpoints")).length,
+		)
+		.toBe(2);
+	let calls = await terminalCallsFor(page, "debug_set_breakpoints");
+	expect(calls[1]!.args.request).toEqual({
+		sessionId,
+		rootId: nativeRootId,
+		path: "main.py",
+		breakpoints: [
+			{ line: 6, condition: null, logMessage: null, hitCondition: "5" },
+		],
+	});
+
+	// Second edit: re-opening the popup prefills the previously saved value —
+	// the same line is still the breakpoint's identity, not a new one.
+	await clickGlyphMargin(page, "total = add(3, 4)", "right");
+	popup = page.locator(".plain-debug-breakpoint-popup");
+	await expect(popup).toBeVisible();
+	const hitConditionInput = popup.locator(
+		".plain-debug-breakpoint-popup-hit-condition",
+	);
+	await expect(hitConditionInput).toHaveValue("5");
+	await hitConditionInput.fill("");
+	await popup.locator(".plain-debug-breakpoint-popup-save").click();
+	await expect(popup).toHaveCount(0);
+
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "debug_set_breakpoints")).length,
+		)
+		.toBe(3);
+	calls = await terminalCallsFor(page, "debug_set_breakpoints");
+	expect(calls[2]!.args.request).toEqual({
+		sessionId,
+		rootId: nativeRootId,
+		path: "main.py",
+		breakpoints: [
+			{ line: 6, condition: null, logMessage: null, hitCondition: null },
+		],
 	});
 
 	expect(pageErrors).toEqual([]);

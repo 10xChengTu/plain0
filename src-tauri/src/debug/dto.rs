@@ -207,10 +207,16 @@ impl<'de> Deserialize<'de> for DebugSessionId {
     }
 }
 
-/// One `line`/`condition`/`logMessage` breakpoint entry within a
-/// [`SourceBreakpointsRequest`] — the wire shape for the handshake's
-/// "setBreakpoints series" step (see `super::session`'s module doc for why
-/// this is deliberately minimal, not the breakpoint feature itself).
+/// One `line`/`condition`/`logMessage`/`hitCondition` breakpoint entry
+/// within a [`SourceBreakpointsRequest`] — the wire shape for the
+/// handshake's "setBreakpoints series" step (see `super::session`'s module
+/// doc for why this is deliberately minimal, not the breakpoint feature
+/// itself). `hit_condition` is an adapter-interpreted expression (e.g.
+/// `"5"`/`">=3"`) this domain never parses — `set_breakpoints_arguments`
+/// only trims and skips it when blank, exactly like every other field here
+/// (no deserialize-time rejection of an empty/whitespace string, matching
+/// `condition`/`log_message`'s own existing treatment — see
+/// `docs/research/2026-08-04-complete-debug.md`'s "架构裁定 §3").
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
@@ -220,6 +226,8 @@ pub struct LineBreakpointRequest {
     pub condition: Option<String>,
     #[serde(default)]
     pub log_message: Option<String>,
+    #[serde(default)]
+    pub hit_condition: Option<String>,
 }
 
 /// One source file's breakpoints — becomes one `setBreakpoints` request
@@ -255,6 +263,12 @@ fn set_breakpoints_arguments(path: &str, breakpoints: &[LineBreakpointRequest]) 
             }
             if let Some(log_message) = &breakpoint.log_message {
                 object.insert("logMessage".to_owned(), Value::from(log_message.clone()));
+            }
+            if let Some(hit_condition) = &breakpoint.hit_condition {
+                let trimmed = hit_condition.trim();
+                if !trimmed.is_empty() {
+                    object.insert("hitCondition".to_owned(), Value::from(trimmed.to_owned()));
+                }
             }
             Value::Object(object)
         })
@@ -1397,6 +1411,7 @@ mod tests {
                     line: line as u32,
                     condition: None,
                     log_message: None,
+                    hit_condition: None,
                 })
                 .collect(),
         }];
@@ -1412,11 +1427,13 @@ mod tests {
                     line: 3,
                     condition: None,
                     log_message: None,
+                    hit_condition: None,
                 },
                 LineBreakpointRequest {
                     line: 7,
                     condition: Some("x > 1".to_owned()),
                     log_message: Some("hit line 7".to_owned()),
+                    hit_condition: None,
                 },
             ],
         };
@@ -1431,6 +1448,69 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[test]
+    fn hit_condition_is_trimmed_and_omitted_when_blank_or_absent() {
+        let request = SourceBreakpointsRequest {
+            path: "/tmp/a.py".to_owned(),
+            breakpoints: vec![
+                LineBreakpointRequest {
+                    line: 1,
+                    condition: None,
+                    log_message: None,
+                    hit_condition: None,
+                },
+                LineBreakpointRequest {
+                    line: 2,
+                    condition: None,
+                    log_message: None,
+                    hit_condition: Some("   ".to_owned()),
+                },
+                LineBreakpointRequest {
+                    line: 3,
+                    condition: None,
+                    log_message: None,
+                    hit_condition: Some("  >= 3  ".to_owned()),
+                },
+                LineBreakpointRequest {
+                    line: 4,
+                    condition: Some("x > 1".to_owned()),
+                    log_message: None,
+                    hit_condition: Some("5".to_owned()),
+                },
+            ],
+        };
+        let built = request.to_source_breakpoints();
+        assert_eq!(
+            built.arguments,
+            json!({
+                "source": { "path": "/tmp/a.py" },
+                "breakpoints": [
+                    { "line": 1 },
+                    { "line": 2 },
+                    { "line": 3, "hitCondition": ">= 3" },
+                    { "line": 4, "condition": "x > 1", "hitCondition": "5" },
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn line_breakpoint_request_deserializes_hit_condition_camel_case_and_rejects_unknown_fields() {
+        let value = json!({ "line": 7, "hitCondition": "5" });
+        let request: LineBreakpointRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(request.line, 7);
+        assert_eq!(request.condition, None);
+        assert_eq!(request.log_message, None);
+        assert_eq!(request.hit_condition, Some("5".to_owned()));
+
+        let without_hit_condition = json!({ "line": 7 });
+        let request: LineBreakpointRequest = serde_json::from_value(without_hit_condition).unwrap();
+        assert_eq!(request.hit_condition, None);
+
+        let with_unknown_field = json!({ "line": 7, "hitCondition": "5", "unexpected": true });
+        assert!(serde_json::from_value::<LineBreakpointRequest>(with_unknown_field).is_err());
     }
 
     #[test]
@@ -1508,11 +1588,13 @@ mod tests {
                     line: 3,
                     condition: None,
                     log_message: None,
+                    hit_condition: None,
                 },
                 LineBreakpointRequest {
                     line: 7,
                     condition: Some("x > 1".to_owned()),
                     log_message: Some("hit line 7".to_owned()),
+                    hit_condition: None,
                 },
             ],
         };
@@ -1551,6 +1633,7 @@ mod tests {
                     line: line as u32,
                     condition: None,
                     log_message: None,
+                    hit_condition: None,
                 })
                 .collect(),
         };

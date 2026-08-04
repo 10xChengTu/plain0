@@ -244,6 +244,7 @@ export class DebugSessionController {
 				line: descriptor.line,
 				condition: descriptor.condition,
 				logMessage: descriptor.logMessage,
+				hitCondition: descriptor.hitCondition,
 			}),
 		);
 		let result: DebugSetBreakpointsResult;

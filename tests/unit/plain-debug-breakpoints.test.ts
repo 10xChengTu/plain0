@@ -13,7 +13,7 @@ describe("DebugBreakpointStore", () => {
 
 		store.toggle(ROOT_ID, "a.py", 5);
 		expect(store.descriptorsForPath(ROOT_ID, "a.py")).toEqual([
-			{ line: 5, condition: null, logMessage: null },
+			{ line: 5, condition: null, logMessage: null, hitCondition: null },
 		]);
 		expect(store.pathsWithBreakpoints(ROOT_ID)).toEqual(["a.py"]);
 
@@ -52,33 +52,63 @@ describe("DebugBreakpointStore", () => {
 		expect(changeCount).toBe(1);
 	});
 
-	it("setCondition/setLogMessage update an existing breakpoint and no-op for a missing one", () => {
+	it("setCondition/setLogMessage/setHitCondition update an existing breakpoint and no-op for a missing one", () => {
 		const store = new DebugBreakpointStore();
 		store.toggle(ROOT_ID, "a.py", 5);
 
 		store.setCondition(ROOT_ID, "a.py", 5, "x > 1");
 		store.setLogMessage(ROOT_ID, "a.py", 5, "hit line 5");
+		store.setHitCondition(ROOT_ID, "a.py", 5, ">=3");
 		expect(store.descriptorsForPath(ROOT_ID, "a.py")).toEqual([
-			{ line: 5, condition: "x > 1", logMessage: "hit line 5" },
+			{
+				line: 5,
+				condition: "x > 1",
+				logMessage: "hit line 5",
+				hitCondition: ">=3",
+			},
 		]);
 
 		let changeCount = 0;
 		store.onDidChange(() => (changeCount += 1));
 		store.setCondition(ROOT_ID, "a.py", 999, "never");
 		store.setLogMessage(ROOT_ID, "b.py", 1, "never");
+		store.setHitCondition(ROOT_ID, "a.py", 999, "never");
 		expect(changeCount).toBe(0);
 	});
 
-	it("setDetails updates both condition and logMessage in exactly one notification", () => {
+	it("setHitCondition preserves the line as the stable identity — a prior verification for that line survives untouched", () => {
+		const store = new DebugBreakpointStore();
+		store.toggle(ROOT_ID, "a.py", 5);
+		store.setVerification(ROOT_ID, "a.py", [
+			{ verified: true, actualLine: 5, message: null },
+		]);
+
+		store.setHitCondition(ROOT_ID, "a.py", 5, ">=3");
+		expect(store.descriptorsForPath(ROOT_ID, "a.py")).toEqual([
+			{ line: 5, condition: null, logMessage: null, hitCondition: ">=3" },
+		]);
+		expect(store.viewsForPath(ROOT_ID, "a.py")[0]?.verification).toEqual({
+			verified: true,
+			actualLine: 5,
+			message: null,
+		});
+	});
+
+	it("setDetails updates condition, logMessage, and hitCondition in exactly one notification", () => {
 		const store = new DebugBreakpointStore();
 		store.toggle(ROOT_ID, "a.py", 5);
 
 		const changes: string[] = [];
 		store.onDidChange((_rootId, path) => changes.push(path));
-		store.setDetails(ROOT_ID, "a.py", 5, "x > 1", "hit line 5");
+		store.setDetails(ROOT_ID, "a.py", 5, "x > 1", "hit line 5", ">=3");
 
 		expect(store.descriptorsForPath(ROOT_ID, "a.py")).toEqual([
-			{ line: 5, condition: "x > 1", logMessage: "hit line 5" },
+			{
+				line: 5,
+				condition: "x > 1",
+				logMessage: "hit line 5",
+				hitCondition: ">=3",
+			},
 		]);
 		expect(changes).toEqual(["a.py"]);
 	});
@@ -87,7 +117,7 @@ describe("DebugBreakpointStore", () => {
 		const store = new DebugBreakpointStore();
 		let changeCount = 0;
 		store.onDidChange(() => (changeCount += 1));
-		store.setDetails(ROOT_ID, "a.py", 5, "x > 1", "hit line 5");
+		store.setDetails(ROOT_ID, "a.py", 5, "x > 1", "hit line 5", ">=3");
 		expect(changeCount).toBe(0);
 		expect(store.descriptorsForPath(ROOT_ID, "a.py")).toEqual([]);
 	});
@@ -107,12 +137,14 @@ describe("DebugBreakpointStore", () => {
 			line: 5,
 			condition: null,
 			logMessage: null,
+			hitCondition: null,
 			verification: { verified: true, actualLine: 105, message: null },
 		});
 		expect(views[1]).toEqual({
 			line: 20,
 			condition: null,
 			logMessage: null,
+			hitCondition: null,
 			verification: {
 				verified: false,
 				actualLine: null,
@@ -139,7 +171,13 @@ describe("DebugBreakpointStore", () => {
 		const store = new DebugBreakpointStore();
 		store.toggle(ROOT_ID, "a.py", 5);
 		expect(store.viewsForPath(ROOT_ID, "a.py")).toEqual([
-			{ line: 5, condition: null, logMessage: null, verification: null },
+			{
+				line: 5,
+				condition: null,
+				logMessage: null,
+				hitCondition: null,
+				verification: null,
+			},
 		]);
 	});
 
@@ -200,6 +238,7 @@ describe("DebugBreakpointStore", () => {
 				line: 5,
 				condition: null,
 				logMessage: null,
+				hitCondition: null,
 				verification: { verified: true, actualLine: 6, message: null },
 			},
 		]);
@@ -208,6 +247,7 @@ describe("DebugBreakpointStore", () => {
 				line: 9,
 				condition: null,
 				logMessage: null,
+				hitCondition: null,
 				verification: null,
 			},
 		]);

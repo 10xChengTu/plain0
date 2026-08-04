@@ -426,10 +426,18 @@ function frozenDebugBreakpointRequest(
 	) {
 		return debugSessionRequestInvalid();
 	}
+	if (
+		entry.hitCondition !== null &&
+		(typeof entry.hitCondition !== "string" ||
+			entry.hitCondition.length > MAX_DEBUG_BREAKPOINT_TEXT_CHARS)
+	) {
+		return debugSessionRequestInvalid();
+	}
 	return Object.freeze({
 		line: entry.line,
 		condition: entry.condition,
 		logMessage: entry.logMessage,
+		hitCondition: entry.hitCondition,
 	});
 }
 
