@@ -376,6 +376,21 @@ export function frozenDebugSessionStartRequest(
 		}
 		return Object.freeze({ ...base, host: target.host, port: target.port });
 	}
+	if (target.transport === "tcpSpawn") {
+		// `F210` S6 — deliberately no `host` field on the wire at all (unlike
+		// the `"tcp"` branch above): the connect target is always the fixed
+		// `127.0.0.1` loopback address `src-tauri/src/debug/dto.rs`'s
+		// `SessionTransportRequest::TcpSpawn` hardcodes, never
+		// caller-configurable.
+		if (
+			!Number.isInteger(target.port) ||
+			target.port < 0 ||
+			target.port > 65_535
+		) {
+			return debugSessionRequestInvalid();
+		}
+		return Object.freeze({ ...base, port: target.port });
+	}
 	return Object.freeze(base);
 }
 

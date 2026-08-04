@@ -25,6 +25,20 @@
  * `spawn_adapter`/`connect_adapter` (no Tauri command for that exists yet;
  * `src-tauri/src/debug/commands.rs`'s own module doc explains why). Actually
  * starting a session from this descriptor is S2's job.
+ *
+ * # `F210` S6 — a `"tcpSpawn"` descriptor is confirmed under the plain `"tcp"` identity
+ *
+ * `resolved.descriptor.transport === "tcpSpawn"` is confirmed under the
+ * *same* `"tcp"` wire identity a plain `"tcp"` descriptor uses — never a
+ * third, distinct confirmation identity — mirroring
+ * `src-tauri/src/debug/exec.rs`'s `spawn_adapter_as_tcp_companion`, which
+ * builds its own confirmation subject with `AdapterTransportKind::Tcp`,
+ * never a `TcpSpawn` variant (`docs/research/2026-08-04-complete-debug.md`'s
+ * "架构裁定 §6"). `spawnBeforeConnect`/`port` are passed to
+ * `resolveDebugAdapterConfirmation` alongside that mapped subject purely so
+ * the confirmation dialog's own copy can accurately say "spawn *and*
+ * connect" instead of the plain `"tcp"` case's "connect only" wording — see
+ * `debugAdapterConfirmationDetail`'s own doc comment.
  */
 
 import {
@@ -103,6 +117,7 @@ export async function prepareDebugAdapterLaunch(
 	if (resolved.kind === "adapter-not-found") {
 		return Object.freeze({ kind: "adapter-not-found", type: resolved.type });
 	}
+	const isSpawnThenConnect = resolved.descriptor.transport === "tcpSpawn";
 	const decision = await resolveDebugAdapterConfirmation(
 		bridge,
 		dialogService,
@@ -110,9 +125,11 @@ export async function prepareDebugAdapterLaunch(
 			subject: {
 				command: resolved.descriptor.command,
 				args: resolved.descriptor.args,
-				transport: resolved.descriptor.transport,
+				transport: isSpawnThenConnect ? "tcp" : resolved.descriptor.transport,
 			},
 			configSource: resolved.configSource,
+			spawnBeforeConnect: isSpawnThenConnect,
+			port: isSpawnThenConnect ? resolved.descriptor.port : undefined,
 		},
 	);
 	if (decision.kind === "declined") {

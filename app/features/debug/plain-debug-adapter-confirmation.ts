@@ -74,6 +74,19 @@ export interface DebugAdapterConfirmationSubject {
 export interface DebugAdapterConfirmationRequest {
 	readonly subject: DebugAdapterConfirmationSubject;
 	readonly configSource: string;
+	/** `F210` S6 — `true` when this confirmation gates a spawn-then-connect
+	 * (`AdapterDescriptor.transport === "tcpSpawn"`) adapter: the confirmed
+	 * `subject` (still the plain `(command, args, "tcp")` triple — see
+	 * `src-tauri/src/debug/exec.rs`'s `spawn_adapter_as_tcp_companion` doc
+	 * comment for why it is deliberately not a fourth confirmation identity)
+	 * also authorizes *spawning* `subject.command`, not merely connecting to
+	 * an already-running process the way an ordinary `"tcp"` confirmation
+	 * does. Only meaningful alongside `port`; both are frontend-only
+	 * presentation detail this codebase's own confirmation dialog copy
+	 * consults — the wire `debugAdapterConfirmationState`/`Grant` requests
+	 * built from `subject` never carry either. */
+	readonly spawnBeforeConnect?: boolean;
+	readonly port?: number;
 }
 
 function quoteArgIfNeeded(arg: string): string {
@@ -92,20 +105,43 @@ export function debugAdapterCommandLine(
 	return [subject.command, ...subject.args.map(quoteArgIfNeeded)].join(" ");
 }
 
+/** `F210` S6 — `true` exactly when `request` names a spawn-then-connect
+ * confirmation with a `port` to show — the shared guard both
+ * [`debugAdapterConfirmationMessage`] and [`debugAdapterConfirmationDetail`]
+ * use so the two functions can never disagree about which branch of copy to
+ * render. */
+function isSpawnBeforeConnectRequest(
+	request: DebugAdapterConfirmationRequest,
+): request is DebugAdapterConfirmationRequest & { readonly port: number } {
+	return request.spawnBeforeConnect === true && request.port !== undefined;
+}
+
 export function debugAdapterConfirmationMessage(
 	request: DebugAdapterConfirmationRequest,
 ): string {
+	if (isSpawnBeforeConnectRequest(request)) {
+		return `Start "${request.subject.command}" and connect to 127.0.0.1:${request.port}?`;
+	}
 	return `Run "${request.subject.command}"?`;
 }
 
 /** Acceptance criterion 4 / ADR 0003's "首次执行确认": states the full literal
  * command line and its configuration source, so the user can judge whether
  * to trust it — the frozen research doc's own example copy
- * ("即将运行：… ——配置来自 …——允许？") made concrete. */
+ * ("即将运行：… ——配置来自 …——允许？") made concrete. `F210` S6's
+ * spawn-then-connect branch additionally names the fixed `127.0.0.1:<port>`
+ * loopback target the spawned process is expected to open, so the dialog
+ * "如实反映" (`docs/research/2026-08-04-complete-debug.md`'s "架构裁定 §6")
+ * the full "启动 <command> 并连接 127.0.0.1:<port>" semantics — not merely
+ * "run this command", which alone would understate what confirming actually
+ * authorizes. */
 export function debugAdapterConfirmationDetail(
 	request: DebugAdapterConfirmationRequest,
 ): string {
 	const transportLabel = request.subject.transport === "tcp" ? "TCP" : "stdio";
+	if (isSpawnBeforeConnectRequest(request)) {
+		return `About to run:\n${debugAdapterCommandLine(request.subject)}\n\nThen connect to 127.0.0.1:${request.port} once its TCP listener is ready.\n\nTransport: ${transportLabel} (spawned)\nConfiguration source: ${request.configSource}\n\nThis workspace has been granted execution trust, but running this exact command has not been confirmed before. Only continue if you trust this configuration.`;
+	}
 	return `About to run:\n${debugAdapterCommandLine(request.subject)}\n\nTransport: ${transportLabel}\nConfiguration source: ${request.configSource}\n\nThis workspace has been granted execution trust, but running this exact command has not been confirmed before. Only continue if you trust this configuration.`;
 }
 

@@ -176,6 +176,51 @@ describe("root-scoped debug request encoders", () => {
 		});
 	});
 
+	// -----------------------------------------------------------------
+	// `F210` S6 — `"tcpSpawn"` session-start encoding.
+	// -----------------------------------------------------------------
+
+	it("encodes a tcpSpawn session start with a port but no host field at all", () => {
+		expect(
+			frozenDebugSessionStartRequest(
+				VALID_ROOT_ID,
+				{
+					transport: "tcpSpawn",
+					command: "/usr/bin/python3",
+					args: ["-m", "debugpy.adapter", "--listen"],
+					port: 5678,
+				},
+				"debugpy-listen",
+				{ program: "main.py" },
+			),
+		).toEqual({
+			rootId: VALID_ROOT_ID,
+			transport: "tcpSpawn",
+			command: "/usr/bin/python3",
+			args: ["-m", "debugpy.adapter", "--listen"],
+			adapterId: "debugpy-listen",
+			arguments: { program: "main.py" },
+			initialBreakpoints: [],
+			port: 5678,
+		});
+	});
+
+	it("rejects a tcpSpawn session start with a port outside 0-65535", () => {
+		expect(() =>
+			frozenDebugSessionStartRequest(
+				VALID_ROOT_ID,
+				{
+					transport: "tcpSpawn",
+					command: "/usr/bin/python3",
+					args: [],
+					port: 70_000,
+				},
+				"mock",
+				{},
+			),
+		).toThrow();
+	});
+
 	it("includes rootId in setBreakpoints and rejects missing or malformed roots", () => {
 		expect(
 			frozenDebugSetBreakpointsRequest(

@@ -705,7 +705,12 @@ export interface DebugAdapterConfirmationState {
  * invalid combination (a `"tcp"` request missing `port`, a `"stdio"` request
  * carrying one) is unrepresentable at the type level, not merely rejected at
  * runtime — `src-tauri/src/debug/dto.rs`'s `SessionTransportRequest` enum has
- * the identical shape once past its own `into_parts` validation. */
+ * the identical shape once past its own `into_parts` validation. `"tcpSpawn"`
+ * (`F210` S6) is the third variant: spawn `command`/`args` as a companion
+ * process, then connect to it on the fixed `127.0.0.1` loopback address at
+ * `port` — deliberately has no `host` field at all (unlike `"tcp"`'s own
+ * caller-chosen `host`), matching `SessionTransportRequest::TcpSpawn`'s
+ * identical omission. */
 export type DebugAdapterTarget =
 	| Readonly<{
 			readonly transport: "stdio";
@@ -717,6 +722,12 @@ export type DebugAdapterTarget =
 			readonly command: string;
 			readonly args: readonly string[];
 			readonly host: string;
+			readonly port: number;
+	  }>
+	| Readonly<{
+			readonly transport: "tcpSpawn";
+			readonly command: string;
+			readonly args: readonly string[];
 			readonly port: number;
 	  }>;
 

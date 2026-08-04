@@ -240,6 +240,30 @@ impl AdapterHandle {
         let _ = child.wait();
     }
 
+    /// `F210` S6 — non-blocking liveness probe for the spawn-then-connect
+    /// retry loop's own exit check
+    /// ([`super::tcp::connect_loopback_companion_with_retry_sync`]'s
+    /// `probe_exit_code` parameter — see that function's own doc comment for
+    /// the exact "checked at the top of every retry iteration" contract this
+    /// feeds). Never blocks and never kills, unlike [`Self::kill`]: `None`
+    /// while the process is still running, `Some(exit_code)` once it has
+    /// exited on its own (`exit_code` follows
+    /// [`super::debug_adapter_startup_crashed`]'s own `Option<i32>`/
+    /// `ExitStatus::code()` convention — `None` for a signal-terminated
+    /// process — so this domain's two "the process is gone" error
+    /// constructors, [`super::debug_adapter_startup_crashed`] and `F210`
+    /// S6's own [`super::debug_adapter_tcp_companion_exited`], can both
+    /// consume it identically). Calling this after the process has already
+    /// been reaped (by [`Self::kill`], or by this method's own prior call
+    /// observing an exit) is safe and keeps reporting the same cached exit
+    /// status — `std::process::Child` caches its own reaped status
+    /// internally, exactly like [`Self::kill`]'s own tolerance of being
+    /// called more than once already relies on.
+    pub(crate) fn probe_exit_code(&self) -> Option<Option<i32>> {
+        let mut child = lock(&self.child);
+        child.try_wait().ok().flatten().map(|status| status.code())
+    }
+
     /// The stderr capture buffer's current contents, up to
     /// [`DEBUG_ADAPTER_STDERR_CAP_BYTES`] — no caller anywhere yet (even in
     /// this module's own tests, which assert on
@@ -335,17 +359,16 @@ pub(crate) async fn spawn_adapter(
 /// `Tcp` variant the user actually confirmed for this session, never silently
 /// reusing (or demanding) a `Stdio` confirmation record instead.
 ///
-/// **Deliberately has no production caller yet** — see `debug::mod`'s own
-/// module doc for why: composing this with an actual bounded connect-retry
-/// loop and wiring it into `service::DebugSessionService::start_session`'s
-/// TCP branch needs a real `spawnBeforeConnect`-style config surface (parsing,
-/// frontend UI, a new wire field) this slice's own scope does not otherwise
-/// require — building the primitive now, correctly gated and tested in
-/// isolation, mirrors this exact domain's own S0/S1 precedent
-/// ([`spawn_adapter`]/[`super::tcp::connect_adapter`] themselves had zero
-/// production callers until S2 gave them one). `#[allow(dead_code)]`: every
-/// caller today is a `#[cfg(test)]` fixture in `exec::tests`.
-#[allow(dead_code)]
+/// `F210` S6 — real production caller: `super::service::DebugSessionService::start_session`'s
+/// `TcpSpawn` match arm, which follows this with
+/// [`super::tcp::connect_loopback_companion_with_retry_sync`]'s bounded,
+/// backing-off retry loop — see `debug::mod`'s own module doc ("S1's open
+/// spawn-then-connect question" section) for the full composition and why it
+/// took until this slice to wire up (S5 built this primitive, correctly
+/// gated and tested in isolation, before any config surface or connect-retry
+/// loop existed to actually compose it with — mirroring this exact domain's
+/// own S0/S1 precedent of [`spawn_adapter`]/[`super::tcp::connect_adapter`]
+/// themselves having zero production callers until S2 gave them one).
 pub(crate) async fn spawn_adapter_as_tcp_companion(
     trust: &TrustService,
     workspace: &WorkspaceService,

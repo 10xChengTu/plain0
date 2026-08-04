@@ -99,16 +99,30 @@ pub struct TcpConnectDescriptor {
 }
 
 /// Which byte-transport an adapter descriptor uses — `"stdio"` (the process's
-/// own stdin/stdout pipes, [`super::exec::spawn_adapter`]) or `"tcp"` (a
-/// [`TcpConnectDescriptor`], [`super::tcp::connect_adapter`]). Serializes as
-/// the bare lowercase word on the wire (`"stdio"`/`"tcp"`), matching the
-/// adapter-config format's own `transport` field
-/// (`docs/research/2026-07-28-generic-dap.md`'s "决策 1").
+/// own stdin/stdout pipes, [`super::exec::spawn_adapter`]), `"tcp"` (a
+/// [`TcpConnectDescriptor`], [`super::tcp::connect_adapter`], connect-only —
+/// no local spawn), or `"tcpSpawn"` (`F210` S6: [`super::exec::spawn_adapter_as_tcp_companion`]
+/// followed by [`super::tcp::connect_loopback_companion_with_retry_sync`] —
+/// Plain spawns the configured command *and* connects to the fixed
+/// `127.0.0.1` loopback port it is expected to open; see
+/// [`SessionTransportRequest::TcpSpawn`]'s own doc comment for the exact
+/// composition). Serializes as the bare word on the wire (`"stdio"`/`"tcp"`/
+/// `"tcpSpawn"`), matching the adapter-config format's own `transport` field
+/// (`docs/research/2026-07-28-generic-dap.md`'s "决策 1",
+/// `docs/research/2026-08-04-complete-debug.md`'s "架构裁定 §6"). Every
+/// variant here still only ever feeds
+/// [`AdapterSpawnDescriptor::confirmation_subject`] as `Stdio` or `Tcp` —
+/// `TcpSpawn` requests are deliberately confirmed under the *same* `Tcp`
+/// identity `Tcp`-transport requests use (see `super::exec`'s
+/// `spawn_adapter_as_tcp_companion` doc comment): no call site anywhere in
+/// this crate ever constructs a confirmation subject with `TcpSpawn` itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AdapterTransportKind {
     Stdio,
     Tcp,
+    #[serde(rename = "tcpSpawn")]
+    TcpSpawn,
 }
 
 /// The exact, precise identity the first-run confirmation gate is keyed on —
@@ -303,6 +317,24 @@ pub(crate) enum SessionTransportRequest {
         host: String,
         port: u16,
     },
+    /// `F210` S6 — spawn `command`/`args` as a `Tcp`-confirmed companion
+    /// process (`super::exec::spawn_adapter_as_tcp_companion`), then connect
+    /// to it on the fixed `127.0.0.1` loopback address at `port` with a
+    /// bounded, backing-off retry loop
+    /// (`super::tcp::connect_loopback_companion_with_retry_sync`) — see
+    /// `super::service::DebugSessionService::start_session`'s own `TcpSpawn`
+    /// match arm for the full composition. Deliberately carries no `host`
+    /// field at all (unlike [`Self::Tcp`], whose `host` is a caller-chosen
+    /// value connect-only mode never spawns anything for) — the connect
+    /// target here is not configuration, it is a fixed consequence of
+    /// spawning the companion process locally, so making it a field at all
+    /// would only invite a caller to (harmlessly, but pointlessly) believe it
+    /// is configurable.
+    TcpSpawn {
+        command: String,
+        args: Vec<String>,
+        port: u16,
+    },
 }
 
 /// The shared wire shape `debug_launch`/`debug_attach` both accept — see
@@ -395,6 +427,28 @@ impl DebugSessionStartRequest {
                     command: self.command,
                     args: self.args,
                     host,
+                    port,
+                }
+            }
+            // `F210` S6 — the connect target is always the fixed `127.0.0.1`
+            // loopback address (see `SessionTransportRequest::TcpSpawn`'s own
+            // doc comment for why), so a request naming an explicit `host` at
+            // all is rejected outright rather than silently ignored — this
+            // is deliberately *stricter* than `AdapterTransportKind::Tcp`
+            // above (which accepts any caller-chosen `host`): unlike
+            // connect-only mode, this variant always locally spawns the
+            // process it is about to connect to, so there is never a
+            // legitimate reason for a caller to name a different host.
+            AdapterTransportKind::TcpSpawn => {
+                if self.host.is_some() {
+                    return Err(debug_session_request_invalid());
+                }
+                let Some(port) = self.port else {
+                    return Err(debug_session_request_invalid());
+                };
+                SessionTransportRequest::TcpSpawn {
+                    command: self.command,
+                    args: self.args,
                     port,
                 }
             }
@@ -1671,6 +1725,24 @@ mod tests {
         }
     }
 
+    fn tcp_spawn_request(host: Option<&str>, port: Option<u16>) -> DebugSessionStartRequest {
+        DebugSessionStartRequest {
+            root_id: root_id(),
+            transport: AdapterTransportKind::TcpSpawn,
+            command: "/usr/bin/python3".to_owned(),
+            args: vec![
+                "-m".to_owned(),
+                "debugpy.adapter".to_owned(),
+                "--listen".to_owned(),
+            ],
+            host: host.map(str::to_owned),
+            port,
+            adapter_id: "mock".to_owned(),
+            arguments: json!({}),
+            initial_breakpoints: Vec::new(),
+        }
+    }
+
     #[test]
     fn a_valid_stdio_request_converts_and_carries_no_host_or_port() {
         let query = stdio_request("/usr/bin/python3")
@@ -1682,6 +1754,7 @@ mod tests {
                 assert!(args.is_empty());
             }
             SessionTransportRequest::Tcp { .. } => panic!("expected the stdio variant"),
+            SessionTransportRequest::TcpSpawn { .. } => panic!("expected the stdio variant"),
         }
     }
 
@@ -1696,7 +1769,68 @@ mod tests {
                 assert_eq!(port, 5678);
             }
             SessionTransportRequest::Stdio { .. } => panic!("expected the tcp variant"),
+            SessionTransportRequest::TcpSpawn { .. } => panic!("expected the tcp variant"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // `F210` S6 — `AdapterTransportKind::TcpSpawn`/`SessionTransportRequest::TcpSpawn`.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn a_valid_tcp_spawn_request_converts_and_carries_command_args_and_port_but_no_host() {
+        let query = tcp_spawn_request(None, Some(5678))
+            .into_parts(LaunchRequestKind::Launch)
+            .expect("valid tcpSpawn request converts");
+        match query.transport {
+            SessionTransportRequest::TcpSpawn {
+                command,
+                args,
+                port,
+            } => {
+                assert_eq!(command, "/usr/bin/python3");
+                assert_eq!(
+                    args,
+                    vec![
+                        "-m".to_owned(),
+                        "debugpy.adapter".to_owned(),
+                        "--listen".to_owned()
+                    ]
+                );
+                assert_eq!(port, 5678);
+            }
+            SessionTransportRequest::Stdio { .. } | SessionTransportRequest::Tcp { .. } => {
+                panic!("expected the tcpSpawn variant")
+            }
+        }
+    }
+
+    #[test]
+    fn a_tcp_spawn_request_missing_port_is_rejected() {
+        assert!(tcp_spawn_request(None, None)
+            .into_parts(LaunchRequestKind::Launch)
+            .is_err());
+    }
+
+    #[test]
+    fn a_tcp_spawn_request_carrying_an_explicit_host_is_rejected() {
+        // Deliberately stricter than the plain `Tcp` variant (which accepts
+        // any caller-chosen host) — see `into_parts`'s own `TcpSpawn` match
+        // arm doc comment for why: the connect target here is always fixed
+        // to `127.0.0.1`, never configuration.
+        assert!(tcp_spawn_request(Some("127.0.0.1"), Some(5678))
+            .into_parts(LaunchRequestKind::Launch)
+            .is_err());
+        assert!(tcp_spawn_request(Some("example.com"), Some(5678))
+            .into_parts(LaunchRequestKind::Launch)
+            .is_err());
+    }
+
+    #[test]
+    fn an_empty_command_is_rejected_for_the_tcp_spawn_transport_too() {
+        let mut request = tcp_spawn_request(None, Some(1));
+        request.command = String::new();
+        assert!(request.into_parts(LaunchRequestKind::Launch).is_err());
     }
 
     #[test]

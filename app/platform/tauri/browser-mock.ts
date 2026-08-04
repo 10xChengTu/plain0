@@ -1500,6 +1500,25 @@ export interface BrowserMockDebugFixtureForTest {
 			Readonly<Record<number, readonly DebugDisassembledInstruction[]>>
 		>
 	>;
+	/** `F210` S6 — scripts the spawn-then-connect (`transport: "tcpSpawn"`)
+	 * outcome every mock `debugLaunch`/`debugAttach` call reaches once past
+	 * the trust/confirmation gates `startMockDebugSession` already enforces
+	 * — defaults to `"success"` (the session starts normally, exactly like
+	 * every other transport). The two failure outcomes mirror the real Rust
+	 * orchestration's own distinct error codes
+	 * (`src-tauri/src/debug/mod.rs`'s
+	 * `debug_adapter_tcp_companion_exited`/
+	 * `debug_adapter_tcp_companion_connect_timed_out`) — this mock reports
+	 * the identical `code`/message shape (not a re-simulation of the real
+	 * spawn/retry-connect timing, which has zero real process or socket to
+	 * simulate against in a browser) so a consuming frontend's own
+	 * error-surfacing path can be exercised deterministically; that real
+	 * timing is covered end to end against real fixtures in
+	 * `src-tauri/src/debug/{tcp,service}/tests.rs`. Only consulted for a
+	 * `"tcpSpawn"`-transport request — every `"stdio"`/`"tcp"` launch ignores
+	 * this field entirely. */
+	readonly tcpSpawnOutcomeForTest?:
+		"success" | "processExitedBeforeListening" | "connectTimedOut";
 }
 
 /**
@@ -5952,6 +5971,26 @@ export function createBrowserMockBridge(
 		);
 	}
 
+	// `F210` S6 — the two spawn-then-connect failure codes
+	// `src-tauri/src/debug/mod.rs`'s `debug_adapter_tcp_companion_exited`/
+	// `debug_adapter_tcp_companion_connect_timed_out` report; see
+	// `BrowserMockDebugFixtureForTest.tcpSpawnOutcomeForTest`'s own doc
+	// comment for why this mock reports the identical code/message shape
+	// rather than re-simulating the real spawn/retry-connect timing.
+	function debugAdapterTcpCompanionExited(): CommandError {
+		return commandError(
+			"DEBUG_ADAPTER_TCP_COMPANION_EXITED",
+			"The spawned debug adapter process exited before Plain could connect to its TCP listener.",
+		);
+	}
+
+	function debugAdapterTcpCompanionConnectTimedOut(): CommandError {
+		return commandError(
+			"DEBUG_ADAPTER_TCP_COMPANION_CONNECT_TIMED_OUT",
+			"Timed out waiting for the spawned debug adapter's TCP listener to become ready.",
+		);
+	}
+
 	const liveDebugSessions = new Set<string>();
 	const debugSessionRoots = new Map<string, string>();
 	const issuedDebugSessionIds = new Set<string>();
@@ -6183,13 +6222,30 @@ export function createBrowserMockBridge(
 		if (!roots.has(request.rootId as string)) {
 			throw rootNotAuthorized();
 		}
+		// `F210` S6 — a `"tcpSpawn"` request is confirmed under the *same*
+		// `"tcp"` identity a plain `"tcp"` request uses (see
+		// `plain-debug-adapter-launch.ts`'s own `prepareDebugAdapterLaunch`
+		// doc comment, and `src-tauri/src/debug/exec.rs`'s
+		// `spawn_adapter_as_tcp_companion` for the real Rust side of this
+		// same mapping) — never a third, distinct confirmation identity.
+		const wireTransport = request.transport as "stdio" | "tcp" | "tcpSpawn";
 		const subject: DebugAdapterConfirmationSubject = Object.freeze({
 			command: request.command as string,
 			args: request.args as readonly string[],
-			transport: request.transport as "stdio" | "tcp",
+			transport: wireTransport === "tcpSpawn" ? "tcp" : wireTransport,
 		});
 		if (!debugAdapterConfirmations.has(debugAdapterConfirmationKey(subject))) {
 			throw debugAdapterNotConfirmed();
+		}
+		if (wireTransport === "tcpSpawn") {
+			const outcome =
+				options.debugFixtureForTest?.tcpSpawnOutcomeForTest ?? "success";
+			if (outcome === "processExitedBeforeListening") {
+				throw debugAdapterTcpCompanionExited();
+			}
+			if (outcome === "connectTimedOut") {
+				throw debugAdapterTcpCompanionConnectTimedOut();
+			}
 		}
 		const sessionId = nextDebugSessionId();
 		liveDebugSessions.add(sessionId);

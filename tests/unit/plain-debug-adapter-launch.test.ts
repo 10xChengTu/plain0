@@ -209,6 +209,77 @@ describe("prepareDebugAdapterLaunch", () => {
 		expect(result).toEqual({ kind: "adapter-not-found", type: "unknown-type" });
 	});
 
+	// -----------------------------------------------------------------
+	// `F210` S6 — `"tcpSpawn"` descriptors are confirmed under the plain
+	// `"tcp"` identity (never a third confirmation identity), with
+	// `spawnBeforeConnect`/`port` passed alongside purely for dialog copy.
+	// -----------------------------------------------------------------
+
+	it("confirms a tcpSpawn descriptor under the tcp identity and reports it spawnBeforeConnect with its port", async () => {
+		const bridge = fakeBridge(false);
+		const confirmCalls: Array<{
+			readonly message: string;
+			readonly detail?: string;
+		}> = [];
+		const dialogService: DebugAdapterConfirmDialogService = {
+			async confirm(dialogOptions) {
+				confirmCalls.push(dialogOptions);
+				return { confirmed: true };
+			},
+		};
+		const configurations = [
+			{
+				type: "anything",
+				request: "launch",
+				name: "Run",
+				plainAdapter: {
+					transport: "tcpSpawn",
+					command: "/usr/bin/python3",
+					args: ["-m", "debugpy.adapter", "--listen"],
+					port: 5678,
+				},
+			},
+		];
+
+		const result = await prepareDebugAdapterLaunch(
+			bridge,
+			dialogService,
+			null,
+			launchBytes(configurations),
+			"Run",
+		);
+
+		expect(result).toEqual({
+			kind: "ready",
+			descriptor: {
+				command: "/usr/bin/python3",
+				args: ["-m", "debugpy.adapter", "--listen"],
+				transport: "tcpSpawn",
+				port: 5678,
+			},
+			configSource: ".vscode/launch.json (inline plainAdapter override)",
+			warnings: [],
+			launchArguments: {},
+		});
+		// The confirmation grant itself carries the plain "tcp" wire
+		// identity — never a third "tcpSpawn" confirmation identity — see
+		// `src-tauri/src/debug/exec.rs`'s `spawn_adapter_as_tcp_companion`
+		// doc comment for the real Rust side of this same mapping.
+		expect(bridge.grantCalls).toEqual([
+			{
+				command: "/usr/bin/python3",
+				args: ["-m", "debugpy.adapter", "--listen"],
+				transport: "tcp",
+			},
+		]);
+		// The dialog shown to the user must accurately say "start <command>
+		// and connect to 127.0.0.1:<port>" — not merely "run <command>",
+		// which alone would understate what confirming actually authorizes.
+		expect(confirmCalls).toHaveLength(1);
+		expect(confirmCalls[0]?.message).toContain("127.0.0.1:5678");
+		expect(confirmCalls[0]?.detail).toContain("127.0.0.1:5678");
+	});
+
 	it("treats a null registry as an empty registry rather than an error", async () => {
 		const result = await prepareDebugAdapterLaunch(
 			fakeBridge(true),

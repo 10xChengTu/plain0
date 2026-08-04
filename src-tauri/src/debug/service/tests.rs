@@ -1525,6 +1525,434 @@ fn start_session_still_requires_confirmation_before_ever_attempting_to_connect()
 }
 
 // ---------------------------------------------------------------------
+// `F210` S6 — `SessionTransportRequest::TcpSpawn`: real end-to-end
+// spawn-then-connect orchestration. Every test below spawns a genuine
+// `python3` subprocess (skips with an explicit message if `python3` is not
+// found, matching this file's own `resolve_python3` precedent) — no test
+// here uses a synthetic probe closure the way `debug::tcp::tests`'s own
+// lower-level `connect_loopback_companion_with_retry_sync` tests do; those
+// already prove the retry/backoff primitive in isolation, so this file's own
+// job is proving `start_session`'s real *composition* of
+// `exec::spawn_adapter_as_tcp_companion` with that primitive against a real
+// process and a real loopback socket.
+// ---------------------------------------------------------------------
+
+/// Binds an ephemeral loopback port, immediately frees it, and hands back
+/// just the port number — the exact same "reserve a likely-free port number,
+/// then let the real fixture rebind it" idiom `debug::tcp::tests`'s own
+/// `free_loopback_port` uses.
+fn free_loopback_port_for_test() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("binds an ephemeral loopback port");
+    listener.local_addr().unwrap().port()
+}
+
+/// A minimal, self-contained TCP-speaking mock DAP adapter — deliberately
+/// much smaller than [`PYTHON_MOCK_ADAPTER_SCRIPT`] above (only the three
+/// handshake steps `session::run_handshake` actually requires:
+/// `initialize` → `launch`/`attach` → `configurationDone`), since this
+/// slice's own tests only need to prove the *transport* composition, not
+/// re-exercise interactive-command coverage those other, already-passing
+/// tests own. Two `argv` values: the exact loopback port to bind (chosen by
+/// the test ahead of time, mirroring a real `debugpy --listen <port>`
+/// adapter's own fixed-port contract) and a heartbeat file path this script
+/// appends one line to every 20ms for as long as it is alive — the test's
+/// own "was this real OS process actually killed, not merely abandoned"
+/// proof (a killed process cannot keep appending to that file; a merely
+/// disconnected-but-still-running one would).
+const TCP_SPAWN_MOCK_ADAPTER_SCRIPT: &str = r#"
+import sys, socket, json, time, threading
+
+port = int(sys.argv[1])
+heartbeat_path = sys.argv[2]
+listen_delay_seconds = float(sys.argv[3])
+
+def heartbeat():
+    with open(heartbeat_path, "a") as f:
+        while True:
+            f.write("x\n")
+            f.flush()
+            time.sleep(0.02)
+
+threading.Thread(target=heartbeat, daemon=True).start()
+time.sleep(listen_delay_seconds)
+
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", port))
+server.listen(1)
+conn, _ = server.accept()
+rfile = conn.makefile("rb")
+wfile = conn.makefile("wb")
+
+def read_message():
+    headers = {}
+    first = True
+    while True:
+        line = rfile.readline()
+        if line == b"":
+            if first:
+                return None
+            break
+        first = False
+        if line in (b"\r\n", b"\n"):
+            break
+        if b":" in line:
+            name, _, value = line.partition(b":")
+            headers[name.strip().lower()] = value.strip()
+    length = int(headers[b"content-length"])
+    body = rfile.read(length)
+    return json.loads(body)
+
+def write_message(obj):
+    body = json.dumps(obj).encode("utf-8")
+    wfile.write(("Content-Length: %d\r\n\r\n" % len(body)).encode("ascii"))
+    wfile.write(body)
+    wfile.flush()
+
+counter = [1000]
+def next_seq():
+    counter[0] += 1
+    return counter[0]
+
+pending_launch_seq = None
+while True:
+    message = read_message()
+    if message is None:
+        break
+    command = message.get("command")
+    request_seq = message.get("seq")
+    if command == "initialize":
+        write_message({
+            "seq": next_seq(), "type": "response", "request_seq": request_seq,
+            "success": True, "command": "initialize",
+            "body": {"supportsConfigurationDoneRequest": True},
+        })
+    elif command in ("launch", "attach"):
+        pending_launch_seq = request_seq
+        write_message({"seq": next_seq(), "type": "event", "event": "initialized"})
+    elif command == "configurationDone":
+        write_message({
+            "seq": next_seq(), "type": "response", "request_seq": request_seq,
+            "success": True, "command": "configurationDone",
+        })
+        write_message({
+            "seq": next_seq(), "type": "response", "request_seq": pending_launch_seq,
+            "success": True, "command": "launch",
+        })
+    else:
+        write_message({
+            "seq": next_seq(), "type": "response", "request_seq": request_seq,
+            "success": True, "command": command,
+        })
+"#;
+
+/// `sys.exit`s without ever binding a socket — but only after
+/// `exit_delay_seconds` (`argv[1]`), chosen by every caller below to be
+/// safely longer than `exec::DEBUG_ADAPTER_STARTUP_GRACE` (200ms) so the
+/// process genuinely survives `spawn_adapter_as_tcp_companion`'s own
+/// startup-crash check and this test exercises the retry loop's own
+/// mid-retry exit detection — not `exec.rs`'s already-covered startup-crash
+/// path (`debug::exec::tests` owns that).
+const TCP_SPAWN_EXITS_BEFORE_LISTENING_SCRIPT: &str = r#"
+import sys, time
+time.sleep(float(sys.argv[1]))
+sys.exit(0)
+"#;
+
+/// Never binds a socket at all and loops forever, appending to the same
+/// heartbeat file [`TCP_SPAWN_MOCK_ADAPTER_SCRIPT`] uses — the fixture for
+/// the connect-budget-exhausted scenario below.
+const TCP_SPAWN_NEVER_LISTENS_SCRIPT: &str = r#"
+import sys, time
+heartbeat_path = sys.argv[1]
+with open(heartbeat_path, "a") as f:
+    while True:
+        f.write("x\n")
+        f.flush()
+        time.sleep(0.02)
+"#;
+
+/// Polls `path`'s current byte length; used both to observe real growth (the
+/// process is alive and writing) and, after the fact, to observe it has
+/// genuinely stopped growing (the process was actually killed, not merely
+/// abandoned to keep running in the background) — the exact same
+/// "black-box, no direct pid access needed" zero-residue technique
+/// `docs/research/2026-08-04-complete-debug.md`'s "架构裁定 §6" calls for
+/// ("进程 wait" — proven here, since a `Child::kill`+`wait` pair is exactly
+/// what `exec::AdapterHandle::kill` performs, and this heartbeat file is the
+/// only way this black-box test can observe that it genuinely happened).
+fn heartbeat_len(path: &std::path::Path) -> u64 {
+    std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)
+}
+
+#[test]
+fn tcp_spawn_completes_the_handshake_over_a_delayed_listener_and_tears_down_both_channels_with_zero_residue(
+) {
+    let Some(python3) = resolve_python3() else {
+        eprintln!(
+            "skipping tcp_spawn_completes_the_handshake_over_a_delayed_listener_and_tears_down_both_channels_with_zero_residue: \
+             python3 not found via `command -v python3`"
+        );
+        return;
+    };
+    let scratch = TempDir::new().unwrap();
+    let heartbeat_path = scratch.path().join("heartbeat.txt");
+    let port = free_loopback_port_for_test();
+
+    let descriptor = AdapterSpawnDescriptor {
+        command: python3.to_string_lossy().into_owned(),
+        args: vec![
+            "-c".to_owned(),
+            TCP_SPAWN_MOCK_ADAPTER_SCRIPT.to_owned(),
+            port.to_string(),
+            heartbeat_path.to_string_lossy().into_owned(),
+            // Deliberately longer than the retry loop's own 50ms initial
+            // backoff — a real proof the retry loop survives more than one
+            // failed attempt, not a same-tick race, mirroring
+            // `debug::tcp::tests`'s own `retry_succeeds_once_a_delayed_listener_comes_up_on_the_exact_port`
+            // rationale, this time against a genuinely spawned process.
+            "0.5".to_owned(),
+        ],
+    };
+    let window_label = "main";
+    let fixture = trusted_and_confirmed(window_label, &descriptor, AdapterTransportKind::Tcp);
+    let service = DebugSessionService::new();
+    let (_sink, sink_for_session) = recording_sink();
+
+    let start = Instant::now();
+    let result = block_on(service.start_session(
+        &fixture.trust,
+        &fixture.workspace,
+        window_label,
+        fixture.root_id,
+        &fixture.confirmation,
+        LaunchRequestKind::Launch,
+        SessionTransportRequest::TcpSpawn {
+            command: descriptor.command.clone(),
+            args: descriptor.args.clone(),
+            port,
+        },
+        "mock-tcp-spawn".to_owned(),
+        json!({}),
+        Vec::new(),
+        sink_for_session,
+        noop_reverse_requests(),
+    ));
+    let (session_id, capabilities) = result.expect(
+        "a real spawned companion that starts listening well inside the connect budget must \
+         complete the full handshake",
+    );
+    assert_eq!(
+        capabilities
+            .get("supportsConfigurationDoneRequest")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(service.session_count_for_test(window_label), 1);
+    assert!(
+        start.elapsed() >= Duration::from_millis(500),
+        "must genuinely have waited out the companion's own 500ms listen delay, not raced past it"
+    );
+
+    // A real heartbeat write must have already landed — proves the process
+    // this session is holding onto is genuinely alive right now, the
+    // positive control for the post-teardown assertion below.
+    assert!(
+        wait_until(
+            || heartbeat_len(&heartbeat_path) > 0,
+            Duration::from_secs(2)
+        ),
+        "the spawned companion process must be alive and writing its heartbeat before teardown"
+    );
+    let heartbeat_len_before_disconnect = heartbeat_len(&heartbeat_path);
+
+    block_on(service.disconnect(window_label, session_id)).expect("disconnect succeeds");
+    assert_eq!(service.session_count_for_test(window_label), 0);
+
+    // Zero-residue proof 1: the process was really killed (`Child::kill` +
+    // `wait`, inside `AdapterHandle::kill`), not merely disconnected — the
+    // heartbeat file must stop growing shortly after `disconnect` returns.
+    std::thread::sleep(Duration::from_millis(150));
+    let heartbeat_len_shortly_after = heartbeat_len(&heartbeat_path);
+    std::thread::sleep(Duration::from_millis(300));
+    let heartbeat_len_well_after = heartbeat_len(&heartbeat_path);
+    assert_eq!(
+        heartbeat_len_shortly_after, heartbeat_len_well_after,
+        "the companion process must have genuinely stopped running after disconnect — a still-\
+         running orphan would keep appending to the heartbeat file"
+    );
+    assert!(
+        heartbeat_len_well_after >= heartbeat_len_before_disconnect,
+        "sanity: the heartbeat file must never shrink"
+    );
+
+    // Zero-residue proof 2: the port itself was released — a fresh listener
+    // must be able to rebind the exact same port shortly after teardown.
+    assert!(
+        wait_until(
+            || TcpListener::bind(("127.0.0.1", port)).is_ok(),
+            Duration::from_secs(2)
+        ),
+        "the loopback port must be free again once the companion process and its socket are torn down"
+    );
+}
+
+#[test]
+fn tcp_spawn_fails_immediately_with_the_exited_code_when_the_companion_exits_before_ever_listening()
+{
+    let Some(python3) = resolve_python3() else {
+        eprintln!(
+            "skipping tcp_spawn_fails_immediately_with_the_exited_code_when_the_companion_exits_before_ever_listening: \
+             python3 not found via `command -v python3`"
+        );
+        return;
+    };
+    let port = free_loopback_port_for_test();
+    let descriptor = AdapterSpawnDescriptor {
+        command: python3.to_string_lossy().into_owned(),
+        args: vec![
+            "-c".to_owned(),
+            TCP_SPAWN_EXITS_BEFORE_LISTENING_SCRIPT.to_owned(),
+            // Safely longer than `exec::DEBUG_ADAPTER_STARTUP_GRACE` (200ms)
+            // — this process must be observed as "successfully spawned" by
+            // `spawn_adapter_as_tcp_companion` before it exits, exercising
+            // the retry loop's own exit detection, not `exec.rs`'s earlier
+            // startup-crash path.
+            "0.3".to_owned(),
+        ],
+    };
+    let window_label = "main";
+    let fixture = trusted_and_confirmed(window_label, &descriptor, AdapterTransportKind::Tcp);
+    let service = DebugSessionService::new();
+    let (_sink, sink_for_session) = recording_sink();
+
+    let result = block_on(service.start_session(
+        &fixture.trust,
+        &fixture.workspace,
+        window_label,
+        fixture.root_id,
+        &fixture.confirmation,
+        LaunchRequestKind::Launch,
+        SessionTransportRequest::TcpSpawn {
+            command: descriptor.command.clone(),
+            args: descriptor.args.clone(),
+            port,
+        },
+        "mock-tcp-spawn".to_owned(),
+        json!({}),
+        Vec::new(),
+        sink_for_session,
+        noop_reverse_requests(),
+    ));
+    let error =
+        result.expect_err("a companion that exits before ever listening must fail the session");
+    assert_eq!(error.code(), "DEBUG_ADAPTER_TCP_COMPANION_EXITED");
+    assert_eq!(
+        service.session_count_for_test(window_label),
+        0,
+        "a failed TcpSpawn start must leave zero live sessions behind"
+    );
+}
+
+#[test]
+fn tcp_spawn_kills_the_never_listening_companion_and_reports_timed_out_once_the_injected_budget_elapses(
+) {
+    let Some(python3) = resolve_python3() else {
+        eprintln!(
+            "skipping tcp_spawn_kills_the_never_listening_companion_and_reports_timed_out_once_the_injected_budget_elapses: \
+             python3 not found via `command -v python3`"
+        );
+        return;
+    };
+    let scratch = TempDir::new().unwrap();
+    let heartbeat_path = scratch.path().join("heartbeat.txt");
+    let port = free_loopback_port_for_test();
+    let descriptor = AdapterSpawnDescriptor {
+        command: python3.to_string_lossy().into_owned(),
+        args: vec![
+            "-c".to_owned(),
+            TCP_SPAWN_NEVER_LISTENS_SCRIPT.to_owned(),
+            heartbeat_path.to_string_lossy().into_owned(),
+        ],
+    };
+    let window_label = "main";
+    let fixture = trusted_and_confirmed(window_label, &descriptor, AdapterTransportKind::Tcp);
+    let service = DebugSessionService::new();
+    let (_sink, sink_for_session) = recording_sink();
+
+    // Injects a small connect budget (`start_session_with_tcp_spawn_budget_for_test`,
+    // `F210` S6's own test-only twin of `start_session` — see its own doc
+    // comment) so this test proves the real, production `TcpSpawn`
+    // orchestration's timeout-and-kill behavior without waiting out the real
+    // 5-second production `DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT` budget.
+    let injected_budget = Duration::from_millis(300);
+    let start = Instant::now();
+    let result = block_on(service.start_session_with_tcp_spawn_budget_for_test(
+        &fixture.trust,
+        &fixture.workspace,
+        window_label,
+        fixture.root_id,
+        &fixture.confirmation,
+        LaunchRequestKind::Launch,
+        SessionTransportRequest::TcpSpawn {
+            command: descriptor.command.clone(),
+            args: descriptor.args.clone(),
+            port,
+        },
+        "mock-tcp-spawn".to_owned(),
+        json!({}),
+        Vec::new(),
+        sink_for_session,
+        noop_reverse_requests(),
+        injected_budget,
+    ));
+    let error = result.expect_err("nothing ever listens on this port in this test");
+    assert_eq!(
+        error.code(),
+        "DEBUG_ADAPTER_TCP_COMPANION_CONNECT_TIMED_OUT"
+    );
+    assert!(
+        start.elapsed() >= injected_budget,
+        "must not report timed-out before the injected budget actually elapsed"
+    );
+    assert_eq!(
+        service.session_count_for_test(window_label),
+        0,
+        "a failed TcpSpawn start must leave zero live sessions behind"
+    );
+
+    // Zero-residue proof: the still-running companion must have been killed
+    // once the connect budget ran out — the heartbeat file must stop
+    // growing shortly after `start_session_with_tcp_spawn_budget_for_test`
+    // returns its error.
+    let heartbeat_len_at_return = heartbeat_len(&heartbeat_path);
+    assert!(
+        heartbeat_len_at_return > 0,
+        "positive control: the companion must genuinely have been alive and writing its \
+         heartbeat while the connect budget was being spent — otherwise the 'stops growing' \
+         assertion below would be vacuous"
+    );
+    std::thread::sleep(Duration::from_millis(150));
+    let heartbeat_len_shortly_after = heartbeat_len(&heartbeat_path);
+    std::thread::sleep(Duration::from_millis(300));
+    let heartbeat_len_well_after = heartbeat_len(&heartbeat_path);
+    assert_eq!(
+        heartbeat_len_shortly_after, heartbeat_len_well_after,
+        "the companion process must have genuinely been killed once the connect budget ran out \
+         — a still-running orphan would keep appending to the heartbeat file"
+    );
+    assert!(heartbeat_len_well_after >= heartbeat_len_at_return);
+
+    assert!(
+        wait_until(
+            || TcpListener::bind(("127.0.0.1", port)).is_ok(),
+            Duration::from_secs(2)
+        ),
+        "the loopback port must be free again once the killed companion's process has exited"
+    );
+}
+
+// ---------------------------------------------------------------------
 // `F100` S5 — per-request timeout, `output`-event backpressure, and real
 // large-object benchmarks, all exercised over a real spawned Python
 // subprocess (not just `debug::session::tests`'s in-memory mock) — see

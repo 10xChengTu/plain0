@@ -73,17 +73,25 @@ impl DebugSessionService {
     }
 
     /// Resolves `transport` into a live, connected transport (via
-    /// [`super::exec::spawn_adapter`]/[`super::tcp::connect_adapter`] — both
-    /// already trust-then-confirmation-gated; this function never bypasses
-    /// either), starts a [`DebugSession`] over it, and runs the full
-    /// handshake — returning the session id and negotiated capabilities only
-    /// once `launch`/`attach` has actually succeeded. On any handshake
+    /// [`super::exec::spawn_adapter`]/[`super::tcp::connect_adapter`]/`F210`
+    /// S6's own [`super::exec::spawn_adapter_as_tcp_companion`] +
+    /// [`super::tcp::connect_loopback_companion_with_retry_sync`] pair —
+    /// every one already trust-then-confirmation-gated; this function never
+    /// bypasses any of them), starts a [`DebugSession`] over it, and runs the
+    /// full handshake — returning the session id and negotiated capabilities
+    /// only once `launch`/`attach` has actually succeeded. On any handshake
     /// failure the session is torn down and its reader thread joined before
     /// the error is returned — a caller never has to separately clean up a
     /// session that failed to become ready. `reverse_requests` (`F100` S4) is
     /// installed via [`DebugSession::start_with_reverse_requests`] rather
     /// than the plain [`DebugSession::start`] every prior slice used — see
     /// that method's own doc comment.
+    ///
+    /// Thin wrapper over [`Self::start_session_with_tcp_spawn_budget`],
+    /// always passing the real production
+    /// [`super::tcp::DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT`] budget for a
+    /// `TcpSpawn`-transport request — see that method's own doc comment for
+    /// why the budget is a parameter at all.
     #[allow(clippy::too_many_arguments)]
     pub async fn start_session(
         &self,
@@ -99,6 +107,88 @@ impl DebugSessionService {
         breakpoints: Vec<session::SourceBreakpoints>,
         sink: Arc<dyn DebugEventSink>,
         reverse_requests: Arc<dyn ReverseRequestHandler>,
+    ) -> Result<(DebugSessionId, Value), CommandError> {
+        self.start_session_with_tcp_spawn_budget(
+            trust,
+            workspace,
+            window_label,
+            root_id,
+            confirmation,
+            request,
+            transport,
+            adapter_id,
+            arguments,
+            breakpoints,
+            sink,
+            reverse_requests,
+            super::tcp::DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT,
+        )
+        .await
+    }
+
+    /// `F210` S6 — test-only twin of [`Self::start_session`] that lets
+    /// `service::tests` inject a small `tcp_spawn_connect_budget` for a
+    /// `TcpSpawn`-transport request, so a "the connect budget is exhausted"
+    /// integration test can prove the real, production `TcpSpawn` orchestration
+    /// (including the real spawned-process kill on failure) without actually
+    /// waiting out the real 5-second production budget — the identical
+    /// injected-small-value-for-testability rationale
+    /// [`Self::send_request_with_timeout_for_test`] already documents for
+    /// itself. Every non-test caller only ever reaches the underlying
+    /// implementation through [`Self::start_session`], which always passes
+    /// the one named production constant; this has no production caller.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn start_session_with_tcp_spawn_budget_for_test(
+        &self,
+        trust: &TrustService,
+        workspace: &WorkspaceService,
+        window_label: &str,
+        root_id: RootId,
+        confirmation: &ConfirmationService,
+        request: LaunchRequestKind,
+        transport: SessionTransportRequest,
+        adapter_id: String,
+        arguments: Value,
+        breakpoints: Vec<session::SourceBreakpoints>,
+        sink: Arc<dyn DebugEventSink>,
+        reverse_requests: Arc<dyn ReverseRequestHandler>,
+        tcp_spawn_connect_budget: std::time::Duration,
+    ) -> Result<(DebugSessionId, Value), CommandError> {
+        self.start_session_with_tcp_spawn_budget(
+            trust,
+            workspace,
+            window_label,
+            root_id,
+            confirmation,
+            request,
+            transport,
+            adapter_id,
+            arguments,
+            breakpoints,
+            sink,
+            reverse_requests,
+            tcp_spawn_connect_budget,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn start_session_with_tcp_spawn_budget(
+        &self,
+        trust: &TrustService,
+        workspace: &WorkspaceService,
+        window_label: &str,
+        root_id: RootId,
+        confirmation: &ConfirmationService,
+        request: LaunchRequestKind,
+        transport: SessionTransportRequest,
+        adapter_id: String,
+        arguments: Value,
+        breakpoints: Vec<session::SourceBreakpoints>,
+        sink: Arc<dyn DebugEventSink>,
+        reverse_requests: Arc<dyn ReverseRequestHandler>,
+        tcp_spawn_connect_budget: std::time::Duration,
     ) -> Result<(DebugSessionId, Value), CommandError> {
         let cancel = Arc::new(AtomicBool::new(false));
         let (reader, writer, teardown) = match transport {
@@ -153,6 +243,76 @@ impl DebugSessionService {
                 let writer: Box<dyn Write + Send> = Box::new(writer_stream);
                 let teardown: Box<dyn Fn() + Send + Sync> = Box::new(move || {
                     let _ = teardown_stream.shutdown(std::net::Shutdown::Both);
+                });
+                (reader, writer, teardown)
+            }
+            SessionTransportRequest::TcpSpawn {
+                command,
+                args,
+                port,
+            } => {
+                // `F210` S6 — confirm (as `Tcp`, per `exec::spawn_adapter_as_tcp_companion`'s
+                // own doc comment) → spawn the companion (reusing the same
+                // 200ms early-crash grace `spawn_adapter`/`spawn_adapter_sync`
+                // already give every spawn) → bounded, backing-off retry
+                // connect to the fixed loopback port it is expected to open.
+                // Any failure past the spawn step kills the already-spawned
+                // process before this match arm returns — see `debug::mod`'s
+                // own module doc for the full composition.
+                let descriptor = dto::AdapterSpawnDescriptor { command, args };
+                let handle = Arc::new(
+                    super::exec::spawn_adapter_as_tcp_companion(
+                        trust,
+                        workspace,
+                        window_label,
+                        root_id,
+                        confirmation,
+                        &descriptor,
+                        Arc::clone(&cancel),
+                    )
+                    .await?,
+                );
+                let probe_handle = Arc::clone(&handle);
+                let connect_cancel = Arc::clone(&cancel);
+                let connect_result = tauri::async_runtime::spawn_blocking(move || {
+                    super::tcp::connect_loopback_companion_with_retry_sync(
+                        port,
+                        tcp_spawn_connect_budget,
+                        move || probe_handle.probe_exit_code(),
+                        &connect_cancel,
+                    )
+                })
+                .await
+                .map_err(|_| debug_transport_unavailable())?;
+                let stream = match connect_result {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        // The connect budget ran out or the companion exited
+                        // mid-retry — either way, nothing must survive this
+                        // failed session start: kill the still-spawned (or
+                        // already-exited, harmlessly re-killed) process
+                        // before propagating the error.
+                        handle.kill();
+                        return Err(error);
+                    }
+                };
+                let writer_stream = stream
+                    .try_clone()
+                    .map_err(|_| debug_transport_unavailable())?;
+                let teardown_stream = stream
+                    .try_clone()
+                    .map_err(|_| debug_transport_unavailable())?;
+                let teardown_handle = Arc::clone(&handle);
+                let reader: Box<dyn Read + Send> = Box::new(stream);
+                let writer: Box<dyn Write + Send> = Box::new(writer_stream);
+                // Both channels this variant owns are torn down here, in
+                // order: shut the TCP stream down first (so the adapter's own
+                // blocking read/accept observes the close promptly), then
+                // kill+reap the spawned process — never the reverse, and
+                // never only one of the two.
+                let teardown: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+                    let _ = teardown_stream.shutdown(std::net::Shutdown::Both);
+                    teardown_handle.kill();
                 });
                 (reader, writer, teardown)
             }

@@ -493,6 +493,13 @@ interface TestDebugFixture {
 	 * disabled for the request's whole duration instead of racing a same-tick
 	 * mock response. Defaults to `0` (no delay). */
 	readonly disassembleDelayMsForTest?: number;
+	/** `F210` S6 — scripts the spawn-then-connect (`transport: "tcpSpawn"`)
+	 * outcome every mock `debug_launch`/`debug_attach` call reaches once past
+	 * the trust/confirmation gates above — defaults to `"success"`; mirrors
+	 * `app/platform/tauri/browser-mock.ts`'s own
+	 * `BrowserMockDebugFixtureForTest.tcpSpawnOutcomeForTest`. */
+	readonly tcpSpawnOutcomeForTest?:
+		"success" | "processExitedBeforeListening" | "connectTimedOut";
 }
 
 interface TestUntitledFixture {
@@ -2276,6 +2283,25 @@ async function installNativeIpcMock(
 					code: "DEBUG_SESSION_NOT_FOUND",
 					message:
 						"The requested debug session does not exist for this window.",
+				};
+			}
+			// `F210` S6 — the two spawn-then-connect failure codes
+			// `src-tauri/src/debug/mod.rs`'s
+			// `debug_adapter_tcp_companion_exited`/
+			// `debug_adapter_tcp_companion_connect_timed_out` report; mirrors
+			// `app/platform/tauri/browser-mock.ts`'s own identical pair.
+			function debugAdapterTcpCompanionExited() {
+				return {
+					code: "DEBUG_ADAPTER_TCP_COMPANION_EXITED",
+					message:
+						"The spawned debug adapter process exited before Plain could connect to its TCP listener.",
+				};
+			}
+			function debugAdapterTcpCompanionConnectTimedOut() {
+				return {
+					code: "DEBUG_ADAPTER_TCP_COMPANION_CONNECT_TIMED_OUT",
+					message:
+						"Timed out waiting for the spawned debug adapter's TCP listener to become ready.",
 				};
 			}
 			function debugRootNotAuthorized() {
@@ -4062,17 +4088,37 @@ async function installNativeIpcMock(
 										command?: string;
 										args?: readonly string[];
 										transport?: string;
+										port?: number;
 								  }
 								| undefined;
 							if (startRequest?.rootId !== rootId) {
 								throw debugRootNotAuthorized();
 							}
+							// `F210` S6 — a `"tcpSpawn"` request is confirmed
+							// under the same `"tcp"` identity a plain `"tcp"`
+							// request uses (see `plain-debug-adapter-launch.ts`'s
+							// own mapping) — never a third, distinct
+							// confirmation identity.
+							const isTcpSpawn = startRequest?.transport === "tcpSpawn";
 							if (
 								!debugAdapterConfirmations.has(
-									debugAdapterConfirmationKey(startRequest ?? {}),
+									debugAdapterConfirmationKey({
+										...startRequest,
+										transport: isTcpSpawn ? "tcp" : startRequest?.transport,
+									}),
 								)
 							) {
 								throw debugAdapterNotConfirmed();
+							}
+							if (isTcpSpawn) {
+								const outcome =
+									debugFixtureForTest.tcpSpawnOutcomeForTest ?? "success";
+								if (outcome === "processExitedBeforeListening") {
+									throw debugAdapterTcpCompanionExited();
+								}
+								if (outcome === "connectTimedOut") {
+									throw debugAdapterTcpCompanionConnectTimedOut();
+								}
 							}
 							const sessionId = nextDebugSessionId();
 							liveDebugSessions.add(sessionId);
@@ -23979,6 +24025,231 @@ test("Plain: Open Disassembly clears back to a placeholder once stopped ends, wh
 	await expect(
 		page.locator(".plain-debug-disassembly-view-instruction"),
 	).toHaveCount(0);
+
+	expect(pageErrors).toEqual([]);
+});
+
+// --- `F210` S6 "spawn-then-connect 编排" -------------------------------------
+
+// A `"tcpSpawn"` inline `plainAdapter` override — spawn `command`/`args` as a
+// companion process, then connect to it on the fixed `127.0.0.1` loopback
+// address at `port` (`docs/research/2026-08-04-complete-debug.md`'s "架构裁定
+// §6"). Deliberately no `host` field at all, mirroring `DEBUG_LAUNCH_JSON`'s
+// own `"stdio"` fixture shape one field over.
+const DEBUG_LAUNCH_JSON_TCP_SPAWN = JSON.stringify({
+	version: "0.2.0",
+	configurations: [
+		{
+			type: "debugpy-listen",
+			request: "launch",
+			name: "Debug main.py (spawn then connect)",
+			plainAdapter: {
+				transport: "tcpSpawn",
+				command: "/usr/bin/python3",
+				args: ["-m", "debugpy.adapter", "--listen"],
+				port: 5678,
+			},
+			program: "main.py",
+		},
+	],
+});
+
+test("Plain: Start Debugging spawns then connects a tcpSpawn adapter, shows the accurate spawn-then-connect confirm dialog text, and starts a live session", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(page, "arrayBuffer", "readonly", {
+		"main.py": DEBUG_MAIN_PY,
+		".vscode/launch.json": DEBUG_LAUNCH_JSON_TCP_SPAWN,
+	});
+
+	await openMainPy(page);
+	await openRunAndDebugView(page);
+	await executePaletteCommand(
+		page,
+		"Start Debugging",
+		"Plain: Start Debugging",
+	);
+
+	const dialog = page.getByRole("dialog");
+	await expect(dialog).toBeVisible();
+	await expect(dialog).toContainText(
+		"Trust this workspace to run a debug adapter?",
+	);
+	await dialog
+		.getByRole("button", { name: "Trust & Continue", exact: true })
+		.click();
+	await expect(dialog).toBeVisible();
+
+	// The confirmation dialog must accurately say "start <command> and
+	// connect to 127.0.0.1:<port>" — not the plain "run <command>" copy a
+	// stdio/connect-only tcp adapter shows — see this feature's own
+	// `docs/research/2026-08-04-complete-debug.md` "架构裁定 §6".
+	await expect(dialog).toContainText(
+		'Start "/usr/bin/python3" and connect to 127.0.0.1:5678?',
+	);
+	await expect(dialog).toContainText("127.0.0.1:5678");
+	await dialog
+		.getByRole("button", { name: "Run Adapter", exact: true })
+		.click();
+	await expect(dialog).toHaveCount(0);
+
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_launch")).length)
+		.toBe(1);
+	const launches = await terminalCallsFor(page, "debug_launch");
+	expect(launches[0]?.args.request).toEqual({
+		rootId: nativeRootId,
+		transport: "tcpSpawn",
+		command: "/usr/bin/python3",
+		args: ["-m", "debugpy.adapter", "--listen"],
+		adapterId: "debugpy-listen",
+		arguments: { program: "main.py" },
+		initialBreakpoints: [],
+		port: 5678,
+	});
+
+	// A real live session exists — the composed spawn-then-connect mock
+	// outcome defaults to `"success"`.
+	const sessionId = await currentDebugSessionId(page);
+	expect(sessionId).toBeTruthy();
+
+	expect(pageErrors).toEqual([]);
+});
+
+async function startTcpSpawnDebuggingThroughBothDialogs(
+	page: Page,
+): Promise<void> {
+	await openMainPy(page);
+	await openRunAndDebugView(page);
+	await executePaletteCommand(
+		page,
+		"Start Debugging",
+		"Plain: Start Debugging",
+	);
+	// Scoped to `.monaco-dialog-box` (the real `IDialogService.confirm`
+	// modal's own class) rather than a bare `page.getByRole("dialog")` — see
+	// `"Network pull fails closed..."`'s own comment above for why: the error
+	// notification toast this helper's own callers expect to appear right
+	// after the second click is *itself* a `role="dialog"` list row, so an
+	// unscoped role query would still find it and never reach `toHaveCount(0)`.
+	const dialog = page.locator(".monaco-dialog-box");
+	await expect(dialog).toBeVisible();
+	await dialog
+		.getByRole("button", { name: "Trust & Continue", exact: true })
+		.click();
+	await expect(dialog).toBeVisible();
+	await dialog
+		.getByRole("button", { name: "Run Adapter", exact: true })
+		.click();
+	await expect(dialog).toHaveCount(0);
+}
+
+async function liveDebugSessionIds(page: Page): Promise<readonly string[]> {
+	return page.evaluate(() => {
+		const testWindow = window as unknown as Window & {
+			__PLAIN_TEST_DEBUG_SESSION_IDS__(): readonly string[];
+		};
+		return testWindow.__PLAIN_TEST_DEBUG_SESSION_IDS__();
+	});
+}
+
+test("Plain: Start Debugging reports an accurate error and leaves zero session residue when the tcpSpawn companion exits before ever listening", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{
+			"main.py": DEBUG_MAIN_PY,
+			".vscode/launch.json": DEBUG_LAUNCH_JSON_TCP_SPAWN,
+		},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{ tcpSpawnOutcomeForTest: "processExitedBeforeListening" },
+	);
+
+	await startTcpSpawnDebuggingThroughBothDialogs(page);
+
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	await expect(toasts).toContainText(
+		"The spawned debug adapter process exited before Plain could connect to its TCP listener.",
+	);
+
+	expect(await liveDebugSessionIds(page)).toEqual([]);
+	expect(pageErrors).toEqual([]);
+});
+
+test("Plain: Start Debugging reports an accurate error and leaves zero session residue when the tcpSpawn connect budget is exhausted", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{
+			"main.py": DEBUG_MAIN_PY,
+			".vscode/launch.json": DEBUG_LAUNCH_JSON_TCP_SPAWN,
+		},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{ tcpSpawnOutcomeForTest: "connectTimedOut" },
+	);
+
+	await startTcpSpawnDebuggingThroughBothDialogs(page);
+
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	await expect(toasts).toContainText(
+		"Timed out waiting for the spawned debug adapter's TCP listener to become ready.",
+	);
+
+	expect(await liveDebugSessionIds(page)).toEqual([]);
+	expect(pageErrors).toEqual([]);
+});
+
+test("Plain: Start Debugging still supports the existing stdio adapter path unchanged alongside the new tcpSpawn variant", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(page, "arrayBuffer", "readonly", {
+		"main.py": DEBUG_MAIN_PY,
+		".vscode/launch.json": DEBUG_LAUNCH_JSON,
+	});
+
+	const sessionId = await launchDebugSessionThroughBothDialogs(page);
+	expect(sessionId).toBeTruthy();
+	const launches = await terminalCallsFor(page, "debug_launch");
+	expect(launches[0]?.args.request).toMatchObject({
+		transport: "stdio",
+		command: "/usr/bin/python3",
+	});
 
 	expect(pageErrors).toEqual([]);
 });

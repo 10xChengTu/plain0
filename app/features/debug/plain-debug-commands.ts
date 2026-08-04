@@ -77,6 +77,20 @@ function toDebugAdapterTarget(
 			port: descriptor.port,
 		};
 	}
+	if (descriptor.transport === "tcpSpawn") {
+		if (descriptor.port === undefined) {
+			// Never actually reachable — see the `"tcp"` branch's own comment
+			// above for why this mirrors that same defensive shape rather
+			// than a thrown exception.
+			return undefined;
+		}
+		return {
+			transport: "tcpSpawn",
+			command: descriptor.command,
+			args: descriptor.args,
+			port: descriptor.port,
+		};
+	}
 	return {
 		transport: "stdio",
 		command: descriptor.command,

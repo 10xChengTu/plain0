@@ -35,7 +35,7 @@ use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, Directory
 use crate::workspace::service::WorkspaceService;
 use crate::workspace::RootId;
 
-use super::{connect_adapter, connect_adapter_sync};
+use super::{connect_adapter, connect_adapter_sync, connect_loopback_companion_with_retry_sync};
 
 fn block_on<F: std::future::Future>(future: F) -> F::Output {
     tauri::async_runtime::block_on(future)
@@ -474,5 +474,152 @@ fn frame_decoder_reassembles_a_fragmented_multi_message_session_over_a_real_tcp_
     assert_eq!(
         String::from_utf8(decoded[2].body.clone()).unwrap(),
         r#"{"seq":2,"type":"event","event":"initialized"}"#
+    );
+}
+
+// ---------------------------------------------------------------------
+// `F210` S6 — `connect_loopback_companion_with_retry_sync`: the bounded,
+// backing-off spawn-then-connect retry loop. Every test below drives the
+// real function directly (no trust/confirmation gate to bypass — this
+// primitive deliberately has none of its own, see its own doc comment for
+// why), with a synthetic `probe_exit_code` closure standing in for a real
+// `exec::AdapterHandle` (that real wiring, including a genuinely spawned
+// process, is proven end to end in `debug::service::tests`).
+// ---------------------------------------------------------------------
+
+/// Binds an ephemeral loopback port, immediately frees it, and hands back
+/// just the port number — mirrors
+/// `connecting_to_a_port_with_nothing_listening_fails_with_connect_failed`'s
+/// own established idiom for "a port number nothing is listening on (yet)".
+fn free_loopback_port() -> u16 {
+    let listener = bind_loopback_listener();
+    listener.local_addr().unwrap().port()
+}
+
+fn never_exited() -> Option<Option<i32>> {
+    None
+}
+
+#[test]
+fn retry_succeeds_once_a_delayed_listener_comes_up_on_the_exact_port() {
+    let port = free_loopback_port();
+    let listener_thread = std::thread::spawn(move || {
+        // Deliberately longer than `DEBUG_ADAPTER_TCP_SPAWN_RETRY_INITIAL_BACKOFF`
+        // (50ms) so this genuinely proves the retry loop survives at least
+        // one failed attempt and backoff sleep, not just a same-tick race.
+        std::thread::sleep(Duration::from_millis(150));
+        let listener =
+            TcpListener::bind(("127.0.0.1", port)).expect("rebinds the freed ephemeral port");
+        let (_stream, _addr) = listener
+            .accept()
+            .expect("accepts the retry loop's real connection");
+    });
+
+    let cancel = AtomicBool::new(false);
+    let result = connect_loopback_companion_with_retry_sync(
+        port,
+        Duration::from_secs(2),
+        never_exited,
+        &cancel,
+    );
+    assert!(
+        result.is_ok(),
+        "a listener that comes up mid-budget must eventually be reached: {:?}",
+        result.err()
+    );
+    listener_thread
+        .join()
+        .expect("the delayed listener thread completes and observes the connection");
+}
+
+#[test]
+fn retry_fails_immediately_with_the_exited_code_once_the_probe_reports_the_process_gone() {
+    let port = free_loopback_port();
+    let start = Instant::now();
+    let cancel = AtomicBool::new(false);
+    let result = connect_loopback_companion_with_retry_sync(
+        port,
+        Duration::from_secs(5),
+        || Some(Some(17)),
+        &cancel,
+    );
+    let error = result.expect_err("an already-exited companion must fail the retry loop");
+    assert_eq!(error.code(), "DEBUG_ADAPTER_TCP_COMPANION_EXITED");
+    assert!(
+        start.elapsed() < Duration::from_millis(500),
+        "an exited-process failure must never spend any part of the connect budget: took {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn retry_reports_a_signal_terminated_exit_as_no_exit_code() {
+    let port = free_loopback_port();
+    let cancel = AtomicBool::new(false);
+    let result = connect_loopback_companion_with_retry_sync(
+        port,
+        Duration::from_secs(5),
+        || Some(None),
+        &cancel,
+    );
+    let error = result.expect_err("a signal-terminated companion must also fail the retry loop");
+    assert_eq!(error.code(), "DEBUG_ADAPTER_TCP_COMPANION_EXITED");
+    assert!(error.message().contains("signal"));
+}
+
+#[test]
+fn retry_times_out_once_the_injected_budget_elapses_with_nothing_ever_listening() {
+    let port = free_loopback_port();
+    let start = Instant::now();
+    let cancel = AtomicBool::new(false);
+    let budget = Duration::from_millis(180);
+    let result = connect_loopback_companion_with_retry_sync(port, budget, never_exited, &cancel);
+    let error = result.expect_err("nothing ever listens on this port in this test");
+    assert_eq!(
+        error.code(),
+        "DEBUG_ADAPTER_TCP_COMPANION_CONNECT_TIMED_OUT"
+    );
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= budget,
+        "must not report timed-out before the injected budget actually elapsed: {elapsed:?}"
+    );
+    assert!(
+        elapsed < budget + Duration::from_secs(2),
+        "must not overrun the injected budget by anywhere close to a full extra backoff cycle: {elapsed:?}"
+    );
+}
+
+#[test]
+fn retry_honors_a_preset_cancel_flag_before_ever_attempting_a_connection() {
+    let port = free_loopback_port();
+    let start = Instant::now();
+    let cancel = AtomicBool::new(true);
+    let result = connect_loopback_companion_with_retry_sync(
+        port,
+        Duration::from_secs(5),
+        never_exited,
+        &cancel,
+    );
+    let error = result.expect_err("a pre-set cancel flag must abort immediately");
+    assert_eq!(error.code(), "DEBUG_ADAPTER_CANCELLED");
+    assert!(
+        start.elapsed() < Duration::from_millis(500),
+        "a pre-set cancel must never spend any part of the connect budget: {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn retry_zero_budget_times_out_without_panicking() {
+    // A defensive edge case: `TcpStream::connect_timeout` panics on a zero
+    // duration, so the loop must never reach it with `remaining == 0`.
+    let port = free_loopback_port();
+    let cancel = AtomicBool::new(false);
+    let result =
+        connect_loopback_companion_with_retry_sync(port, Duration::ZERO, never_exited, &cancel);
+    assert_eq!(
+        result.unwrap_err().code(),
+        "DEBUG_ADAPTER_TCP_COMPANION_CONNECT_TIMED_OUT"
     );
 }

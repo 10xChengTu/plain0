@@ -68,78 +68,98 @@
 //!    third-party citations or an "untested" placeholder; see this slice's
 //!    own final report for the measured figures.
 //!
-//! # S1's open "spawn-then-connect" question: `F100` S5's resolution
+//! # S1's open "spawn-then-connect" question: closed by `F210` S6
 //!
 //! S1 left open whether the TCP transport should compose with spawning
 //! ("Plain starts the adapter process, which itself opens a TCP listener,
 //! and Plain then connects to the port it opened") or stay connect-only
 //! ("the adapter is already running externally; Plain only ever connects
 //! out"). S2 chose connect-only for `service::DebugSessionService::start_session`'s
-//! production TCP branch (still true today — it calls
-//! [`tcp::connect_adapter`] alone, never any spawn primitive) and identified
-//! the exact reason a naive fix would be unsafe: [`exec::spawn_adapter`]
-//! hardcodes `AdapterTransportKind::Stdio` when building the confirmation
-//! subject it checks (`scripts/plain/boundary-contracts.mjs`'s
-//! `validateDebugAdapterSpawnBoundary` mechanically locks this — correctly,
-//! for the ordinary case where the spawned process's own stdio *is* the DAP
-//! transport); reusing it as-is for a "spawn a companion process that will
-//! itself open a TCP listener elsewhere" use case would silently demand (or
-//! silently reuse) a *different* confirmation record than the one governing
-//! the TCP session the user is actually starting — exactly the kind of
+//! production TCP branch and identified the exact reason a naive fix would be
+//! unsafe: [`exec::spawn_adapter`] hardcodes `AdapterTransportKind::Stdio`
+//! when building the confirmation subject it checks
+//! (`scripts/plain/boundary-contracts.mjs`'s `validateDebugAdapterSpawnBoundary`
+//! mechanically locks this — correctly, for the ordinary case where the
+//! spawned process's own stdio *is* the DAP transport); reusing it as-is for
+//! a "spawn a companion process that will itself open a TCP listener
+//! elsewhere" use case would silently demand (or silently reuse) a
+//! *different* confirmation record than the one governing the TCP session
+//! the user is actually starting — exactly the kind of
 //! confirmation-identity confusion `docs/research/2026-07-28-generic-dap.md`'s
 //! "主导会话裁定" item 2 was written to prevent.
 //!
-//! `F100` S5 builds the primitive this fix needs: [`exec::spawn_adapter_as_tcp_companion`]
+//! `F100` S5 built the primitive this fix needs — [`exec::spawn_adapter_as_tcp_companion`]
 //! is byte-for-byte [`exec::spawn_adapter`]'s twin except the one line that
 //! matters — its confirmation subject is built with `AdapterTransportKind::Tcp`,
-//! never `::Stdio` — and `scripts/plain/boundary-contracts.mjs`'s new
+//! never `::Stdio` — and `scripts/plain/boundary-contracts.mjs`'s
 //! `validateDebugTcpCompanionSpawnBoundary` mechanically locks that fact so it
-//! can never silently regress. `exec::tests` proves the isolation holds in
-//! both directions: a subject confirmed only for `Stdio` cannot authorize a
-//! `Tcp`-companion spawn, and (the reverse, not previously tested at all)
-//! a subject confirmed only for `Tcp` cannot authorize an ordinary
-//! [`exec::spawn_adapter`] call either.
+//! can never silently regress — but deliberately left it with zero
+//! production caller: composing "spawn, then connect" needed a bounded
+//! connect-retry loop after spawning (a real listener needs a moment to come
+//! up; a bare `TcpStream::connect` can observe `ECONNREFUSED` near-instantly
+//! rather than actually waiting out [`tcp::DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT`])
+//! *and* a real config surface, neither of which S5's own robustness scope
+//! required.
 //!
-//! **Still deliberately not wired to any production entry point** — this is
-//! disclosed scope, not an oversight, weighed and decided this slice: actually
-//! composing "spawn, then connect" needs a bounded connect-retry loop after
-//! spawning (a real listener needs a moment to come up; a bare
-//! `TcpStream::connect` can observe `ECONNREFUSED` near-instantly rather than
-//! actually waiting out [`tcp::DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT`]) *and* a
-//! real config surface (a `spawnBeforeConnect: bool`-style wire field, parsed
-//! by the frontend's adapter-config module, threaded through
-//! `DebugSessionStartRequest`) — neither of which any `F100` acceptance
-//! criterion or this slice's own robustness scope (per-request timeouts,
-//! session-end presentation, `output` backpressure, real benchmarks) actually
-//! requires, and genuinely discovering an OS-assigned ephemeral port
-//! (`--port 0`) from an adapter's own stdout announcement remains
-//! adapter-specific and unsolved by this primitive either way. Building
-//! `spawn_adapter_as_tcp_companion` now, correctly gated and tested in
-//! isolation with zero production caller, mirrors this exact domain's own
-//! S0/S1 precedent ([`exec::spawn_adapter`]/[`tcp::connect_adapter`]
-//! themselves had zero production callers until S2 gave them one) —
-//! **recommendation for whoever picks this up next**: add the config field,
-//! the connect-retry loop, and wire `start_session`'s TCP branch to call this
-//! primitive first when the resolved request opts in.
+//! `F210` S6 (`docs/research/2026-08-04-complete-debug.md`'s "架构裁定 §6")
+//! builds both and wires them together: [`dto::AdapterTransportKind::TcpSpawn`]/
+//! [`dto::SessionTransportRequest::TcpSpawn`] is the third transport
+//! variant (spawn descriptor + a `port` on the fixed `127.0.0.1` loopback
+//! address — no `host` field at all, since that connect target is never
+//! caller-configurable the way plain `Tcp`'s own `host` is), and
+//! [`tcp::connect_loopback_companion_with_retry_sync`] is the bounded,
+//! backing-off (50ms doubling to 500ms) retry loop, budgeted by the same
+//! [`tcp::DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT`] the plain `Tcp` transport's own
+//! single connect attempt uses. `service::DebugSessionService::start_session`'s
+//! new `TcpSpawn` match arm composes them in order — confirm (the `Tcp`
+//! variant, per S5's own design: spawning the companion still checks
+//! `AdapterTransportKind::Tcp`, never a fourth confirmation identity) →
+//! [`exec::spawn_adapter_as_tcp_companion`] → the retry loop, checking the
+//! companion's liveness ([`exec::AdapterHandle::probe_exit_code`]) at the top
+//! of every retry iteration so a companion that dies mid-retry fails
+//! immediately ([`debug_adapter_tcp_companion_exited`]) rather than idling
+//! out the full connect budget — and on *any* failure past the spawn step,
+//! kills the already-spawned process before returning
+//! ([`debug_adapter_tcp_companion_connect_timed_out`] for the
+//! budget-exhausted case). A successful session then holds both the process
+//! handle and the `TcpStream` simultaneously; every teardown path shuts the
+//! stream down first, then kills the process — see that match arm's own
+//! comment for the exact ordering. `exec::spawn_adapter_as_tcp_companion` is
+//! no longer `#[allow(dead_code)]` — `start_session`'s `TcpSpawn` arm is now
+//! its real production caller, alongside the `#[cfg(test)]` fixtures S5 left
+//! behind.
 //!
-//! Adapter-config parsing (`.plain/debug-adapters.json`/`.vscode/launch.json`'s
-//! inline `plainAdapter` block) is still frontend-only per the frozen doc's
-//! own "决策 1" — see `app/features/debug/plain-debug-adapter-config.ts`.
+//! The OS-assigned-ephemeral-port case (`--port 0`, discovered only from an
+//! adapter's own stdout announcement) remains unsolved by this primitive —
+//! `port` is still a value the caller's adapter-config entry names up front,
+//! matching every other adapter-config field's own "user fills in a fixed
+//! value, Plain never sniffs process output for one" precedent. Adapter-config
+//! parsing (`.plain/debug-adapters.json`/`.vscode/launch.json`'s inline
+//! `plainAdapter` block) is still frontend-only per the frozen doc's own
+//! "决策 1" — see `app/features/debug/plain-debug-adapter-config.ts`.
 //!
-//! # Subprocess spawning is `exec::spawn_adapter`-only; TCP connecting is `tcp::connect_adapter`-only
+//! # Subprocess spawning is `exec::spawn_adapter`/`spawn_adapter_as_tcp_companion`-only; TCP connecting is `tcp::connect_adapter`/`connect_loopback_companion_with_retry_sync`-only
 //!
 //! Exactly like `git::` (whose own module doc makes the same claim for
 //! `exec::run_git`), every subprocess this domain ever spawns goes through
-//! [`exec::spawn_adapter`]/[`exec::spawn_adapter_sync`], and every TCP
-//! connection through [`tcp::connect_adapter`]/[`tcp::connect_adapter_sync`]
-//! — never `std::process::Command`/`std::net::TcpStream::connect` directly
-//! anywhere else in this module tree, and never by asking a shell to
-//! interpret a concatenated command string.
+//! [`exec::spawn_adapter`]/[`exec::spawn_adapter_as_tcp_companion`] (both
+//! ultimately [`exec::spawn_adapter_sync`]), and every TCP connection through
+//! [`tcp::connect_adapter`]/[`tcp::connect_adapter_sync`]/
+//! [`tcp::connect_loopback_companion_with_retry_sync`] — never
+//! `std::process::Command`/`std::net::TcpStream::connect` directly anywhere
+//! else in this module tree, and never by asking a shell to interpret a
+//! concatenated command string.
 //! `scripts/plain/boundary-contracts.mjs`'s `validateDebugSpawnConstructionShape`
 //! mechanically locks the exact `Command::new(&descriptor.command)
 //! .args(&descriptor.args)` construction shape; `validateDebugAdapterSpawnBoundary`/
-//! `validateDebugAdapterConnectBoundary` lock that the trust-then-confirmation
-//! gate runs, in that literal order, before any of it.
+//! `validateDebugAdapterConnectBoundary`/`validateDebugTcpCompanionSpawnBoundary`
+//! lock that the trust-then-confirmation gate runs, in that literal order,
+//! before any of it — `connect_loopback_companion_with_retry_sync` itself is
+//! deliberately *not* separately gated (see its own doc comment): it only
+//! ever connects to the fixed loopback port the already-gated
+//! `spawn_adapter_as_tcp_companion` call for the exact same operation just
+//! spawned, a continuation of that one gated decision, not an independent
+//! one.
 //!
 //! # Trust *then* confirmation, before spawn or connect
 //!
@@ -159,24 +179,19 @@
 //! `terminal` has a precedent for, so there is no existing verbatim error to
 //! reuse.
 //!
-//! # The remaining dead-code annotations are deliberate, not stray
+//! # The remaining dead-code annotation is deliberate, not stray
 //!
 //! S0/S1 left a trail of `#[allow(dead_code)]` items across [`framing`],
 //! [`exec`] and [`tcp`], each naming which future slice would add the real
 //! caller. S2 ([`service::DebugSessionService::start_session`]) was that
-//! caller for essentially all of them — [`framing::FrameDecoder`],
-//! [`exec::spawn_adapter`]/`spawn_adapter_sync`/`apply_env_passthrough`/
-//! `spawn_stderr_capture`, [`exec::AdapterHandle`]'s `kill`/`take_io`, and
-//! [`tcp::connect_adapter`]/`connect_adapter_sync` are all genuinely live in
-//! production now, so their annotations were removed rather than left stale.
-//! Two remain, each with its own doc comment explaining why: (1)
-//! [`exec::AdapterHandle::stderr_tail`] — no caller anywhere yet, even in
-//! tests, kept for a later slice wanting to surface a running adapter's
-//! stderr diagnostics; (2) `F100` S5's own
-//! [`exec::spawn_adapter_as_tcp_companion`] — every caller today is a
-//! `#[cfg(test)]` fixture, by this slice's own deliberate choice not to wire
-//! it into any production entry point yet (see the "S1's open
-//! spawn-then-connect question" section below for why).
+//! caller for essentially all of them, and `F210` S6 (see the "S1's open
+//! spawn-then-connect question" section above) gave
+//! [`exec::spawn_adapter_as_tcp_companion`] its own real production caller
+//! (that same match statement's new `TcpSpawn` arm) — every annotation
+//! S0/S1/S5 left has now been removed rather than left stale, except one:
+//! [`exec::AdapterHandle::stderr_tail`], which still has no caller anywhere,
+//! even in tests, kept for a later slice wanting to surface a running
+//! adapter's stderr diagnostics.
 
 use crate::error::CommandError;
 
@@ -256,6 +271,52 @@ pub(crate) fn debug_adapter_connect_failed() -> CommandError {
     CommandError::new(
         "DEBUG_ADAPTER_CONNECT_FAILED",
         "Could not connect to the debug adapter's TCP endpoint.",
+    )
+}
+
+/// `F210` S6 — returned by [`tcp::connect_loopback_companion_with_retry_sync`]
+/// when the spawned companion process (`exec::spawn_adapter_as_tcp_companion`)
+/// exits on its own *after* surviving `exec::DEBUG_ADAPTER_STARTUP_GRACE`
+/// (an exit still inside that startup window is instead reported earlier, by
+/// [`debug_adapter_startup_crashed`], before the retry loop is ever reached)
+/// but *before* Plain ever managed to connect to the loopback TCP port it was
+/// expected to open. Kept distinct from [`debug_adapter_tcp_companion_connect_timed_out`]
+/// (the process is still alive; only its *port* never came up in time) so a
+/// caller — and the user-facing message — can tell "the adapter itself died"
+/// apart from "the adapter is still running but never opened its listener",
+/// two different failures with different likely causes and remedies.
+/// `exit_code` follows [`debug_adapter_startup_crashed`]'s own
+/// `Option<i32>`/`ExitStatus::code()` convention (`None` for a
+/// signal-terminated process).
+pub(crate) fn debug_adapter_tcp_companion_exited(exit_code: Option<i32>) -> CommandError {
+    let exit_description = match exit_code {
+        Some(code) => format!("exit code {code}"),
+        None => "no exit code (terminated by signal)".to_owned(),
+    };
+    CommandError::new(
+        "DEBUG_ADAPTER_TCP_COMPANION_EXITED",
+        format!(
+            "The spawned debug adapter process exited ({exit_description}) before Plain could \
+             connect to its TCP listener."
+        ),
+    )
+}
+
+/// `F210` S6 — returned by the same retry loop as
+/// [`debug_adapter_tcp_companion_exited`] when
+/// [`tcp::DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT`]'s connect budget is exhausted
+/// while the spawned companion process is still alive — its TCP listener
+/// never accepted a connection in time. `service::DebugSessionService::start_session`'s
+/// `TcpSpawn` branch kills the still-running process before this error is
+/// ever returned to the caller, so no orphaned process survives this failure
+/// either. Kept distinct from the ordinary [`debug_adapter_connect_failed`]
+/// (which never applies to this retry loop — it has its own, more specific
+/// pair of failure codes) and from [`debug_adapter_tcp_companion_exited`]
+/// above (see that function's own doc comment for the distinction).
+pub(crate) fn debug_adapter_tcp_companion_connect_timed_out() -> CommandError {
+    CommandError::new(
+        "DEBUG_ADAPTER_TCP_COMPANION_CONNECT_TIMED_OUT",
+        "Timed out waiting for the spawned debug adapter's TCP listener to become ready.",
     )
 }
 
@@ -431,10 +492,11 @@ mod tests {
     use super::{
         confirmation_unavailable, debug_adapter_cancelled, debug_adapter_connect_failed,
         debug_adapter_not_confirmed, debug_adapter_response_malformed,
-        debug_adapter_spawn_unavailable, debug_adapter_startup_crashed, debug_handshake_failed,
-        debug_request_failed, debug_request_timed_out, debug_run_in_terminal_arguments_invalid,
-        debug_session_ended, debug_session_not_found, debug_session_request_invalid,
-        debug_transport_unavailable,
+        debug_adapter_spawn_unavailable, debug_adapter_startup_crashed,
+        debug_adapter_tcp_companion_connect_timed_out, debug_adapter_tcp_companion_exited,
+        debug_handshake_failed, debug_request_failed, debug_request_timed_out,
+        debug_run_in_terminal_arguments_invalid, debug_session_ended, debug_session_not_found,
+        debug_session_request_invalid, debug_transport_unavailable,
     };
 
     #[test]
@@ -486,6 +548,22 @@ mod tests {
             debug_request_timed_out("variables").code(),
             "DEBUG_REQUEST_TIMED_OUT"
         );
+        assert_eq!(
+            debug_adapter_tcp_companion_exited(Some(1)).code(),
+            "DEBUG_ADAPTER_TCP_COMPANION_EXITED"
+        );
+        assert_eq!(
+            debug_adapter_tcp_companion_connect_timed_out().code(),
+            "DEBUG_ADAPTER_TCP_COMPANION_CONNECT_TIMED_OUT"
+        );
+    }
+
+    #[test]
+    fn tcp_companion_exited_message_includes_exit_code_and_handles_a_missing_one() {
+        let error = debug_adapter_tcp_companion_exited(Some(9));
+        assert!(error.message().contains('9'));
+        let signal_killed = debug_adapter_tcp_companion_exited(None);
+        assert!(signal_killed.message().contains("signal"));
     }
 
     #[test]

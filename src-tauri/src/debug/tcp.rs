@@ -72,7 +72,7 @@
 //! This is a disclosed limitation, not a silent gap: [`DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT`]
 //! keeps any single attempt's worst case small.
 
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -84,7 +84,10 @@ use crate::workspace::RootId;
 
 use super::confirm::ConfirmationService;
 use super::dto::{self, AdapterTransportKind};
-use super::{debug_adapter_cancelled, debug_adapter_connect_failed};
+use super::{
+    debug_adapter_cancelled, debug_adapter_connect_failed,
+    debug_adapter_tcp_companion_connect_timed_out, debug_adapter_tcp_companion_exited,
+};
 
 /// Wall-clock ceiling on a single `TcpStream::connect` attempt — generous for
 /// a real local-loopback DAP adapter (the only realistic target this
@@ -92,8 +95,31 @@ use super::{debug_adapter_cancelled, debug_adapter_connect_failed};
 /// hung/unresponsive endpoint. Deliberately much shorter than
 /// `exec.rs::DEBUG_ADAPTER_STARTUP_GRACE`'s spawn-crash-detection window
 /// serves a different purpose: this bounds one blocking network call, not a
-/// "did the process survive" observation window.
-const DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// "did the process survive" observation window. `F210` S6 also reuses this
+/// exact constant as [`connect_loopback_companion_with_retry_sync`]'s own
+/// default *total* retry-loop budget (not a single-attempt bound there — see
+/// that function's own doc comment) — `pub(crate)` so
+/// `service::DebugSessionService::start_session`'s `TcpSpawn` branch can name
+/// it explicitly rather than this module silently reaching for its own
+/// constant from outside.
+pub(crate) const DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// `F210` S6 — [`connect_loopback_companion_with_retry_sync`]'s starting
+/// backoff between connect attempts. A bare `TcpStream::connect` against a
+/// loopback port nothing is listening on yet observes `ECONNREFUSED`
+/// near-instantly rather than blocking, so a fixed sleep between attempts is
+/// the only way to avoid a tight busy-loop while still promptly noticing the
+/// moment the companion process's listener comes up.
+const DEBUG_ADAPTER_TCP_SPAWN_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
+
+/// `F210` S6 — the ceiling [`connect_loopback_companion_with_retry_sync`]'s
+/// exponential backoff never exceeds, doubling from
+/// [`DEBUG_ADAPTER_TCP_SPAWN_RETRY_INITIAL_BACKOFF`] up to this value each
+/// retry — bounds how late a late-arriving listener can still be caught
+/// before the shared [`DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT`] budget itself runs
+/// out (at 500ms, several retries still fit inside the 5s production budget
+/// even in the worst case).
+const DEBUG_ADAPTER_TCP_SPAWN_RETRY_MAX_BACKOFF: Duration = Duration::from_millis(500);
 
 /// Trust → selected-root → confirmation-gated entry point — see the module
 /// doc for the full rationale. Calls [`TrustService::require_trusted`] first,
@@ -168,6 +194,96 @@ fn connect_adapter_sync(
         }
     }
     Err(debug_adapter_connect_failed())
+}
+
+/// `F210` S6 — the bounded, backing-off retry loop that composes a spawned
+/// companion process's TCP listener coming up with this domain's own
+/// loopback connect primitive. See `debug::mod`'s own module doc ("S1's open
+/// spawn-then-connect question") for why this exists at all —
+/// `service::DebugSessionService::start_session`'s `TcpSpawn` branch is the
+/// sole production caller, always immediately after
+/// `exec::spawn_adapter_as_tcp_companion` has already passed the
+/// `Tcp`-confirmed trust/confirmation gate for this exact `(command, args)`.
+///
+/// # Why this does not re-run the trust/confirmation gate
+///
+/// Connecting to the loopback port the just-spawned child itself is expected
+/// to open is a continuation of the single already-gated spawn-then-connect
+/// operation, not an independent connect decision the way [`connect_adapter`]'s
+/// own caller-chosen, arbitrary `host:port` target is — re-checking
+/// confirmation on every retry attempt would also mean a blocking disk read
+/// on this domain's own backoff cadence, for no additional safety: the port
+/// is not, and was never, part of the confirmed identity (see
+/// [`dto::TcpConnectDescriptor`]'s own doc comment for why `host`/`port`
+/// are excluded from [`dto::AdapterConfirmationSubject`] in the first place).
+///
+/// # Retry contract
+///
+/// `probe_exit_code` is polled at the *start* of every iteration (including
+/// the first) — a companion that has already died (after surviving
+/// `exec::DEBUG_ADAPTER_STARTUP_GRACE` — an earlier exit is instead reported
+/// as [`super::debug_adapter_startup_crashed`], inside
+/// `exec::spawn_adapter_sync` itself, before this loop is ever reached) fails
+/// immediately with [`super::debug_adapter_tcp_companion_exited`], never
+/// spending any part of `budget` on a doomed connection attempt. Each
+/// connect attempt is itself bounded by whatever remains of `budget`
+/// (`TcpStream::connect_timeout`, exactly like [`connect_adapter_sync`]'s own
+/// per-attempt bound); a real loopback refusal returns near-instantly rather
+/// than consuming that bound, so the effective pacing between attempts comes
+/// from the sleep after each failed one — starting at
+/// [`DEBUG_ADAPTER_TCP_SPAWN_RETRY_INITIAL_BACKOFF`] and doubling up to
+/// [`DEBUG_ADAPTER_TCP_SPAWN_RETRY_MAX_BACKOFF`] each time, never past what
+/// remains of `budget`. Once `budget` elapses with the process still alive
+/// but never having accepted a connection,
+/// [`super::debug_adapter_tcp_companion_connect_timed_out`] is returned —
+/// see that function's own doc comment for why it is a distinct code from
+/// the exited-process case above, and from the ordinary
+/// [`super::debug_adapter_connect_failed`] (which never applies here — this
+/// loop has its own, more specific pair of failure codes). The caller (not
+/// this function) is responsible for killing the still-running companion
+/// process on any `Err` this returns — see
+/// `service::DebugSessionService::start_session`'s `TcpSpawn` arm.
+///
+/// `budget` is an explicit parameter (not the hardcoded
+/// [`DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT`] constant) purely for testability —
+/// mirrors `service::DebugSessionService::send_request_with_timeout`'s own
+/// injected-timeout precedent; the sole production caller always passes
+/// [`DEBUG_ADAPTER_TCP_CONNECT_TIMEOUT`] itself.
+pub(crate) fn connect_loopback_companion_with_retry_sync(
+    port: u16,
+    budget: Duration,
+    probe_exit_code: impl Fn() -> Option<Option<i32>>,
+    cancel: &AtomicBool,
+) -> Result<TcpStream, CommandError> {
+    let deadline = Instant::now() + budget;
+    let mut backoff = DEBUG_ADAPTER_TCP_SPAWN_RETRY_INITIAL_BACKOFF;
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Err(debug_adapter_cancelled());
+        }
+        if let Some(exit_code) = probe_exit_code() {
+            return Err(debug_adapter_tcp_companion_exited(exit_code));
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(debug_adapter_tcp_companion_connect_timed_out());
+        };
+        if remaining.is_zero() {
+            return Err(debug_adapter_tcp_companion_connect_timed_out());
+        }
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        if let Ok(stream) = TcpStream::connect_timeout(&address, remaining) {
+            return Ok(stream);
+        }
+        let Some(remaining_before_sleep) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(debug_adapter_tcp_companion_connect_timed_out());
+        };
+        if remaining_before_sleep.is_zero() {
+            return Err(debug_adapter_tcp_companion_connect_timed_out());
+        }
+        let sleep_for = backoff.min(remaining_before_sleep);
+        std::thread::sleep(sleep_for);
+        backoff = (backoff * 2).min(DEBUG_ADAPTER_TCP_SPAWN_RETRY_MAX_BACKOFF);
+    }
 }
 
 #[cfg(test)]

@@ -254,6 +254,108 @@ describe("parseDebugAdapterRegistry", () => {
 		const result = parseDebugAdapterRegistry(utf8(JSON.stringify(entries)));
 		expect(result.kind).toBe("error");
 	});
+
+	// -----------------------------------------------------------------
+	// `F210` S6 — `"tcpSpawn"` transport.
+	// -----------------------------------------------------------------
+
+	it("parses a well-formed tcpSpawn entry (port, no host)", () => {
+		const result = parseDebugAdapterRegistry(
+			utf8(
+				JSON.stringify([
+					{
+						type: "debugpy-listen",
+						transport: "tcpSpawn",
+						command: "/usr/bin/python3",
+						args: ["-m", "debugpy.adapter", "--listen"],
+						port: 5678,
+					},
+				]),
+			),
+		);
+		expect(result.kind).toBe("ok");
+		if (result.kind !== "ok") {
+			return;
+		}
+		expect(result.value).toEqual([
+			{
+				type: "debugpy-listen",
+				descriptor: {
+					command: "/usr/bin/python3",
+					args: ["-m", "debugpy.adapter", "--listen"],
+					transport: "tcpSpawn",
+					port: 5678,
+				},
+			},
+		]);
+	});
+
+	it("rejects a tcpSpawn entry missing port", () => {
+		const result = parseDebugAdapterRegistry(
+			utf8(
+				JSON.stringify([
+					{
+						type: "x",
+						transport: "tcpSpawn",
+						command: "/usr/bin/x",
+						args: [],
+					},
+				]),
+			),
+		);
+		expect(result.kind).toBe("error");
+	});
+
+	it("rejects a tcpSpawn port outside 1-65535", () => {
+		const result = parseDebugAdapterRegistry(
+			utf8(
+				JSON.stringify([
+					{
+						type: "x",
+						transport: "tcpSpawn",
+						command: "/usr/bin/x",
+						args: [],
+						port: 0,
+					},
+				]),
+			),
+		);
+		expect(result.kind).toBe("error");
+	});
+
+	it("rejects a tcpSpawn entry carrying an explicit host (fixed to loopback, never configurable)", () => {
+		const result = parseDebugAdapterRegistry(
+			utf8(
+				JSON.stringify([
+					{
+						type: "x",
+						transport: "tcpSpawn",
+						command: "/usr/bin/x",
+						args: [],
+						port: 5678,
+						host: "127.0.0.1",
+					},
+				]),
+			),
+		);
+		expect(result.kind).toBe("error");
+	});
+
+	it("rejects a transport that is not stdio, tcp or tcpSpawn", () => {
+		const result = parseDebugAdapterRegistry(
+			utf8(
+				JSON.stringify([
+					{
+						type: "x",
+						transport: "udp",
+						command: "/usr/bin/x",
+						args: [],
+					},
+				]),
+			),
+		);
+		expect(result.kind).toBe("error");
+	});
 });
 
 // ---------------------------------------------------------------------
@@ -353,6 +455,38 @@ describe("parseLaunchConfigurations", () => {
 			command: "/usr/bin/python3",
 			args: ["-m", "debugpy.adapter"],
 			transport: "stdio",
+		});
+	});
+
+	it("parses a valid inline plainAdapter tcpSpawn override", () => {
+		const result = parseLaunchConfigurations(
+			utf8(
+				JSON.stringify({
+					configurations: [
+						{
+							type: "debugpy",
+							request: "launch",
+							name: "x",
+							plainAdapter: {
+								transport: "tcpSpawn",
+								command: "/usr/bin/python3",
+								args: ["-m", "debugpy.adapter", "--listen"],
+								port: 5678,
+							},
+						},
+					],
+				}),
+			),
+		);
+		expect(result.kind).toBe("ok");
+		if (result.kind !== "ok") {
+			return;
+		}
+		expect(result.value[0]?.plainAdapter).toEqual({
+			command: "/usr/bin/python3",
+			args: ["-m", "debugpy.adapter", "--listen"],
+			transport: "tcpSpawn",
+			port: 5678,
 		});
 	});
 

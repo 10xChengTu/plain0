@@ -182,13 +182,19 @@ function parseJsonc(text: string): unknown {
 // Shapes
 // ---------------------------------------------------------------------
 
-export type AdapterTransport = "stdio" | "tcp";
+export type AdapterTransport = "stdio" | "tcp" | "tcpSpawn";
 
 /** The exact shape both `.plain/debug-adapters.json` registry entries and
  * `.vscode/launch.json`'s inline `plainAdapter` block resolve to — matches
  * `src-tauri/src/debug/dto.rs`'s `AdapterSpawnDescriptor`/
  * `TcpConnectDescriptor`/`AdapterTransportKind` field-for-field. `host`/`port`
- * are present if and only if `transport === "tcp"`. */
+ * are present if and only if `transport === "tcp"`. `port` (never `host`) is
+ * present if and only if `transport === "tcpSpawn"` (`F210` S6,
+ * `docs/research/2026-08-04-complete-debug.md`'s "架构裁定 §6") — spawn `command`/
+ * `args` as a companion process, then connect to it on the fixed `127.0.0.1`
+ * loopback address at `port`; see [`parseAdapterDescriptorFields`]'s own
+ * `"tcpSpawn"` branch for why `host` is rejected outright (never merely
+ * ignored) rather than accepted as a field this shape happens to carry. */
 export interface AdapterDescriptor {
 	readonly command: string;
 	readonly args: readonly string[];
@@ -263,9 +269,13 @@ function parseAdapterDescriptorFields(
 		return errorResult("adapter descriptor must be a JSON object");
 	}
 	const transport = value.transport;
-	if (transport !== "stdio" && transport !== "tcp") {
+	if (
+		transport !== "stdio" &&
+		transport !== "tcp" &&
+		transport !== "tcpSpawn"
+	) {
 		return errorResult(
-			'adapter descriptor "transport" must be "stdio" or "tcp"',
+			'adapter descriptor "transport" must be "stdio", "tcp" or "tcpSpawn"',
 		);
 	}
 	const command = value.command;
@@ -337,6 +347,44 @@ function parseAdapterDescriptorFields(
 				args: Object.freeze(args),
 				transport: "tcp",
 				host,
+				port,
+			}),
+		});
+	}
+
+	if (transport === "tcpSpawn") {
+		const port = value.port;
+		if (
+			typeof port !== "number" ||
+			!Number.isInteger(port) ||
+			port < 1 ||
+			port > 65_535
+		) {
+			return errorResult(
+				'a "tcpSpawn" transport adapter descriptor requires a "port" integer between 1 and 65535',
+			);
+		}
+		// Deliberately stricter than `"tcp"` above (which requires an
+		// explicit `host`): the connect target here is always the fixed
+		// `127.0.0.1` loopback address (see `AdapterDescriptor`'s own doc
+		// comment), never caller-configurable, so a `host` field is rejected
+		// outright rather than silently accepted-and-ignored — mirrors
+		// `src-tauri/src/debug/dto.rs`'s identical `into_parts` rejection for
+		// the wire-level counterpart of this same descriptor.
+		const allowedKeys = new Set(["transport", "command", "args", "port"]);
+		for (const key of Object.keys(value)) {
+			if (!allowedKeys.has(key)) {
+				return errorResult(
+					`adapter descriptor has an unrecognized field "${key}"`,
+				);
+			}
+		}
+		return Object.freeze({
+			kind: "ok",
+			value: Object.freeze({
+				command,
+				args: Object.freeze(args),
+				transport: "tcpSpawn",
 				port,
 			}),
 		});

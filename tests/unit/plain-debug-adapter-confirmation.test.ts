@@ -78,6 +78,21 @@ const TCP_REQUEST: DebugAdapterConfirmationRequest = {
 	configSource: ".vscode/launch.json (inline plainAdapter override)",
 };
 
+// `F210` S6 — a spawn-then-connect confirmation still carries the plain
+// `"tcp"` wire subject (see `plain-debug-adapter-launch.ts`'s own mapping),
+// with `spawnBeforeConnect`/`port` as the extra, frontend-only presentation
+// detail this module's own message/detail functions consult.
+const TCP_SPAWN_REQUEST: DebugAdapterConfirmationRequest = {
+	subject: {
+		command: "/usr/bin/python3",
+		args: ["-m", "debugpy.adapter", "--listen"],
+		transport: "tcp",
+	},
+	configSource: ".plain/debug-adapters.json",
+	spawnBeforeConnect: true,
+	port: 5678,
+};
+
 describe("debugAdapterCommandLine", () => {
 	it("joins command and args with a space, quoting only args containing whitespace", () => {
 		expect(debugAdapterCommandLine(STDIO_REQUEST.subject)).toBe(
@@ -108,6 +123,26 @@ describe("debugAdapterConfirmationMessage/Detail", () => {
 		const detail = debugAdapterConfirmationDetail(TCP_REQUEST);
 		expect(detail).toContain("TCP");
 		expect(detail).toContain(TCP_REQUEST.configSource);
+	});
+
+	it("states the spawn-then-connect semantics (start command AND connect to the fixed loopback port) when spawnBeforeConnect is set", () => {
+		const message = debugAdapterConfirmationMessage(TCP_SPAWN_REQUEST);
+		expect(message).toContain("/usr/bin/python3");
+		expect(message).toContain("127.0.0.1:5678");
+		const detail = debugAdapterConfirmationDetail(TCP_SPAWN_REQUEST);
+		expect(detail).toContain("/usr/bin/python3 -m debugpy.adapter --listen");
+		expect(detail).toContain("127.0.0.1:5678");
+		expect(detail).toContain(TCP_SPAWN_REQUEST.configSource);
+	});
+
+	it("falls back to the plain tcp copy when spawnBeforeConnect is set but port is missing", () => {
+		const incomplete: DebugAdapterConfirmationRequest = {
+			...TCP_REQUEST,
+			spawnBeforeConnect: true,
+		};
+		expect(debugAdapterConfirmationMessage(incomplete)).toBe(
+			debugAdapterConfirmationMessage(TCP_REQUEST),
+		);
 	});
 });
 

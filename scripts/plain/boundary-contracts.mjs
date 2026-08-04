@@ -23600,6 +23600,7 @@ function validateDebugAdapterConfirmationModuleFace(source) {
 		["DebugAdapterConfirmationSubject", { kind: "interface", exported: true }],
 		["DebugAdapterConfirmationRequest", { kind: "interface", exported: true }],
 		["quoteArgIfNeeded", { kind: "function", exported: false }],
+		["isSpawnBeforeConnectRequest", { kind: "function", exported: false }],
 		["debugAdapterCommandLine", { kind: "function", exported: true }],
 		["debugAdapterConfirmationMessage", { kind: "function", exported: true }],
 		["debugAdapterConfirmationDetail", { kind: "function", exported: true }],
@@ -23765,6 +23766,7 @@ function validateDebugAdapterLaunchGuardedCall(source) {
 		if (resolved.kind === "adapter-not-found") {
 			return Object.freeze({ kind: "adapter-not-found", type: resolved.type });
 		}
+		const isSpawnThenConnect = resolved.descriptor.transport === "tcpSpawn";
 		const decision = await resolveDebugAdapterConfirmation(
 			bridge,
 			dialogService,
@@ -23772,9 +23774,11 @@ function validateDebugAdapterLaunchGuardedCall(source) {
 				subject: {
 					command: resolved.descriptor.command,
 					args: resolved.descriptor.args,
-					transport: resolved.descriptor.transport,
+					transport: isSpawnThenConnect ? "tcp" : resolved.descriptor.transport,
 				},
 				configSource: resolved.configSource,
+				spawnBeforeConnect: isSpawnThenConnect,
+				port: isSpawnThenConnect ? resolved.descriptor.port : undefined,
 			},
 		);
 		if (decision.kind === "declined") {
