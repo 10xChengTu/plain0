@@ -7145,12 +7145,26 @@ export function createBrowserMockBridge(
 	const escapeMockRegExp = (value: string): string =>
 		value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+	/** Matches lookahead (`(?=`/`(?!`), lookbehind (`(?<=`/`(?<!`) and
+	 * backreference (`\1`-`\9`) syntax — the PCRE2-only constructs the real
+	 * Rust engine (`grep-regex`, a linear-time engine) rejects as
+	 * `INVALID_SEARCH_REGEX` (see `text_search.rs`'s `compile_query` doc
+	 * comment and its `regex_pcre2_only_constructs_are_rejected_per_construct_
+	 * with_a_path_free_message` test, F200 S3). The native `RegExp`
+	 * constructor this mock otherwise delegates to happily *accepts* all
+	 * three (V8's engine supports them) and would silently diverge from the
+	 * real backend's rejection without this explicit, pre-compile check. */
+	const PCRE2_ONLY_REGEX_CONSTRUCT = /\(\?<?[=!]|\\[1-9]/;
+
 	const compileMockTextMatcher = (
 		pattern: string,
 		isRegExp: boolean,
 		isCaseSensitive: boolean,
 		isWordMatch: boolean,
 	): RegExp => {
+		if (isRegExp && PCRE2_ONLY_REGEX_CONSTRUCT.test(pattern)) {
+			throw invalidSearchRegex();
+		}
 		const source = isRegExp ? pattern : escapeMockRegExp(pattern);
 		const wrapped = isWordMatch ? `\\b(?:${source})\\b` : source;
 		try {

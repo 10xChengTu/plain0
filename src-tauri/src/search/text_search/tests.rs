@@ -164,6 +164,45 @@ fn regex_mode_supports_real_patterns_and_reports_syntax_errors() {
     assert_eq!(error.code(), "INVALID_SEARCH_REGEX");
 }
 
+/// `grep-regex`'s linear-time engine deliberately does not support
+/// PCRE2-only syntax — see `compile_query`'s own doc comment. This test
+/// backs that capability boundary per-construct (not just with one generic
+/// syntax-error case) for the three constructs a user migrating a pattern
+/// from another editor is most likely to reach for: lookahead, lookbehind
+/// and a backreference. `compile_query` never touches the filesystem to
+/// reject a pattern, so the error message can never leak a file path; this
+/// asserts that explicitly rather than only trusting the doc comment.
+#[test]
+fn regex_pcre2_only_constructs_are_rejected_per_construct_with_a_path_free_message() {
+    let pcre2_only_patterns = [
+        ("lookahead", "foo(?=bar)"),
+        ("lookbehind", "(?<=foo)bar"),
+        ("backreference", r"(foo)\1"),
+    ];
+    for (construct, pattern) in pcre2_only_patterns {
+        let invalid_query = {
+            let mut built = query(Vec::new(), pattern);
+            built.is_reg_exp = true;
+            built
+        };
+        let error = compile_query(&invalid_query).unwrap_err();
+        assert_eq!(
+            error.code(),
+            "INVALID_SEARCH_REGEX",
+            "{construct} pattern {pattern:?} must report INVALID_SEARCH_REGEX"
+        );
+        assert!(
+            !error.message().is_empty(),
+            "{construct} pattern {pattern:?} must carry a non-empty message"
+        );
+        assert!(
+            !error.message().contains('/'),
+            "{construct} pattern {pattern:?} message must not contain a file path: {}",
+            error.message()
+        );
+    }
+}
+
 #[test]
 fn max_results_truncates_and_reports_limit_hit() {
     let temp = TempDir::new().unwrap();

@@ -537,6 +537,14 @@ async function installNativeIpcMock(
 	// every other existing scenario's own "ordinary mount, nothing to
 	// report" expectation.
 	terminalLifecycleMarkerForTest = 0,
+	// `F200` S3: lowers the per-file oversize threshold `searchTextMatches`
+	// applies (real default 8 MiB) so a `skippedOversize` fixture can be a
+	// small string instead of a genuine 8 MiB+ file. `null` (the default)
+	// keeps the real 8 MiB default. Only the skipped-files-visible test
+	// passes this. Appended last (rather than alongside the other text-search
+	// levers above) so every existing positional call site above this one
+	// keeps its exact argument index.
+	textSearchMaxFileSizeForTest: number | null = null,
 ): Promise<void> {
 	await page.addInitScript(
 		({
@@ -546,6 +554,7 @@ async function installNativeIpcMock(
 			pngBase64,
 			extraFiles,
 			textSearchMaxMatchesForTest,
+			textSearchMaxFileSizeForTest,
 			textSearchPollDelayMsForTest,
 			themeLibraryFixtureForTest,
 			themeImportOutcomesForTest,
@@ -1251,12 +1260,24 @@ async function installNativeIpcMock(
 			};
 			const escapeTextSearchRegExp = (value: string): string =>
 				value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			// Matches lookahead (`(?=`/`(?!`), lookbehind (`(?<=`/`(?<!`) and
+			// backreference (`\1`-`\9`) syntax — the PCRE2-only constructs the
+			// real Rust engine (`grep-regex`) rejects as `INVALID_SEARCH_REGEX`
+			// (F200 S3, mirrors `app/platform/tauri/browser-mock.ts`'s own
+			// `PCRE2_ONLY_REGEX_CONSTRUCT`). The native `RegExp` constructor this
+			// mock otherwise delegates to happily accepts all three, so without
+			// this explicit pre-compile check it would silently diverge from the
+			// real backend's rejection.
+			const PCRE2_ONLY_REGEX_CONSTRUCT = /\(\?<?[=!]|\\[1-9]/;
 			const compileTextSearchMatcher = (
 				pattern: string,
 				isRegExp: boolean,
 				isCaseSensitive: boolean,
 				isWordMatch: boolean,
 			): RegExp => {
+				if (isRegExp && PCRE2_ONLY_REGEX_CONSTRUCT.test(pattern)) {
+					throw invalidSearchRegex();
+				}
 				const source = isRegExp ? pattern : escapeTextSearchRegExp(pattern);
 				const wrapped = isWordMatch ? `\\b(?:${source})\\b` : source;
 				try {
@@ -1301,7 +1322,10 @@ async function installNativeIpcMock(
 				const excludeMatchers = (request.excludeGlobs ?? []).map(
 					compileExcludeGlob,
 				);
-				const maxFileSize = request.maxFileSize ?? 8 * 1_024 * 1_024;
+				const maxFileSize =
+					request.maxFileSize ??
+					textSearchMaxFileSizeForTest ??
+					8 * 1_024 * 1_024;
 				const maxResults = Math.min(
 					request.maxResults ?? textSearchMaxMatchesForTest,
 					textSearchMaxMatchesForTest,
@@ -5527,6 +5551,7 @@ async function installNativeIpcMock(
 			pngBase64: MINIMAL_PNG_BASE64,
 			extraFiles,
 			textSearchMaxMatchesForTest,
+			textSearchMaxFileSizeForTest,
 			textSearchPollDelayMsForTest,
 			themeLibraryFixtureForTest,
 			themeImportOutcomesForTest,
@@ -14326,6 +14351,292 @@ test("Match Case and Match Whole Word toggles combine correctly with capture-gro
 			isWordMatch: true,
 		});
 	}
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+// --- F200 S3: regex capability backing, skipped/truncated visibility, undo ---
+// (docs/research/2026-08-04-complete-search.md "架构裁定 §4/§5") ---------------
+
+test("shows an accurate, path-free error for each PCRE2-only regex construct (lookahead, lookbehind, backreference)", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+	await openNativeWorkspaceExplorer(page);
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	const messages = page.locator(".plain-search-view-messages");
+	await page.locator(".plain-search-view-regex-toggle").check();
+
+	// The exact same three PCRE2-only constructs
+	// `text_search.rs`'s own `regex_pcre2_only_constructs_are_rejected_per_
+	// construct_with_a_path_free_message` Rust test backs directly (lookahead,
+	// lookbehind, backreference) — this proves the same capability boundary is
+	// visible end-to-end through the actual Search view UI (reusing the
+	// existing invalid-regex message path the "(unclosed" case already
+	// exercises above), not only at the Rust layer.
+	for (const pattern of ["foo(?=bar)", "(?<=foo)bar", String.raw`(foo)\1`]) {
+		await searchInput.fill("");
+		await searchInput.pressSequentially(pattern);
+		await expect(messages).not.toHaveText("", { timeout: 5_000 });
+		await expect(messages).toContainText("regular expression");
+		const text = (await messages.textContent())?.trim() ?? "";
+		expect(text.length).toBeGreaterThan(0);
+		expect(text).not.toContain("/");
+	}
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("shows an accurate 'Skipped N files' message covering both binary and oversized files, excluding them from results", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	// `textSearchMaxFileSizeForTest` (100 bytes) sits comfortably above every
+	// byte length in the fixed base fixture this mock always seeds (README.md
+	// 48 bytes, notes.md 59, src/main.ts 27, icon.png 68 — see this file's own
+	// `MINIMAL_PNG_BASE64` doc comment: a genuine binary PNG, deliberately
+	// flagged `seemsBinary`) but well below this test's own 158-byte
+	// `skip-oversized.txt`, so exactly one of each skip reason is produced:
+	// `icon.png` supplies the binary skip (no separate NUL-byte fixture
+	// needed) and `skip-oversized.txt` supplies the oversize skip. Every
+	// positional argument between `extraFiles` and the trailing lever below
+	// is spelled out at its own documented default — `installNativeIpcMock`
+	// has no named-parameter form.
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"supported",
+		{
+			"skip-normal.txt": "needle stays visible\n",
+			"skip-oversized.txt": `needle ${"x".repeat(150)}\n`,
+		},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		{},
+		[],
+		0,
+		0,
+		100,
+	);
+	await openNativeWorkspaceExplorer(page);
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	const status = page.locator(".plain-search-view-status");
+	const messages = page.locator(".plain-search-view-messages");
+
+	await searchInput.pressSequentially("needle");
+	await expect(status).toHaveText("1 result in 1 file", { timeout: 5_000 });
+	await expect(messages).toHaveText(
+		"Skipped 1 binary and 1 oversized file(s).",
+	);
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("undoes a plain Replace All in an already-open editor, restoring the pre-replace text without touching a sibling file's replacement", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"undo-a.txt": "needle one\n",
+		"undo-b.txt": "needle two\n",
+	});
+	const explorer = await openNativeWorkspaceExplorer(page);
+
+	// Both files are already open (in separate tabs) before the replace even
+	// starts — this is what makes "undo in the live editor buffer" a
+	// meaningful thing to assert at all (an unopened file is only ever
+	// touched on disk; there is no editor buffer to undo).
+	await explorer
+		.getByRole("treeitem", { name: "undo-a.txt", exact: true })
+		.dblclick();
+	await expect(
+		page.getByRole("code").filter({ hasText: "needle one" }),
+	).toBeVisible();
+	await explorer
+		.getByRole("treeitem", { name: "undo-b.txt", exact: true })
+		.dblclick();
+	await expect(
+		page.getByRole("code").filter({ hasText: "needle two" }),
+	).toBeVisible();
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	const replaceInput = page.locator(".plain-search-view-replace-input");
+	const status = page.locator(".plain-search-view-status");
+	const messages = page.locator(".plain-search-view-messages");
+
+	await searchInput.pressSequentially("needle");
+	await expect(status).toHaveText("2 results in 2 files", { timeout: 5_000 });
+
+	await replaceInput.fill("cactus");
+	await page.locator(".plain-search-view-replace-all").click();
+	await expect(messages).toHaveText("Replaced 2 matches.");
+
+	// Undo semantics are frozen as one independent undo entry per file (see
+	// `plain-replace-coordinator.ts`'s own doc comment and
+	// `docs/research/2026-08-04-complete-search.md` "架构裁定 §3") — switch to
+	// the second file's tab, undo there, and confirm both halves of that
+	// contract: the undone file's content reverts, and the sibling file's own
+	// already-saved replacement is completely untouched.
+	const undoBTab = page.locator(".tabs-container .tab", {
+		hasText: "undo-b.txt",
+	});
+	await undoBTab.click();
+	await expect(
+		page.getByRole("code").filter({ hasText: "cactus two" }),
+	).toBeVisible();
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "cactus two" })
+		.click();
+	await page.keyboard.press("ControlOrMeta+Z");
+
+	await expect(
+		page.getByRole("code").filter({ hasText: "needle two" }),
+	).toBeVisible();
+	await expect(
+		page.getByRole("code").filter({ hasText: "cactus two" }),
+	).toHaveCount(0);
+	await expect(undoBTab).toHaveClass(/dirty/);
+
+	const undoATab = page.locator(".tabs-container .tab", {
+		hasText: "undo-a.txt",
+	});
+	await undoATab.click();
+	await expect(
+		page.getByRole("code").filter({ hasText: "cactus one" }),
+	).toBeVisible();
+	await expect(undoATab).not.toHaveClass(/dirty/);
+
+	// The undo is a local buffer edit, not a new save — still exactly the two
+	// writes the original Replace All produced.
+	const writes = await nativeWriteFileCalls(page);
+	expect(writes).toHaveLength(2);
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("undoes a capture-group template Replace All in an already-open editor, restoring the exact pre-replace text", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"undo-swap.txt": "item-42 stays put\n",
+	});
+	const explorer = await openNativeWorkspaceExplorer(page);
+
+	await explorer
+		.getByRole("treeitem", { name: "undo-swap.txt", exact: true })
+		.dblclick();
+	await expect(
+		page.getByRole("code").filter({ hasText: "item-42 stays put" }),
+	).toBeVisible();
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	const replaceInput = page.locator(".plain-search-view-replace-input");
+	const status = page.locator(".plain-search-view-status");
+	const messages = page.locator(".plain-search-view-messages");
+
+	await page.locator(".plain-search-view-regex-toggle").check();
+	await searchInput.pressSequentially(String.raw`(\w+)-(\d+)`);
+	await expect(status).toHaveText("1 result in 1 file", { timeout: 5_000 });
+
+	await replaceInput.fill("$2-$1");
+	await page.locator(".plain-search-view-replace-all").click();
+	await expect(messages).toHaveText("Replaced 1 match.");
+	await expect(
+		page.getByRole("code").filter({ hasText: "42-item stays put" }),
+	).toBeVisible();
+
+	const activeTab = page.locator(".tabs-container .tab.active");
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "42-item stays put" })
+		.click();
+	await page.keyboard.press("ControlOrMeta+Z");
+
+	// The capture-group-expanded replacement text is undone back to the exact
+	// original source (not the template, not a partial revert) — proving undo
+	// works uniformly regardless of which replacement path (literal vs.
+	// Rust-expanded template) produced the edit.
+	await expect(
+		page.getByRole("code").filter({ hasText: "item-42 stays put" }),
+	).toBeVisible();
+	await expect(
+		page.getByRole("code").filter({ hasText: "42-item stays put" }),
+	).toHaveCount(0);
+	await expect(activeTab).toHaveClass(/dirty/);
 
 	expect(nativeDialogs).toEqual([]);
 	expect(pageErrors).toEqual([]);
