@@ -1049,19 +1049,54 @@
 			"id": "F190",
 			"name": "Complete terminal workflows",
 			"phase": 6,
-			"status": "in_progress",
+			"status": "complete",
 			"acceptance": [
 				"Terminal find profile shell and cwd selection are fully interactive and persisted",
 				"Shell integration links recursive splits and live scrollback preserve bounded terminal semantics",
 				"Session restore or explicit non-restorable outcomes are handled without orphan processes",
 				"SSH agent inheritance and real shell terminal E2E pass under the audited environment policy"
-			]
+			],
+			"evidence": {
+				"commands": ["pnpm check", "pnpm test:e2e:browser"],
+				"results": [
+					"S1 through S6 delivered the Rust profile/cwd authority with SSH_AUTH_SOCK single-item env extension, future-tab default controls persisted through the existing settings.json configuration, a bounded 8-pane recursive binary split tree with active-pane identity, Ghostty-authoritative OSC 7/8/133 projection with a strict http(s)-only Cmd/Ctrl+Click opener and audited zsh/bash/fish integration injection with observable degradation, bounded terminal find plus anchored live scrollback merged refresh, and real exit code/signal banners with a persisted non-restorable session marker. Every slice passed its focused gates and was committed independently (dc73445d, 75a02189, c6ad4bcf, b419bad9, 326473f1, 040bff14).",
+					"The final automated baseline passed 106 frontend test files and 2062 tests, a 2192-module production build, architecture over 110 app and 185 Rust sources with 17 pinned runtime dependencies, the 2006-source bundle audit with 53 tracked transitional sources, all-target Clippy and 1341/1341 Rust tests. The full Chromium matrix passed 139/139 including the seventeen scenarios added by F190 slices."
+				],
+				"nativeScenarios": [
+					"E2E-007 and E2E-016 remain the completed real-desktop evidence for the underlying PTY, shell/cwd, resize, throughput, tab/split and multi-root freezing behaviours that F190 builds on.",
+					"E2E-025 is registered in docs/e2e-handover.md as the pending real Tauri matrix for the new F190 surfaces (profile/cwd cold-start persistence, real OSC injection and degradation, link opener, split ceiling, find, live scrollback, real exit/signal banners, non-restorable notice after abnormal kill, SSH_AUTH_SOCK inheritance, zero residual processes). By explicit user decision on 2026-08-04 it is deferred and will be executed together with later feature matrices; this completion is an exception-close and the desktop evidence will be backfilled."
+				],
+				"platformGaps": [
+					"The E2E-025 real desktop matrix is deferred by user decision and has not run yet; feature closure rests on the two automated tiers plus previously completed E2E-007/E2E-016 desktop evidence.",
+					"Scrollback rows intentionally do not carry hyperlink or semantic metadata, so prompt navigation and clickable links operate on the live viewport only.",
+					"Shell integration injects OSC 133 A/C/D without the B prompt-end marker, and the external link opener is implemented for macOS/Unix only; non-Unix platforms fail closed.",
+					"Windows and Linux packaging, release signing and notarization remain outside this non-release completion phase."
+				],
+				"acceptanceResults": [
+					{
+						"acceptance": "Terminal find profile shell and cwd selection are fully interactive and persisted",
+						"result": "Achieved in the automated tiers. Rust owns a bounded profile snapshot with strict start-id revalidation and root-relative cwd containment; the tab strip exposes profile and cwd controls persisted via plain.terminal.defaultProfile and plain.terminal.cwd in the existing user settings, affecting future tabs only while running panes stay frozen; bounded find covers 10,000 retained rows plus the viewport with explicit truncation states. Real desktop confirmation is part of the deferred E2E-025."
+					},
+					{
+						"acceptance": "Shell integration links recursive splits and live scrollback preserve bounded terminal semantics",
+						"result": "Achieved in the automated tiers. OSC 7/8/133 are projected from the single Ghostty VtSession with a 2048-byte hyperlink cap and http(s)-only explicit-click policy, splits use a bounded 8-pane binary tree inheriting frozen root/profile and live pwd, and history browsing keeps the user's offset anchor with at most one in-flight scrollback fetch and merged refreshes. Frame ack ordering and both backpressure layers are unchanged and guard-locked."
+					},
+					{
+						"acceptance": "Session restore or explicit non-restorable outcomes are handled without orphan processes",
+						"result": "Achieved in the automated tiers. PTY sessions are never presented as reconnectable; a Rust-persisted per-window marker yields a one-shot, path-free non-restorable notice after abnormal reloads and is claimed without touching live sessions, explicit closes keep kill+join semantics, and real exit codes or signal names surface in a banner that never auto-closes the pane."
+					},
+					{
+						"acceptance": "SSH agent inheritance and real shell terminal E2E pass under the audited environment policy",
+						"result": "Partially achieved pending E2E-025. SSH_AUTH_SOCK is the audited single-item allowlist extension locked by hostile architecture tests, and Browser plus Rust tiers cover the environment contract; the real ssh-add/socket visibility run is registered in the deferred E2E-025 matrix per the explicit user decision and will be backfilled."
+					}
+				]
+			}
 		},
 		{
 			"id": "F200",
 			"name": "Complete search workflows",
 			"phase": 6,
-			"status": "planned",
+			"status": "in_progress",
 			"acceptance": [
 				"Search UI actions menus keybindings and quick-access entry points cover the promised local workflow",
 				"Replacement supports capture groups with version-safe multi-file coordination and undo semantics",
