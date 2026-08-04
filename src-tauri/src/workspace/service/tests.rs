@@ -3529,6 +3529,60 @@ fn root_revocation_terminates_the_active_search() {
     );
 }
 
+/// `F220` S2 (ADR 0007 §1 §5) representative test: a remote-backed root
+/// fails closed with `ROOT_BACKEND_UNSUPPORTED` at the workspace stat/read
+/// consumption point, exactly like a `ROOT_NOT_AUTHORIZED` root does today —
+/// see [`super::WorkspaceScope::lease`]'s doc comment for why this single
+/// chokepoint is what makes every downstream reader/writer/search consumer
+/// fail closed without needing its own backend match.
+#[test]
+fn stat_and_read_file_fail_closed_for_a_remote_backed_root() {
+    let service = WorkspaceService::new();
+    let remote_id = service
+        .authorize_remote_root_for_test(
+            "main",
+            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "/srv/project",
+            "Remote Project",
+        )
+        .expect("remote root registers for test");
+
+    let stat_error =
+        block_on(service.stat("main", remote_id, RelativePath::parse_wire("").unwrap()))
+            .expect_err("stat on a remote-backed root must fail closed");
+    assert_eq!(stat_error.code(), "ROOT_BACKEND_UNSUPPORTED");
+
+    let read_error = block_on(service.read_file(
+        "main",
+        remote_id,
+        RelativePath::parse_wire("anything.txt").unwrap(),
+    ))
+    .expect_err("read_file on a remote-backed root must fail closed");
+    assert_eq!(read_error.code(), "ROOT_BACKEND_UNSUPPORTED");
+}
+
+/// `F220` S2 representative test for the search domain: multi-root search
+/// leases every named root up front via the same [`super::WorkspaceScope::
+/// lease`] chokepoint `stat`/`read_file` use, so a remote-backed root in the
+/// query fails closed before any traversal starts.
+#[test]
+fn search_text_start_fails_closed_for_a_remote_backed_root() {
+    let service = WorkspaceService::new();
+    let remote_id = service
+        .authorize_remote_root_for_test(
+            "main",
+            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "/srv/project",
+            "Remote Project",
+        )
+        .expect("remote root registers for test");
+
+    let error = service
+        .search_text_start("main", text_query(remote_id, "needle"), noop_search_wake())
+        .expect_err("a remote-backed root must fail closed before any traversal starts");
+    assert_eq!(error.code(), "ROOT_BACKEND_UNSUPPORTED");
+}
+
 #[test]
 fn window_close_reclaims_the_active_search() {
     let temp = TempDir::new().unwrap();

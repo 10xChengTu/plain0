@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::error::CommandError;
 use crate::path_policy::RelativePath;
+use crate::remote::dto::RemoteSessionId;
 
 pub(crate) mod commands;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -168,6 +169,33 @@ pub(crate) fn stable_roots_identity(canonical_paths: &[PathBuf]) -> Option<Strin
         hasher.update(&bytes);
     }
     Some(hex_encode(hasher.finalize().into()))
+}
+
+/// Domain separator for [`stable_remote_root_identity`] — deliberately
+/// distinct from [`ROOTS_IDENTITY_DOMAIN`] (a different hash input shape: one
+/// root's `(host-key fingerprint, canonical remote path)` pair, not an
+/// order-independent whole-set path list), so a remote root's storage digest
+/// can never collide with a local root's even by construction accident.
+const REMOTE_ROOT_IDENTITY_DOMAIN: &[u8] = b"plain.workspace.roots-identity.remote-ssh.v1\0";
+
+/// Hashes one remote root's stable identity — ADR 0007 §2's `(host-key
+/// fingerprint, canonical remote path)` pair — into the same lowercase hex
+/// SHA-256 shape [`stable_roots_identity`] produces for local roots, so
+/// [`WorkspaceRootsIdentity`] stays backend-agnostic to every consumer.
+/// Length-prefixes both fields before hashing (mirroring
+/// [`stable_roots_identity`]'s own length-prefixing) so
+/// `(fingerprint="AB", path="C")` can never collide with
+/// `(fingerprint="A", path="BC")`.
+fn stable_remote_root_identity(host_key_fingerprint: &str, canonical_remote_path: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(REMOTE_ROOT_IDENTITY_DOMAIN);
+    for field in [host_key_fingerprint, canonical_remote_path] {
+        let bytes = field.as_bytes();
+        let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        hasher.update(length.to_be_bytes());
+        hasher.update(bytes);
+    }
+    hex_encode(hasher.finalize().into())
 }
 
 /// A lossless byte representation of a path, used only as hash input (never
@@ -398,10 +426,12 @@ impl WorkspaceScope {
             self.roots.insert(
                 root_id,
                 WorkspaceRoot {
-                    directory: candidate.directory,
+                    backend: RootBackend::Local {
+                        directory: candidate.directory,
+                        canonical_path: candidate.watch_path,
+                    },
                     display_name: candidate.display_name,
                     identity: candidate.identity,
-                    canonical_path: candidate.watch_path,
                 },
             );
             self.order.push(root_id);
@@ -500,10 +530,12 @@ impl WorkspaceScope {
         for (root_id, candidate) in selections {
             let root = match candidate {
                 Some(candidate) => WorkspaceRoot {
-                    directory: candidate.directory,
+                    backend: RootBackend::Local {
+                        directory: candidate.directory,
+                        canonical_path: candidate.watch_path,
+                    },
                     display_name: candidate.display_name,
                     identity: candidate.identity,
-                    canonical_path: candidate.watch_path,
                 },
                 None => previous_roots
                     .remove(&root_id)
@@ -545,13 +577,27 @@ impl WorkspaceScope {
         self.workspace_id
     }
 
-    /// The stable identity of the currently authorized root set (see
-    /// [`WorkspaceRootsIdentity`]); `None` when zero roots are authorized.
+    /// The stable identity of the currently authorized *local* root set (see
+    /// [`WorkspaceRootsIdentity`]); `None` when zero local roots are
+    /// authorized. Remote roots are deliberately excluded from this hash —
+    /// `F220` S2 does not yet wire any trust-gated domain (Git/PTY/DAP
+    /// spawning) to remote content, so keeping this identity purely
+    /// path-based means a workspace made entirely of local roots hashes
+    /// byte-for-byte the same as before this slice, and adding a remote root
+    /// alongside existing local roots never perturbs their already-granted
+    /// trust. See [`Self::root_storage_identities`] for the per-root digest
+    /// that *does* cover remote roots (the backup domain's key, not this
+    /// whole-set trust identity).
     pub(crate) fn stable_identity(&self) -> Option<WorkspaceRootsIdentity> {
         let canonical_paths: Vec<PathBuf> = self
             .roots
             .values()
-            .map(|root| root.canonical_path.clone())
+            .filter_map(|root| {
+                root.backend
+                    .local_canonical_path()
+                    .ok()
+                    .map(Path::to_path_buf)
+            })
             .collect();
         stable_roots_identity(&canonical_paths).map(WorkspaceRootsIdentity)
     }
@@ -576,24 +622,52 @@ impl WorkspaceScope {
     /// `canonicalize` + `starts_with` against this list is the sanctioned
     /// check here — never a template for bypassing the capability-relative
     /// rule elsewhere). Never serialized to the WebView.
+    ///
+    /// Silently excludes remote roots (they have no local ambient path by
+    /// construction) rather than erroring — this is an aggregate "every root
+    /// this concept applies to" list, not a lookup for one caller-selected
+    /// root. Callers that resolve one *specific*, caller-selected `RootId`
+    /// (terminal `cwd`, Git's explicit `rootId`, debug launch) must use
+    /// [`Self::root_canonical_path`] instead, which fails closed with
+    /// `ROOT_BACKEND_UNSUPPORTED` for a remote root rather than folding it
+    /// into an "unauthorized" outcome.
     pub(crate) fn root_canonical_paths(&self) -> Vec<(RootId, PathBuf)> {
         self.order
             .iter()
             .filter_map(|root_id| {
-                self.roots
-                    .get(root_id)
-                    .map(|root| (*root_id, root.canonical_path.clone()))
+                let root = self.roots.get(root_id)?;
+                root.backend
+                    .local_canonical_path()
+                    .ok()
+                    .map(|path| (*root_id, path.to_path_buf()))
             })
             .collect()
     }
 
+    /// Resolves one exact authorized root identity to its local canonical
+    /// backing path. Unlike [`Self::root_canonical_paths`]`().first()`, this
+    /// is fail-closed for a stale/unauthorized `root_id`
+    /// (`ROOT_NOT_AUTHORIZED`) *and* distinctly fail-closed for a live but
+    /// remote-backed `root_id` (`ROOT_BACKEND_UNSUPPORTED`) — the two are
+    /// never conflated, so a caller can tell "this root doesn't exist" from
+    /// "this root exists but this domain does not support its backend yet".
+    pub(crate) fn root_canonical_path(&self, root_id: RootId) -> Result<PathBuf, CommandError> {
+        let root = self.roots.get(&root_id).ok_or_else(root_not_authorized)?;
+        root.backend.local_canonical_path().map(Path::to_path_buf)
+    }
+
+    /// Local roots' canonical paths paired with their display name, in
+    /// authorization order — the Recent list's source. Remote roots are
+    /// excluded in this slice: `F220` S2 leaves remote Recent entries
+    /// (ADR 0007 §4's opaque-id-only shape) to `F220` S4, and no real
+    /// remote root can be authorized outside a test in this slice anyway.
     pub(crate) fn history_roots(&self) -> Vec<(PathBuf, String)> {
         self.order
             .iter()
             .filter_map(|root_id| {
-                self.roots
-                    .get(root_id)
-                    .map(|root| (root.canonical_path.clone(), root.display_name.clone()))
+                let root = self.roots.get(root_id)?;
+                let canonical_path = root.backend.local_canonical_path().ok()?.to_path_buf();
+                Some((canonical_path, root.display_name.clone()))
             })
             .collect()
     }
@@ -607,12 +681,30 @@ impl WorkspaceScope {
     /// identity per root (rather than per current root set) is what lets
     /// hot-exit content survive add/remove/reorder topology changes without
     /// ever guessing which current root owns a backup.
+    /// Unlike [`Self::stable_identity`] (the whole-set, local-only trust
+    /// key), this covers *both* backends — ADR 0007 §2 explicitly wants the
+    /// remote per-root storage digest implemented alongside the local one in
+    /// this slice, even though `F220` S2 leaves the backup domain itself
+    /// wired to only ever observe local roots in production (no real remote
+    /// root can be authorized outside a test yet, so this branch is
+    /// currently reachable only from `F220` S2's own remote-identity tests;
+    /// `F220` S4 is what actually lets a live remote root reach the backup
+    /// domain).
     pub(crate) fn root_storage_identities(&self) -> Vec<(RootId, WorkspaceRootsIdentity)> {
         self.order
             .iter()
             .filter_map(|root_id| {
                 let root = self.roots.get(root_id)?;
-                let identity = stable_roots_identity(std::slice::from_ref(&root.canonical_path))?;
+                let identity = match &root.backend {
+                    RootBackend::Local { canonical_path, .. } => {
+                        stable_roots_identity(std::slice::from_ref(canonical_path))?
+                    }
+                    RootBackend::RemoteSsh {
+                        host_key_fingerprint,
+                        base_path,
+                        ..
+                    } => stable_remote_root_identity(host_key_fingerprint, base_path),
+                };
                 Some((*root_id, WorkspaceRootsIdentity(identity)))
             })
             .collect()
@@ -639,16 +731,30 @@ impl WorkspaceScope {
         Ok(true)
     }
 
+    /// The one place a [`WorkspaceRootLease`] is minted. Fails closed with
+    /// `ROOT_BACKEND_UNSUPPORTED` for a remote-backed root *before* any
+    /// lease exists — this is the sole chokepoint every stat/read/write/
+    /// copy/move/delete/search consumption point in `workspace::service`
+    /// funnels through (`run_reader`/`run_mutation`/`run_versioned_write`/
+    /// `run_dual_root_mutation*`, plus the multi-root search lease
+    /// collection), so [`WorkspaceRootLease`] itself keeps its pre-`F220`
+    /// shape unchanged: by construction, a lease can only ever wrap a local
+    /// `Dir`, so none of its ~50 downstream call sites across
+    /// `workspace::{reader,writer,versioned_writer,delete,directory_copy,
+    /// move_entry,new_file_publisher,trash}` or `search::{file_search,
+    /// text_search}` need to change at all.
     pub(crate) fn lease(&self, root_id: RootId) -> Result<WorkspaceRootLease, CommandError> {
         let root = self.roots.get(&root_id).ok_or_else(root_not_authorized)?;
         let directory = root
-            .directory
+            .backend
+            .local_dir()?
             .try_clone()
             .map_err(|_| root_capability_clone_failed())?;
+        let canonical_path = root.backend.local_canonical_path()?.to_path_buf();
         Ok(WorkspaceRootLease {
             root_id,
             directory,
-            canonical_path: root.canonical_path.clone(),
+            canonical_path,
         })
     }
 
@@ -662,10 +768,11 @@ impl WorkspaceScope {
         relative_path: &RelativePath,
     ) -> Result<ResolvedWorkspacePath<'scope>, CommandError> {
         let root = self.roots.get(&root_id).ok_or_else(root_not_authorized)?;
+        let directory = root.backend.local_dir()?;
         let resolved = if relative_path.is_root() {
             PathBuf::new()
         } else {
-            root.directory
+            directory
                 .canonicalize(relative_path.as_path())
                 .map_err(map_resolve_error)?
         };
@@ -676,20 +783,132 @@ impl WorkspaceScope {
 
         Ok(ResolvedWorkspacePath {
             root_id,
-            directory: &root.directory,
+            directory,
             relative_path: resolved,
         })
+    }
+
+    /// Test-only construction of a `RemoteSsh`-backed root, bypassing the
+    /// real (`F220` S3+) authorization flow entirely — `F220` S2 leaves
+    /// remote root creation with no user-reachable entry point (ADR 0007 §1:
+    /// "远程 root 由「连接会话 + 用户在远程目录选择器中显式选择」产生"), so
+    /// this is the sole way this slice's own tests construct one. Mirrors
+    /// [`Self::authorize_roots_atomically_with`]'s identity-dedup contract
+    /// (same `(host_key_fingerprint, base_path)` identity reuses the
+    /// existing root id) and the shared [`MAX_WORKSPACE_ROOTS`] ceiling.
+    #[cfg(test)]
+    pub(crate) fn authorize_remote_root_for_test(
+        &mut self,
+        host_key_fingerprint: &str,
+        base_path: &str,
+        display_name: &str,
+    ) -> Result<RootId, CommandError> {
+        let identity = DirectoryIdentity::RemoteSsh {
+            host_key_fingerprint: host_key_fingerprint.to_owned(),
+            canonical_path: base_path.to_owned(),
+        };
+        if let Some(root_id) = self
+            .roots
+            .iter()
+            .find(|(_, root)| root.identity == identity)
+            .map(|(root_id, _)| *root_id)
+        {
+            return Ok(root_id);
+        }
+        if self.roots.len() >= MAX_WORKSPACE_ROOTS {
+            return Err(workspace_root_limit_exceeded());
+        }
+        let next_revision = next_revision(self.revision)?;
+        let root_id = RootId::new();
+        self.roots.insert(
+            root_id,
+            WorkspaceRoot {
+                backend: RootBackend::RemoteSsh {
+                    session_id: RemoteSessionId::new(),
+                    base_path: base_path.to_owned(),
+                    host_key_fingerprint: host_key_fingerprint.to_owned(),
+                },
+                display_name: display_name.to_owned(),
+                identity,
+            },
+        );
+        self.order.push(root_id);
+        self.revision = next_revision;
+        Ok(root_id)
     }
 }
 
 struct WorkspaceRoot {
-    directory: Dir,
+    backend: RootBackend,
     display_name: String,
     identity: DirectoryIdentity,
-    /// The canonicalized ambient path this root was authorized from. Used
-    /// only to derive [`WorkspaceRootsIdentity`]; never exposed outside this
-    /// module (in particular, never serialized to the WebView).
-    canonical_path: PathBuf,
+}
+
+/// `F220` S2 (ADR 0007 §1): the closed backend a [`WorkspaceRoot`] holds.
+/// `Local` is byte-for-byte the pre-`F220` shape (a live [`Dir`] capability
+/// plus the canonical ambient path used for display/dedup/watcher/history/
+/// storage-digest input). `RemoteSsh` carries no filesystem capability of
+/// any kind in this slice — only the data a future SFTP-backed domain
+/// (`F220` S3+) will need to look up its live session and address paths
+/// against it. Every consumption point this slice's sweep touched reaches a
+/// local `Dir`/canonical path only through [`RootBackend::local_dir`]/
+/// [`RootBackend::local_canonical_path`] (or the [`WorkspaceScope::lease`]/
+/// [`WorkspaceScope::resolve`] chokepoints built on them), which fail closed
+/// with `ROOT_BACKEND_UNSUPPORTED` for this variant rather than ever reading
+/// its fields for a filesystem purpose. `scripts/plain/boundary-
+/// contracts.mjs`'s `validateRootBackendOwnershipBoundary` mechanically
+/// confines every `RootBackend::`-naming token to this file, so a
+/// consumption point cannot bypass those two accessors by matching on the
+/// enum directly.
+enum RootBackend {
+    Local {
+        directory: Dir,
+        /// The canonicalized ambient path this root was authorized from.
+        /// Used only to derive [`WorkspaceRootsIdentity`] and for the
+        /// terminal/git/debug domains' explicit-root canonical-path lookup;
+        /// never exposed outside this module (in particular, never
+        /// serialized to the WebView).
+        canonical_path: PathBuf,
+    },
+    /// No production caller constructs this variant until `F220` S3 adds a
+    /// real remote-root authorization entry point (ADR 0007 §1: this slice
+    /// deliberately leaves remote root creation with no user-reachable
+    /// command); today only [`WorkspaceScope::authorize_remote_root_for_test`]
+    /// does, mirroring `debug::protocol`'s own identical "no production
+    /// caller until a later slice" `#[allow(dead_code)]` precedent.
+    #[allow(dead_code)]
+    RemoteSsh {
+        /// Looked up against `remote::session::RemoteSessionService` by a
+        /// future SFTP-backed domain; this slice never dereferences it.
+        session_id: RemoteSessionId,
+        /// The canonical remote path this root is rooted at — re-verified
+        /// via SFTP `realpath` on every path resolution once `F220` S3
+        /// lands. Part of this root's identity (ADR 0007 §2) alongside
+        /// `host_key_fingerprint`.
+        base_path: String,
+        /// Part of this root's identity (ADR 0007 §2) alongside `base_path`.
+        host_key_fingerprint: String,
+    },
+}
+
+impl RootBackend {
+    /// The live local directory capability, or [`root_backend_unsupported`]
+    /// for a remote root.
+    fn local_dir(&self) -> Result<&Dir, CommandError> {
+        match self {
+            Self::Local { directory, .. } => Ok(directory),
+            Self::RemoteSsh { .. } => Err(root_backend_unsupported()),
+        }
+    }
+
+    /// The canonical ambient path backing a local root, or
+    /// [`root_backend_unsupported`] for a remote root.
+    fn local_canonical_path(&self) -> Result<&Path, CommandError> {
+        match self {
+            Self::Local { canonical_path, .. } => Ok(canonical_path),
+            Self::RemoteSsh { .. } => Err(root_backend_unsupported()),
+        }
+    }
 }
 
 struct PreparedWorkspaceRoot {
@@ -723,8 +942,33 @@ impl PreparedWorkspaceRoot {
     }
 }
 
+/// `F220` S2 (ADR 0007 §1 §2): closed identity enum, one variant per
+/// [`RootBackend`]. `Local` is exactly the pre-`F220` device/inode (or
+/// platform-fallback canonical-path) identity, now nested rather than
+/// flattened — see [`LocalDirectoryIdentity`]. `RemoteSsh` is the ADR's
+/// `(host-key fingerprint, canonical remote path)` pair; the two variants
+/// can never compare equal to each other (derived [`PartialEq`] is
+/// per-variant), so a remote root is never mistaken for — or silently
+/// deduplicated against — a local one that happens to share some other
+/// property, and vice versa.
 #[derive(Eq, PartialEq)]
 enum DirectoryIdentity {
+    Local(LocalDirectoryIdentity),
+    /// See [`RootBackend::RemoteSsh`]'s identical `#[allow(dead_code)]`
+    /// justification — no production caller constructs this until `F220`
+    /// S3.
+    #[allow(dead_code)]
+    RemoteSsh {
+        host_key_fingerprint: String,
+        canonical_path: String,
+    },
+}
+
+/// Device/inode (or, where unavailable, canonical-path) identity for a
+/// local root — byte-for-byte the pre-`F220` `DirectoryIdentity` shape,
+/// just renamed and nested under [`DirectoryIdentity::Local`].
+#[derive(Eq, PartialEq)]
+enum LocalDirectoryIdentity {
     #[cfg(unix)]
     Unix { device: u64, inode: u64 },
     #[cfg(windows)]
@@ -734,30 +978,42 @@ enum DirectoryIdentity {
 }
 
 #[cfg(unix)]
-fn directory_identity(directory: &Dir, _ambient_path: &Path) -> io::Result<DirectoryIdentity> {
+fn directory_identity(directory: &Dir, _ambient_path: &Path) -> io::Result<LocalDirectoryIdentity> {
     use cap_std::fs::MetadataExt;
 
     let metadata = directory.dir_metadata()?;
-    Ok(DirectoryIdentity::Unix {
+    Ok(LocalDirectoryIdentity::Unix {
         device: metadata.dev(),
         inode: metadata.ino(),
     })
 }
 
 #[cfg(windows)]
-fn directory_identity(directory: &Dir, canonical_path: &Path) -> io::Result<DirectoryIdentity> {
+fn directory_identity(
+    directory: &Dir,
+    canonical_path: &Path,
+) -> io::Result<LocalDirectoryIdentity> {
     use std::os::windows::fs::MetadataExt;
 
     let metadata = directory.try_clone()?.into_std_file().metadata()?;
     match (metadata.volume_serial_number(), metadata.file_index()) {
-        (Some(volume), Some(file_index)) => Ok(DirectoryIdentity::Windows { volume, file_index }),
-        _ => Ok(DirectoryIdentity::Canonical(canonical_path.to_path_buf())),
+        (Some(volume), Some(file_index)) => {
+            Ok(LocalDirectoryIdentity::Windows { volume, file_index })
+        }
+        _ => Ok(LocalDirectoryIdentity::Canonical(
+            canonical_path.to_path_buf(),
+        )),
     }
 }
 
 #[cfg(not(any(unix, windows)))]
-fn directory_identity(_directory: &Dir, canonical_path: &Path) -> io::Result<DirectoryIdentity> {
-    Ok(DirectoryIdentity::Canonical(canonical_path.to_path_buf()))
+fn directory_identity(
+    _directory: &Dir,
+    canonical_path: &Path,
+) -> io::Result<LocalDirectoryIdentity> {
+    Ok(LocalDirectoryIdentity::Canonical(
+        canonical_path.to_path_buf(),
+    ))
 }
 
 fn is_capability_relative(path: &Path) -> bool {
@@ -788,8 +1044,9 @@ fn prepare_workspace_root(ambient_path: &Path) -> Result<PreparedWorkspaceRoot, 
     let watch_path = std::fs::canonicalize(ambient_path).map_err(map_root_authorization_error)?;
     let directory = Dir::open_ambient_dir(&watch_path, ambient_authority())
         .map_err(map_root_authorization_error)?;
-    let identity =
-        directory_identity(&directory, &watch_path).map_err(map_root_authorization_error)?;
+    let identity = DirectoryIdentity::Local(
+        directory_identity(&directory, &watch_path).map_err(map_root_authorization_error)?,
+    );
     Ok(PreparedWorkspaceRoot {
         directory,
         display_name,
@@ -910,6 +1167,24 @@ fn root_not_authorized() -> CommandError {
     CommandError::new(
         "ROOT_NOT_AUTHORIZED",
         "The workspace root is not authorized.",
+    )
+}
+
+/// `F220` S2 (ADR 0007 §5): returned by [`RootBackend::local_dir`]/
+/// [`RootBackend::local_canonical_path`] — and therefore by every
+/// consumption point built on them, directly or via [`WorkspaceScope::lease`]
+/// / [`WorkspaceScope::resolve`] / [`WorkspaceScope::root_canonical_path`] —
+/// when a caller-selected `root_id` is authorized but backed by a domain
+/// this call site does not yet support (currently: any `RemoteSsh` root
+/// reaching a workspace stat/read/write/copy/move/delete/search operation,
+/// or the terminal/Git/debug domains' explicit-root canonical-path lookup).
+/// Deliberately accurate and path-free — it never says *why* the backend is
+/// unsupported (that story belongs to product docs/ADRs, not a WebView-
+/// facing string) and never interpolates the remote host/path.
+pub(crate) fn root_backend_unsupported() -> CommandError {
+    CommandError::new(
+        "ROOT_BACKEND_UNSUPPORTED",
+        "This operation is not supported for the selected workspace root yet.",
     )
 }
 

@@ -88,6 +88,38 @@ fn an_untrusted_workspace_is_rejected_before_ever_spawning() {
     assert_eq!(error.code(), "WORKSPACE_NOT_TRUSTED");
 }
 
+/// `F220` S2 (ADR 0007 §1 §5) representative test: a remote-backed
+/// `rootId` fails closed with `ROOT_BACKEND_UNSUPPORTED` after trust already
+/// passed (a local root's presence makes the whole-workspace identity
+/// trusted — see `WorkspaceScope::stable_identity`'s own doc comment for why
+/// a remote root does not perturb that local-only identity), proving the
+/// two gates are genuinely independent: this is not merely an untrusted-
+/// workspace rejection wearing a different label.
+#[test]
+fn an_explicit_remote_backed_root_fails_closed_after_trust_passes() {
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let workspace = workspace_with_root("main", root.path());
+    let remote_root_id = workspace
+        .authorize_remote_root_for_test(
+            "main",
+            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "/srv/project",
+            "Remote Project",
+        )
+        .expect("remote root registers for test");
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    block_on(trust.grant(&workspace, "main")).expect("grant succeeds");
+
+    let error = block_on(resolve_repo_toplevel(
+        &trust,
+        &SelectedGitRoot::new(&workspace, remote_root_id),
+        "main",
+    ))
+    .expect_err("a remote-backed root must fail closed");
+    assert_eq!(error.code(), "ROOT_BACKEND_UNSUPPORTED");
+}
+
 #[test]
 fn the_empty_workspace_is_rejected_as_not_trusted_before_looking_at_roots() {
     let workspace = WorkspaceService::new();

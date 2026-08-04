@@ -634,6 +634,53 @@ fn spawn_adapter_rejects_a_removed_root_before_spawning_the_child() {
     );
 }
 
+/// `F220` S2 (ADR 0007 §1 §5) representative test: a remote-backed
+/// `rootId` fails closed with `ROOT_BACKEND_UNSUPPORTED` at the debug
+/// launch consumption point, before any confirmation check or process
+/// spawn — mirrors the sibling
+/// `spawn_adapter_rejects_a_removed_root_before_spawning_the_child` test's
+/// exact shape, substituting a live-but-remote root id for a removed one.
+#[test]
+fn spawn_adapter_rejects_a_remote_backed_root_before_spawning_the_child() {
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let canary_dir = TempDir::new().unwrap();
+    let canary = canary_dir.path().join("should-not-exist");
+
+    let workspace = workspace_with_root("main", root.path());
+    let remote_root_id = workspace
+        .authorize_remote_root_for_test(
+            "main",
+            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "/srv/project",
+            "Remote Project",
+        )
+        .expect("remote root registers for test");
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    block_on(trust.grant(&workspace, "main")).expect("grant succeeds");
+    let (_confirm_base, confirmation) = unconfirmed_confirmation_service();
+    let descriptor = AdapterSpawnDescriptor {
+        command: "/bin/sh".to_owned(),
+        args: vec!["-c".to_owned(), format!(": > '{}'", canary.display())],
+    };
+
+    let error = block_on(spawn_adapter(
+        &trust,
+        &workspace,
+        "main",
+        remote_root_id,
+        &confirmation,
+        &descriptor,
+        Arc::new(AtomicBool::new(false)),
+    ))
+    .expect_err("a remote-backed root must fail closed before spawning");
+    assert_eq!(error.code(), "ROOT_BACKEND_UNSUPPORTED");
+    assert!(
+        !canary.exists(),
+        "a remote-backed root must fail before process spawn"
+    );
+}
+
 /// A confirmation granted for a *different* argv must not silently cover this
 /// descriptor — the spawn-level analogue of `confirm::tests`'s own
 /// per-component sensitivity proofs, exercised through the full gated entry

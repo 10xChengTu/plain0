@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 use super::dto::WorkspaceCloseFolderRequest;
-use super::{RootId, WorkspaceScope};
+use super::{RootId, WorkspaceScope, MAX_WORKSPACE_ROOTS};
 use crate::error::CommandError;
 use crate::path_policy::RelativePath;
 
@@ -431,6 +431,220 @@ fn stable_roots_identity_never_collides_across_naive_concatenation_ambiguity() {
         super::stable_roots_identity(&[PathBuf::from("/a")]),
         super::stable_roots_identity(&[PathBuf::from("/a")]),
         "identical single-root input is reproducible"
+    );
+}
+
+/// `F220` S2 (ADR 0007 §1 §2): remote root identity is `(host-key
+/// fingerprint, canonical remote path)`, and the same identity deduplicates
+/// exactly like a local root's device/inode identity does — reauthorizing
+/// the identical `(fingerprint, path)` pair reuses the same [`RootId`],
+/// while either field alone changing mints a genuinely distinct root.
+#[test]
+fn remote_root_identity_deduplicates_by_fingerprint_and_path_together() {
+    let mut scope = WorkspaceScope::new();
+    let fingerprint = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let other_fingerprint = "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+
+    let first = scope
+        .authorize_remote_root_for_test(fingerprint, "/srv/project", "Remote Project")
+        .expect("first remote authorization succeeds");
+    let reauthorized = scope
+        .authorize_remote_root_for_test(fingerprint, "/srv/project", "Remote Project")
+        .expect("reauthorizing the identical identity succeeds");
+    assert_eq!(
+        first, reauthorized,
+        "same fingerprint and same path must deduplicate to the same root id"
+    );
+    assert_eq!(scope.snapshot().roots().len(), 1);
+
+    let different_path = scope
+        .authorize_remote_root_for_test(fingerprint, "/srv/other", "Remote Other")
+        .expect("a distinct remote path authorizes");
+    assert_ne!(
+        first, different_path,
+        "same fingerprint but a different path must not deduplicate"
+    );
+
+    let different_fingerprint = scope
+        .authorize_remote_root_for_test(other_fingerprint, "/srv/project", "Remote Project")
+        .expect("a distinct fingerprint authorizes");
+    assert_ne!(
+        first, different_fingerprint,
+        "same path but a different fingerprint must not deduplicate"
+    );
+    assert_eq!(scope.snapshot().roots().len(), 3);
+}
+
+/// The 256-root ceiling is shared across backends, not doubled by adding a
+/// second kind of root — proven here by filling it with one local root plus
+/// 255 distinct remote roots (cheap: remote authorization touches no real
+/// filesystem), then showing the 257th of *either* backend is rejected.
+#[test]
+fn remote_and_local_roots_share_one_workspace_root_limit() {
+    let temp = TempDir::new().unwrap();
+    let mut scope = WorkspaceScope::new();
+    scope.authorize_root(temp.path()).unwrap();
+
+    for index in 0..(MAX_WORKSPACE_ROOTS - 1) {
+        scope
+            .authorize_remote_root_for_test(
+                "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                &format!("/srv/project-{index}"),
+                "Remote Project",
+            )
+            .unwrap_or_else(|error| panic!("remote root {index} authorizes: {error:?}"));
+    }
+    assert_eq!(scope.snapshot().roots().len(), MAX_WORKSPACE_ROOTS);
+
+    let overflow_remote = scope.authorize_remote_root_for_test(
+        "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "/srv/one-too-many",
+        "Remote Overflow",
+    );
+    assert_eq!(
+        overflow_remote.unwrap_err().code(),
+        "WORKSPACE_ROOT_LIMIT_EXCEEDED"
+    );
+
+    let overflow_local = TempDir::new().unwrap();
+    assert_eq!(
+        scope
+            .authorize_root(overflow_local.path())
+            .unwrap_err()
+            .code(),
+        "WORKSPACE_ROOT_LIMIT_EXCEEDED"
+    );
+}
+
+/// `F220` S2 (ADR 0007 §5): every consumption point this slice swept —
+/// `lease`/`resolve`/the singular `root_canonical_path` — fails closed with
+/// `ROOT_BACKEND_UNSUPPORTED` for a remote-backed root, distinctly from
+/// `ROOT_NOT_AUTHORIZED` for a root id the scope has never heard of at all.
+#[test]
+fn remote_backed_root_fails_closed_across_every_local_dir_consumption_point() {
+    let mut scope = WorkspaceScope::new();
+    let remote_id = scope
+        .authorize_remote_root_for_test(
+            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "/srv/project",
+            "Remote Project",
+        )
+        .expect("remote root authorizes");
+    let root_path = RelativePath::parse_wire("").unwrap();
+
+    assert_eq!(
+        scope.lease(remote_id).unwrap_err().code(),
+        "ROOT_BACKEND_UNSUPPORTED"
+    );
+    assert_eq!(
+        scope.resolve(remote_id, &root_path).unwrap_err().code(),
+        "ROOT_BACKEND_UNSUPPORTED"
+    );
+    assert_eq!(
+        scope.root_canonical_path(remote_id).unwrap_err().code(),
+        "ROOT_BACKEND_UNSUPPORTED"
+    );
+
+    let unknown: RootId = serde_json::from_str("\"00000000-0000-4000-8000-000000000000\"").unwrap();
+    assert_eq!(
+        scope.root_canonical_path(unknown).unwrap_err().code(),
+        "ROOT_NOT_AUTHORIZED",
+        "an unknown root id must stay distinguishable from a known-but-remote one"
+    );
+}
+
+/// The aggregate local-only lists (`root_canonical_paths`/`history_roots`)
+/// silently exclude remote roots rather than erroring — they describe "every
+/// root this concept currently applies to", not a lookup for one
+/// caller-selected root (that is `root_canonical_path`'s job, proven fail-
+/// closed above).
+#[test]
+fn aggregate_local_root_lists_silently_exclude_remote_roots() {
+    let temp = TempDir::new().unwrap();
+    let mut scope = WorkspaceScope::new();
+    let local_id = scope.authorize_root(temp.path()).unwrap();
+    scope
+        .authorize_remote_root_for_test(
+            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "/srv/project",
+            "Remote Project",
+        )
+        .expect("remote root authorizes");
+
+    let canonical_paths = scope.root_canonical_paths();
+    assert_eq!(canonical_paths.len(), 1);
+    assert_eq!(canonical_paths[0].0, local_id);
+
+    let history = scope.history_roots();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].0, temp.path().canonicalize().unwrap());
+}
+
+/// Unlike the whole-set trust identity, the *per-root* storage identity
+/// (`root_storage_identities`, the backup domain's key) covers both
+/// backends — ADR 0007 §2's own requirement that the remote digest be
+/// implemented, even though nothing outside this slice's tests can yet
+/// construct a live remote root to actually reach the backup domain with
+/// one.
+#[test]
+fn root_storage_identities_produce_distinct_reproducible_digests_for_both_backends() {
+    let temp = TempDir::new().unwrap();
+    let mut scope = WorkspaceScope::new();
+    let local_id = scope.authorize_root(temp.path()).unwrap();
+    let remote_id = scope
+        .authorize_remote_root_for_test(
+            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "/srv/project",
+            "Remote Project",
+        )
+        .expect("remote root authorizes");
+    let other_remote_id = scope
+        .authorize_remote_root_for_test(
+            "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+            "/srv/project",
+            "Remote Project",
+        )
+        .expect("a distinct-fingerprint remote root authorizes");
+
+    let identities = scope.root_storage_identities();
+    assert_eq!(identities.len(), 3);
+    let find = |root_id: RootId| {
+        identities
+            .iter()
+            .find(|(candidate, _)| *candidate == root_id)
+            .map(|(_, identity)| identity.as_dir_name().to_owned())
+            .expect("every authorized root has a storage identity")
+    };
+    let local_digest = find(local_id);
+    let remote_digest = find(remote_id);
+    let other_remote_digest = find(other_remote_id);
+    assert_ne!(local_digest, remote_digest);
+    assert_ne!(remote_digest, other_remote_digest);
+    assert_ne!(local_digest, other_remote_digest);
+
+    // Reopening the identical local directory in a brand-new scope must
+    // reproduce the local digest byte-for-byte (existing on-disk backup
+    // partitions are keyed by this exact string) — this slice's refactor
+    // must not have perturbed the pre-`F220` local hash construction.
+    let mut reopened = WorkspaceScope::new();
+    let reopened_local_id = reopened.authorize_root(temp.path()).unwrap();
+    let reopened_identities = reopened.root_storage_identities();
+    let reopened_digest = reopened_identities
+        .iter()
+        .find(|(candidate, _)| *candidate == reopened_local_id)
+        .map(|(_, identity)| identity.as_dir_name().to_owned())
+        .unwrap();
+    assert_eq!(local_digest, reopened_digest);
+}
+
+/// Registers the `ROOT_BACKEND_UNSUPPORTED` code alongside this domain's
+/// other stable-code assertions (mirrors the `error_constructors_have_
+/// stable_codes` precedent every other domain's `mod.rs` keeps).
+#[test]
+fn root_backend_unsupported_has_a_stable_code() {
+    assert_eq!(
+        super::root_backend_unsupported().code(),
+        "ROOT_BACKEND_UNSUPPORTED"
     );
 }
 

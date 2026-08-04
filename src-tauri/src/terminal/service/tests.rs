@@ -1212,6 +1212,44 @@ fn a_foreign_window_root_id_is_rejected_before_spawn() {
     assert_eq!(result.unwrap_err().code(), "ROOT_NOT_AUTHORIZED");
 }
 
+/// `F220` S2 (ADR 0007 §1 §5) representative test: a remote-backed root
+/// fails closed with `ROOT_BACKEND_UNSUPPORTED` at the terminal `cwd`
+/// consumption point (`resolve_cwd`'s own `root_canonical_path` lookup),
+/// before any shell is spawned — mirrors the sibling
+/// `a_foreign_window_root_id_is_rejected_before_spawn` test's exact shape,
+/// substituting a live-but-remote root id for a foreign-window one.
+#[test]
+fn a_remote_backed_root_is_rejected_before_spawn() {
+    let root = TempDir::new().unwrap();
+    let trust_base = TempDir::new().unwrap();
+    let workspace = workspace_with_root("main", root.path());
+    let remote_root_id = workspace
+        .authorize_remote_root_for_test(
+            "main",
+            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "/srv/project",
+            "Remote Project",
+        )
+        .expect("remote root registers for test");
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    block_on(trust.grant(&workspace, "main")).unwrap();
+    let terminal_base = TempDir::new().unwrap();
+    let terminal = TerminalService::new(terminal_base.path().to_path_buf());
+
+    let result = block_on(terminal.start_with_command_for_test(
+        &trust,
+        &workspace,
+        "main",
+        remote_root_id,
+        None,
+        80,
+        24,
+        CommandBuilder::new("cat"),
+        RecordingSink::new(),
+    ));
+    assert_eq!(result.unwrap_err().code(), "ROOT_BACKEND_UNSUPPORTED");
+}
+
 #[test]
 fn a_cwd_outside_every_authorized_root_is_rejected() {
     let root = TempDir::new().unwrap();

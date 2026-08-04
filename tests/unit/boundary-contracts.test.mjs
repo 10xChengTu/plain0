@@ -69,6 +69,7 @@ import {
 	validateDebugRootIpcBoundary,
 	validateDebugSpawnConstructionShape,
 	validateDebugFramingBounds,
+	validateRootBackendOwnershipBoundary,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
 const baselineWindow = {
@@ -14856,5 +14857,71 @@ describe("Plain F100 S1 debug adapter confirmation TypeScript boundary Harness",
 				),
 			),
 		).toBe(true);
+	});
+});
+
+describe("Plain F220 S2 RootBackend ownership boundary", () => {
+	const rootBackendSources = [
+		{
+			relativePath: "src-tauri/src/workspace/mod.rs",
+			source: `
+enum RootBackend {
+  Local { directory: cap_std::fs::Dir, canonical_path: std::path::PathBuf },
+  RemoteSsh { session_id: crate::remote::dto::RemoteSessionId, base_path: String, host_key_fingerprint: String },
+}
+impl RootBackend {
+  fn local_dir(&self) -> Result<&cap_std::fs::Dir, CommandError> {
+    match self {
+      Self::Local { directory, .. } => Ok(directory),
+      Self::RemoteSsh { .. } => Err(root_backend_unsupported()),
+    }
+  }
+}
+`,
+		},
+		{
+			relativePath: "src-tauri/src/search/file_search.rs",
+			source: `
+use crate::workspace::WorkspaceRootLease;
+fn open(lease: &WorkspaceRootLease) -> cap_std::fs::Dir {
+  lease.directory().try_clone().unwrap()
+}
+`,
+		},
+	];
+
+	it("accepts RootBackend confined to workspace/mod.rs", () => {
+		expect(validateRootBackendOwnershipBoundary(rootBackendSources)).toEqual(
+			[],
+		);
+	});
+
+	it("rejects a consumption point that matches RootBackend directly instead of going through WorkspaceScope::lease/resolve", () => {
+		const hostile = mutateWorkspaceSource(
+			rootBackendSources,
+			"src-tauri/src/search/file_search.rs",
+			(source) =>
+				`${source}
+fn bypass(root: &super::workspace::RootBackend) -> Option<&cap_std::fs::Dir> {
+  match root {
+    super::workspace::RootBackend::Local { directory, .. } => Some(directory),
+    super::workspace::RootBackend::RemoteSsh { .. } => None,
+  }
+}
+`,
+		);
+		expect(validateRootBackendOwnershipBoundary(hostile)).toContain(
+			"src-tauri/src/search/file_search.rs must not reference RootBackend — every consumption point must reach a local root through WorkspaceScope::lease/resolve/root_canonical_path, owned exclusively by src-tauri/src/workspace/mod.rs",
+		);
+	});
+
+	it("ignores RootBackend spelled out inside comments or string literals", () => {
+		const commented = mutateWorkspaceSource(
+			rootBackendSources,
+			"src-tauri/src/search/file_search.rs",
+			(source) =>
+				`${source}\n// Do not ever match on RootBackend here.\nconst NOTE: &str = "RootBackend";\n`,
+		);
+		expect(validateRootBackendOwnershipBoundary(commented)).toEqual([]);
 	});
 });

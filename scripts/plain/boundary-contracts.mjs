@@ -14564,7 +14564,7 @@ export function validateWorkspaceTrashBoundary(rustSources) {
 			'#[cfg(target_os="macos")]pub(super)fnplatform_root_path(&self)->&Path{&self.canonical_path}',
 		) ||
 		!compact(moduleSource).includes(
-			"canonical_path:root.canonical_path.clone()",
+			"letcanonical_path=root.backend.local_canonical_path()?.to_path_buf();",
 		)
 	) {
 		failures.push(
@@ -25132,6 +25132,48 @@ export function validateRemoteSshLibraryOwnershipBoundary(rustSources) {
 		if (russhTokenPattern.test(executable)) {
 			failures.push(
 				`${normalizedPath} must not reference russh — SSH transport is owned exclusively by src-tauri/src/remote/`,
+			);
+		}
+	}
+	return failures;
+}
+
+/**
+ * `F220` S2 (ADR 0007 §1 §5): every one of `WorkspaceRoot`'s ~50 downstream
+ * consumption points across `workspace::{reader,writer,versioned_writer,
+ * delete,directory_copy,move_entry,new_file_publisher,trash}` and
+ * `search::{file_search,text_search}` reaches a local `Dir`/canonical path
+ * only through `RootBackend::local_dir`/`RootBackend::local_canonical_path`
+ * (or the `WorkspaceScope::lease`/`WorkspaceScope::resolve`/
+ * `WorkspaceScope::root_canonical_path` chokepoints built on them) —
+ * `src-tauri/src/workspace/mod.rs`'s own module-level doc on `RootBackend`
+ * spells out why this is safe: those two accessors are the *only* place a
+ * remote root's fields are read for anything other than its own identity
+ * digest. This mirrors `validateRemoteSshLibraryOwnershipBoundary`'s own
+ * "single-owner token" discipline, applied to the `RootBackend` enum name
+ * itself instead of a crate import: no other file in the codebase — not
+ * even `workspace`'s own sibling submodules or test files — may name
+ * `RootBackend` at all, so a consumption point cannot bypass the two
+ * accessors' fail-closed `ROOT_BACKEND_UNSUPPORTED` by matching on (or
+ * literal-constructing) the enum directly. A hostile edit that, say,
+ * rewrites `search/file_search.rs` to destructure `RootBackend::Local` for
+ * itself instead of calling `WorkspaceScope::lease` is exactly what this
+ * guard exists to catch.
+ */
+export function validateRootBackendOwnershipBoundary(rustSources) {
+	const failures = [];
+	const soleOwnerPath = "src-tauri/src/workspace/mod.rs";
+	const rootBackendTokenPattern =
+		/(?<![A-Za-z0-9_])RootBackend(?![A-Za-z0-9_])/;
+	for (const { relativePath, source } of rustSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		if (normalizedPath === soleOwnerPath) {
+			continue;
+		}
+		const executable = stripRustCommentsAndLiterals(source);
+		if (rootBackendTokenPattern.test(executable)) {
+			failures.push(
+				`${normalizedPath} must not reference RootBackend — every consumption point must reach a local root through WorkspaceScope::lease/resolve/root_canonical_path, owned exclusively by ${soleOwnerPath}`,
 			);
 		}
 	}

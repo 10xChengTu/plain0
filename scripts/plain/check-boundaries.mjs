@@ -42,6 +42,7 @@ import {
 	validateProductConfigurationBoundary,
 	validateRemoteCommandRegistration,
 	validateRemoteSshLibraryOwnershipBoundary,
+	validateRootBackendOwnershipBoundary,
 	validateSearchCommandRegistration,
 	validateSearchExpandReplacementsCommandRegistration,
 	validateSearchFileBudgetConstants,
@@ -970,6 +971,9 @@ for (const failure of validateRemoteSshLibraryOwnershipBoundary(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateRemoteCommandRegistration(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateRootBackendOwnershipBoundary(rustSources)) {
 	fail(failure);
 }
 

@@ -172,18 +172,42 @@ impl WorkspaceService {
     /// Resolves one exact authorized root identity to its canonical backing
     /// path. Unlike callers taking `root_canonical_paths().first()`, this is
     /// fail-closed for a stale, foreign-window, or otherwise unauthorized
-    /// identity and therefore preserves the root identity chosen by the
-    /// WebView across native domain boundaries.
+    /// identity (`ROOT_NOT_AUTHORIZED`) and therefore preserves the root
+    /// identity chosen by the WebView across native domain boundaries — and,
+    /// as of `F220` S2, distinctly fail-closed with `ROOT_BACKEND_UNSUPPORTED`
+    /// for a live but remote-backed `root_id` (see
+    /// [`super::WorkspaceScope::root_canonical_path`]), which every one of
+    /// this method's callers (terminal `cwd`, Git's explicit `rootId`, debug
+    /// launch/attach) already just propagates via `?`.
     pub(crate) fn root_canonical_path(
         &self,
         window_label: &str,
         root_id: RootId,
     ) -> Result<std::path::PathBuf, CommandError> {
         self.scope_for_window(window_label)?
-            .root_canonical_paths()?
-            .into_iter()
-            .find_map(|(candidate_id, path)| (candidate_id == root_id).then_some(path))
-            .ok_or_else(root_not_authorized)
+            .root_canonical_path(root_id)
+    }
+
+    /// Test-only construction of a `RemoteSsh`-backed root for
+    /// `window_label` — see [`super::WorkspaceScope::
+    /// authorize_remote_root_for_test`] for the full contract this wraps
+    /// (identity dedup, shared [`super::MAX_WORKSPACE_ROOTS`] ceiling).
+    /// `F220` S2 has no production entry point that reaches this; every
+    /// caller is this slice's own consumption-point sweep tests.
+    #[cfg(test)]
+    pub(crate) fn authorize_remote_root_for_test(
+        &self,
+        window_label: &str,
+        host_key_fingerprint: &str,
+        base_path: &str,
+        display_name: &str,
+    ) -> Result<RootId, CommandError> {
+        let workspace = self.scope_for_window(window_label)?;
+        let mut state = lock(&workspace.state)?;
+        ensure_open(&state)?;
+        state
+            .scope
+            .authorize_remote_root_for_test(host_key_fingerprint, base_path, display_name)
     }
 
     pub async fn pick_roots<P: DirectoryPicker>(
@@ -1200,6 +1224,12 @@ impl WindowWorkspace {
         let state = lock(&self.state)?;
         ensure_open(&state)?;
         Ok(state.scope.root_canonical_paths())
+    }
+
+    fn root_canonical_path(&self, root_id: RootId) -> Result<std::path::PathBuf, CommandError> {
+        let state = lock(&self.state)?;
+        ensure_open(&state)?;
+        state.scope.root_canonical_path(root_id)
     }
 
     fn root_storage_identities(
