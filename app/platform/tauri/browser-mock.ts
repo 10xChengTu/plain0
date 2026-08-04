@@ -44,6 +44,10 @@ import type {
 	GitWorktreeListResult,
 	NativeCloseRequest,
 	PlainBridge,
+	RemoteHostKeyListResult,
+	RemoteSessionConnectResult,
+	RemoteSessionEventPayload,
+	RemoteSessionStateResult,
 	RuntimeInfo,
 	TerminalDataEvent,
 	TerminalExitEvent,
@@ -1010,6 +1014,49 @@ export type BrowserMockThemeImportOutcome =
 	| Readonly<{ status: "cancelled" }>
 	| Readonly<{ status: "imported"; fixture: BrowserMockThemePackageFixture }>;
 
+/**
+ * `F220` S1: scripts what `remoteSessionConnect`/`remoteHostKeyConfirm`'s
+ * post-host-key-check phase (agent authentication) does once a target's host
+ * key has been accepted — either because a matching pin already existed, or
+ * because a `remoteHostKeyConfirm` call just pinned it. Keyed by
+ * `"host:port"` (see `remoteMockTargetKey` in the mock body); a target with
+ * no entry always succeeds. Mirrors every other per-target scripted-outcome
+ * fixture in this file (e.g. `BrowserMockGitNetworkFixtureForTest`'s own
+ * shape for a different domain).
+ */
+export type BrowserMockRemoteConnectOutcomeForTest =
+	"success" | "authRejected" | "connectTimedOut";
+
+/**
+ * `F220` S1's own scriptable fixture — the mock keeps its own tiny
+ * in-memory known-hosts pin store (never the real Rust one), seeded by
+ * `pinnedHostsForTest` and otherwise built up as `remoteHostKeyConfirm` is
+ * called during the test, exactly mirroring `TrustService`'s own
+ * "start empty, callers grant" shape for a different domain.
+ */
+export interface BrowserMockRemoteFixtureForTest {
+	/** Pre-seeds the mock's pin store, as if these targets had already been
+	 * confirmed in an earlier session — a fresh `remoteSessionConnect` call
+	 * against one of these resolves straight to `"connected"` (or whatever
+	 * `connectOutcomesForTest` scripts), never `"hostKeyPendingConfirmation"`. */
+	readonly pinnedHostsForTest?: readonly Readonly<{
+		host: string;
+		port: number;
+	}>[];
+	/** Keyed by `"host:port"`. */
+	readonly connectOutcomesForTest?: Readonly<
+		Record<string, BrowserMockRemoteConnectOutcomeForTest>
+	>;
+	/** `"host:port"` targets whose live host key the mock reports as having
+	 * *changed* since it was pinned — simulates a reinstalled host or a
+	 * man-in-the-middle, exercising the ADR 0006 §3 hard-fail-no-bypass path.
+	 * Only meaningful for a target also present in `pinnedHostsForTest` (or
+	 * pinned earlier in the same test via a real `remoteHostKeyConfirm`
+	 * call); a target that has never been pinned always reports
+	 * `"hostKeyPendingConfirmation"` regardless of this list. */
+	readonly changedHostKeyTargetsForTest?: readonly string[];
+}
+
 export interface BrowserMockBridgeOptions {
 	/** Captures a fixed same-application new-window request without letting
 	 * tests inject a URL, label, capability scope, or browser feature string. */
@@ -1167,6 +1214,10 @@ export interface BrowserMockBridgeOptions {
 	readonly onDebugSessionForTest?: (
 		controller: BrowserMockDebugSessionController,
 	) => void;
+	/** `F220` S1: seeds the mock's own in-memory SSH known-hosts pin store
+	 * and scripts post-host-key-check connect outcomes — see
+	 * `BrowserMockRemoteFixtureForTest`. */
+	readonly remoteFixtureForTest?: BrowserMockRemoteFixtureForTest;
 }
 
 /**
@@ -1728,6 +1779,38 @@ function captureBrowserMockWorkspaceWriteSeams(
 
 function commandError(code: string, message: string): CommandError {
 	return Object.freeze({ code, message });
+}
+
+/** `F220` S1 — the mock's own `(host, port)` key for its known-hosts pin
+ * store and per-target scripted-outcome lookups. */
+function remoteMockTargetKey(host: string, port: number): string {
+	return `${host}:${port}`;
+}
+
+/** Deterministic FNV-1a digest — used only to fabricate a stable, distinct,
+ * fingerprint-shaped string per `(host, port)` (and per `changed` epoch, for
+ * `changedHostKeyTargetsForTest`) without needing any real cryptographic
+ * hashing or randomness: this mock never holds a real key, only a
+ * fingerprint-*shaped* value the codec's own `SHA256:<base64-charset>`
+ * decode-side check accepts. */
+function remoteMockDigest(input: string): string {
+	let hash = 0x811c9dc5;
+	for (let index = 0; index < input.length; index += 1) {
+		hash ^= input.charCodeAt(index);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function remoteMockFingerprint(
+	host: string,
+	port: number,
+	changed: boolean,
+): string {
+	const digest = remoteMockDigest(
+		`${host}:${port}${changed ? ":changed" : ""}`,
+	);
+	return `SHA256:${digest.repeat(6)}`;
 }
 
 function rootNotAuthorized(): CommandError {
@@ -7596,6 +7679,105 @@ export function createBrowserMockBridge(
 		);
 	};
 
+	// `F220` S1 — the mock's own in-memory SSH known-hosts pin store and live
+	// session table. Never the real Rust store/registry: a fresh page load
+	// (a fresh `createBrowserMockBridge` call) starts empty except for
+	// `remoteFixtureForTest.pinnedHostsForTest`, exactly like every other
+	// in-memory mock domain in this file (backup/scratch/theme selection).
+	const remoteFixture = options.remoteFixtureForTest ?? {};
+	const remoteKnownHosts = new Map<
+		string,
+		Readonly<{ algorithm: string; sha256Fingerprint: string }>
+	>();
+	for (const target of remoteFixture.pinnedHostsForTest ?? []) {
+		remoteKnownHosts.set(
+			remoteMockTargetKey(target.host, target.port),
+			Object.freeze({
+				algorithm: "ssh-ed25519",
+				sha256Fingerprint: remoteMockFingerprint(
+					target.host,
+					target.port,
+					false,
+				),
+			}),
+		);
+	}
+	const remoteSessions = new Map<
+		string,
+		Readonly<{ host: string; port: number; user: string }>
+	>();
+	const remoteSessionListeners = new Set<
+		(payload: RemoteSessionEventPayload) => void
+	>();
+
+	function remoteSessionNotFound(): CommandError {
+		return commandError(
+			"REMOTE_SESSION_NOT_FOUND",
+			"The requested SSH session does not exist for this window.",
+		);
+	}
+
+	function remoteAgentAuthRejected(): CommandError {
+		return commandError(
+			"REMOTE_AGENT_AUTH_REJECTED",
+			"The server rejected every identity the SSH agent offered.",
+		);
+	}
+
+	function remoteConnectTimedOut(): CommandError {
+		return commandError(
+			"REMOTE_CONNECT_TIMED_OUT",
+			"Timed out waiting to establish an SSH connection to the requested host.",
+		);
+	}
+
+	function remoteHostKeyChanged(
+		host: string,
+		port: number,
+		algorithm: string,
+		oldFingerprint: string,
+		newFingerprint: string,
+	): CommandError {
+		return commandError(
+			"REMOTE_HOST_KEY_CHANGED",
+			`The host key for ${host}:${port} has changed. Previously pinned (${algorithm}): ` +
+				`${oldFingerprint}. Now offered: ${newFingerprint}. This may indicate the host was ` +
+				"reinstalled or a man-in-the-middle attack; the existing pin must be explicitly " +
+				"forgotten (Plain: Forget SSH Host Key…) before reconnecting.",
+		);
+	}
+
+	function remoteEmit(payload: RemoteSessionEventPayload): void {
+		for (const listener of remoteSessionListeners) {
+			listener(payload);
+		}
+	}
+
+	/** Completes a connect once the host key itself has already been
+	 * accepted (a matching pin existed, or `remoteHostKeyConfirm` just
+	 * pinned it) — the shared tail both mock entry points below reach. */
+	function remoteCompleteConnect(
+		host: string,
+		port: number,
+		user: string,
+	): RemoteSessionConnectResult {
+		const outcome =
+			remoteFixture.connectOutcomesForTest?.[remoteMockTargetKey(host, port)] ??
+			"success";
+		if (outcome === "authRejected") {
+			throw remoteAgentAuthRejected();
+		}
+		if (outcome === "connectTimedOut") {
+			throw remoteConnectTimedOut();
+		}
+		const sessionId = nextDebugSessionId();
+		remoteSessions.set(sessionId, Object.freeze({ host, port, user }));
+		remoteEmit(
+			Object.freeze({ event: "connected", sessionId, host, port, user }),
+		);
+		return Object.freeze({ status: "connected", sessionId });
+	}
+
 	return {
 		async runtimeInfo() {
 			queueMicrotask(() => {
@@ -9656,6 +9838,122 @@ export function createBrowserMockBridge(
 			debugEventListeners.add(listener);
 			return () => {
 				debugEventListeners.delete(listener);
+			};
+		},
+		async remoteSessionConnect(host, port, user) {
+			const key = remoteMockTargetKey(host, port);
+			const pinned = remoteKnownHosts.get(key);
+			if (pinned === undefined) {
+				return Object.freeze({
+					status: "hostKeyPendingConfirmation",
+					algorithm: "ssh-ed25519",
+					sha256Fingerprint: remoteMockFingerprint(host, port, false),
+					knownHostsHit: false,
+				});
+			}
+			const changed =
+				remoteFixture.changedHostKeyTargetsForTest?.includes(key) ?? false;
+			const liveFingerprint = remoteMockFingerprint(host, port, changed);
+			if (liveFingerprint !== pinned.sha256Fingerprint) {
+				throw remoteHostKeyChanged(
+					host,
+					port,
+					pinned.algorithm,
+					pinned.sha256Fingerprint,
+					liveFingerprint,
+				);
+			}
+			return remoteCompleteConnect(host, port, user);
+		},
+		async remoteHostKeyConfirm(host, port, user, algorithm, sha256Fingerprint) {
+			const key = remoteMockTargetKey(host, port);
+			// Pin exactly what the caller confirmed first (mirrors the real
+			// two-phase flow: pinning happens before the post-pin
+			// re-validation, so a hard failure below still leaves this pin
+			// committed — see `session::RemoteSessionService::confirm_host_key`'s
+			// own doc comment for why that is correct, not a bug).
+			remoteKnownHosts.set(
+				key,
+				Object.freeze({ algorithm, sha256Fingerprint }),
+			);
+			const changed =
+				remoteFixture.changedHostKeyTargetsForTest?.includes(key) ?? false;
+			const liveFingerprint = remoteMockFingerprint(host, port, changed);
+			if (liveFingerprint !== sha256Fingerprint) {
+				throw remoteHostKeyChanged(
+					host,
+					port,
+					algorithm,
+					sha256Fingerprint,
+					liveFingerprint,
+				);
+			}
+			return remoteCompleteConnect(host, port, user);
+		},
+		async remoteSessionConnectCancel() {
+			// Best-effort in production; this mock never has a genuinely
+			// in-flight connect to cancel (every mock call resolves
+			// synchronously within one microtask), so there is nothing to do.
+		},
+		async remoteSessionDisconnect(sessionId) {
+			const session = remoteSessions.get(sessionId);
+			if (session === undefined) {
+				throw remoteSessionNotFound();
+			}
+			remoteSessions.delete(sessionId);
+			remoteEmit(
+				Object.freeze({
+					event: "disconnected",
+					sessionId,
+					host: session.host,
+					port: session.port,
+					user: session.user,
+					reason: "userRequested",
+				}),
+			);
+		},
+		async remoteSessionState() {
+			const sessions = [...remoteSessions.entries()]
+				.map(([sessionId, session]) =>
+					Object.freeze({
+						sessionId,
+						host: session.host,
+						port: session.port,
+						user: session.user,
+					}),
+				)
+				.sort((left, right) =>
+					left.host === right.host
+						? left.port - right.port
+						: left.host.localeCompare(right.host),
+				);
+			return Object.freeze({ sessions }) satisfies RemoteSessionStateResult;
+		},
+		async remoteHostKeyForget(host, port) {
+			remoteKnownHosts.delete(remoteMockTargetKey(host, port));
+		},
+		async remoteHostKeyList() {
+			const entries = [...remoteKnownHosts.entries()]
+				.map(([key, entry]) => {
+					const separatorIndex = key.lastIndexOf(":");
+					return Object.freeze({
+						host: key.slice(0, separatorIndex),
+						port: Number(key.slice(separatorIndex + 1)),
+						algorithm: entry.algorithm,
+						sha256Fingerprint: entry.sha256Fingerprint,
+					});
+				})
+				.sort((left, right) =>
+					left.host === right.host
+						? left.port - right.port
+						: left.host.localeCompare(right.host),
+				);
+			return Object.freeze({ entries }) satisfies RemoteHostKeyListResult;
+		},
+		remoteSessionWatchEvent(listener) {
+			remoteSessionListeners.add(listener);
+			return () => {
+				remoteSessionListeners.delete(listener);
 			};
 		},
 	};

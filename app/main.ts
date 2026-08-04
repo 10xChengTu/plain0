@@ -34,6 +34,10 @@ import "./features/debug/plain-debug-session-alerts";
 import "./features/debug/plain-debug-terminal-integration";
 import { registerPlainPreferenceCommands } from "./features/preferences/plain-preference-commands";
 import {
+	configurePlainRemoteSshBridge,
+	registerPlainRemoteSshCommands,
+} from "./features/remote/plain-remote-ssh-commands";
+import {
 	createPlainUserDataFileSystemProvider,
 	PLAIN_USER_DATA_SCHEME,
 } from "./features/preferences/user-data-file-system-provider";
@@ -185,6 +189,10 @@ async function bootstrap(): Promise<void> {
 		ReturnType<typeof registerPlainDebugCommands> | undefined;
 	let debugBreakpointsContributionRegistration:
 		ReturnType<typeof createPlainDebugBreakpointsContribution> | undefined;
+	let remoteSshBridgeRegistration:
+		ReturnType<typeof configurePlainRemoteSshBridge> | undefined;
+	let remoteSshCommandsRegistration:
+		ReturnType<typeof registerPlainRemoteSshCommands> | undefined;
 	// `F100` S3: constructed and configured here (before `initialize()`),
 	// exactly like every other `configuredBridge`-style singleton in this
 	// file — `debug-contribution.ts` registers the three debug `ViewPane`s'
@@ -211,6 +219,8 @@ async function bootstrap(): Promise<void> {
 			debugCommandsRegistration?.dispose();
 			debugBreakpointsContributionRegistration?.dispose();
 			debugRuntime.session.dispose();
+			remoteSshCommandsRegistration?.dispose();
+			remoteSshBridgeRegistration?.dispose();
 		},
 		{ once: true },
 	);
@@ -325,6 +335,19 @@ async function bootstrap(): Promise<void> {
 			debugRuntime.breakpoints,
 			debugRuntime.session,
 		);
+
+	// `F220` S1: "Plain: Connect to SSH Host…"/"Disconnect SSH Session…"/
+	// "Forget SSH Host Key…" plus the one persistent
+	// `remoteSessionWatchEvent` notification listener — see
+	// `plain-remote-ssh-commands.ts`'s own module doc comment for why this
+	// needs a real `INotificationService` instance (unlike
+	// `configurePlainTerminalBridge` above, which runs before `initialize()`)
+	// and therefore is wired here rather than alongside that earlier group.
+	remoteSshBridgeRegistration = configurePlainRemoteSshBridge(
+		bridge,
+		await getService(INotificationService),
+	);
+	remoteSshCommandsRegistration = registerPlainRemoteSshCommands();
 
 	// `F080` S2: the `git:` read-only content provider (decision 4) — a
 	// `PlainScmProvider.getOriginalResource` URI is only ever resolved once

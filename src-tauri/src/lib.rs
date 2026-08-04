@@ -7,6 +7,7 @@ pub mod git;
 pub mod lifecycle;
 pub mod path_policy;
 pub mod recent;
+pub mod remote;
 pub mod scratch;
 pub mod search;
 pub mod terminal;
@@ -24,6 +25,7 @@ use git::history_operation::GitHistoryOperationService;
 use git::network::GitNetworkService;
 use lifecycle::service::{CloseCoordinator, ExitDecision, WindowCloseDecision};
 use recent::service::WorkspaceHistoryService;
+use remote::session::RemoteSessionService;
 use scratch::service::ScratchService;
 use terminal::service::TerminalService;
 use theme::service::ThemeService;
@@ -80,6 +82,7 @@ pub fn run() {
             // `base_path`-scoped domains here instead of being pre-`.setup()`
             // `.manage()`d like the ones above, which never needed it.
             app.manage(TerminalService::new(base_path.clone()));
+            app.manage(RemoteSessionService::new(base_path.clone()));
             app.manage(UserDataService::new(base_path));
             Ok(())
         })
@@ -120,6 +123,9 @@ pub fn run() {
                     .close_window(window.label());
                 window
                     .state::<DebugSessionService>()
+                    .close_window(window.label());
+                window
+                    .state::<RemoteSessionService>()
                     .close_window(window.label());
             }
         })
@@ -270,6 +276,13 @@ pub fn run() {
             debug::commands::debug_pause,
             debug::commands::debug_disassemble,
             debug::commands::debug_output_ack,
+            remote::commands::remote_session_connect,
+            remote::commands::remote_host_key_confirm,
+            remote::commands::remote_session_connect_cancel,
+            remote::commands::remote_session_disconnect,
+            remote::commands::remote_session_state,
+            remote::commands::remote_host_key_forget,
+            remote::commands::remote_host_key_list,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Plain")

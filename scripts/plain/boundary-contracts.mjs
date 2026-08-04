@@ -1711,7 +1711,8 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "applyPersistedThemeSelection" ||
 				parent.expression.text === "applyPersistedFileIconThemeSelection" ||
 				parent.expression.text === "applyPersistedProductIconThemeSelection" ||
-				parent.expression.text === "createAndConfigurePlainDebugRuntime")
+				parent.expression.text === "createAndConfigurePlainDebugRuntime" ||
+				parent.expression.text === "configurePlainRemoteSshBridge")
 		);
 	}
 	function isAllowedUserDataProviderIdentifier(node) {
@@ -12856,6 +12857,22 @@ function stageCleanupCallsAreExact(relativePath, source) {
 		);
 	}
 	if (relativePath === "src-tauri/src/trust/store.rs") {
+		return (
+			removeFileCalls.length === 1 &&
+			exactMethodCall(
+				source,
+				removeFileCalls[0],
+				/\bself\s*\.\s*dir\s*\.\s*$/,
+				"&self.name",
+			) &&
+			removeDirectoryCalls.length === 0
+		);
+	}
+	if (relativePath === "src-tauri/src/remote/known_hosts.rs") {
+		// `F220` S1 — the pinned known-hosts store's own `Stage`-drop-cleanup,
+		// byte-for-byte identical shape to `trust/store.rs`'s own (see that
+		// file's own doc comment for why the duplication, rather than a
+		// shared helper, is intentional).
 		return (
 			removeFileCalls.length === 1 &&
 			exactMethodCall(
@@ -25085,4 +25102,128 @@ export function validateGitHunkStageUiBoundary(appSources) {
 	}
 
 	return [...new Set(failures)];
+}
+
+/**
+ * `F220` S1 (ADR 0006 §1's "SSH 会话建立由进程内 Rust 实现拥有" decision): the
+ * `remote` domain is the sole importer of the `russh`/`russh::keys` crate
+ * anywhere in this codebase — mirrors `FORBIDDEN_GIT_LIBRARY_DEPENDENCIES`'s
+ * own "single-owner dependency" discipline, applied to an *import
+ * statement/path reference* rather than a `Cargo.toml` dependency line
+ * (russh is a legitimate `[dependencies]` entry either way; what this locks
+ * is which *modules* may actually name it in code). Deliberately does not
+ * also forbid `std::net::TcpStream`/`tokio::net::TcpStream` crate-wide: the
+ * `debug` domain already has its own audited, unrelated TCP use
+ * (`debug::tcp`'s DAP TCP transport) that this guard must not conflict
+ * with — confining `russh` itself is the correct, sufficient proxy for "SSH
+ * transport is `remote`'s alone", since `russh` is the only thing in this
+ * crate that actually speaks the SSH protocol.
+ */
+export function validateRemoteSshLibraryOwnershipBoundary(rustSources) {
+	const failures = [];
+	const remoteDomainPattern = /^src-tauri\/src\/remote\/.*\.rs$/;
+	const russhTokenPattern = /(?<![A-Za-z0-9_])russh(?![A-Za-z0-9_])/;
+	for (const { relativePath, source } of rustSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		if (remoteDomainPattern.test(normalizedPath)) {
+			continue;
+		}
+		const executable = stripRustCommentsAndLiterals(source);
+		if (russhTokenPattern.test(executable)) {
+			failures.push(
+				`${normalizedPath} must not reference russh — SSH transport is owned exclusively by src-tauri/src/remote/`,
+			);
+		}
+	}
+	return failures;
+}
+
+/**
+ * `F220` S1's own command-registration closed set — mirrors
+ * `validateWorkspaceCopyCommandRegistration`'s lighter-weight "exactly one
+ * audited definition, exactly one `generate_handler!` registration, no
+ * unaudited sibling" shape (rather than `validateDebugCommandRegistration`'s
+ * exact-signature/exact-body table, which this slice's seven commands do not
+ * need: none of them share `debug`'s own "several commands must send the
+ * exact same DAP request shape" invariant this file's other guards already
+ * cover for that domain).
+ */
+const REMOTE_COMMAND_NAMES = Object.freeze([
+	"remote_session_connect",
+	"remote_host_key_confirm",
+	"remote_session_connect_cancel",
+	"remote_session_disconnect",
+	"remote_session_state",
+	"remote_host_key_forget",
+	"remote_host_key_list",
+]);
+
+export function validateRemoteCommandRegistration(rustSources) {
+	const failures = [];
+	const commandsSource = findRustSource(
+		rustSources,
+		"src-tauri/src/remote/commands.rs",
+	);
+	const libSource = findRustSource(rustSources, "src-tauri/src/lib.rs");
+
+	if (commandsSource === undefined) {
+		failures.push(
+			"remote command registration boundary requires remote/commands.rs",
+		);
+		return failures;
+	}
+	const executableCommands = stripRustCommentsAndLiterals(commandsSource);
+
+	for (const name of REMOTE_COMMAND_NAMES) {
+		const commands = extractAuditedTauriCommands(executableCommands, name);
+		if (commands.length !== 1) {
+			failures.push(
+				`remote/commands.rs must define exactly one audited ${name} Tauri command`,
+			);
+		}
+	}
+
+	const everyDefinitionPattern =
+		/#\s*\[\s*tauri\s*::\s*command\s*\]\s*pub\s*\(\s*crate\s*\)\s+async\s+fn\s+(remote_[A-Za-z0-9_]+)\s*\(/g;
+	const definedNames = [...executableCommands.matchAll(everyDefinitionPattern)]
+		.map((match) => match[1])
+		.sort();
+	const expectedNames = [...REMOTE_COMMAND_NAMES].sort();
+	if (JSON.stringify(definedNames) !== JSON.stringify(expectedNames)) {
+		failures.push(
+			"remote/commands.rs must define exactly the seven audited remote_* Tauri commands, no more and no fewer",
+		);
+	}
+
+	if (libSource === undefined) {
+		failures.push(
+			"remote command registration boundary requires src-tauri/src/lib.rs",
+		);
+		return failures;
+	}
+	const executableLib = stripRustCommentsAndLiterals(libSource);
+	const handlerBodies = [
+		...executableLib.matchAll(
+			/\.invoke_handler\s*\(\s*tauri\s*::\s*generate_handler\s*!\s*\[([\s\S]*?)\]\s*\)/g,
+		),
+	];
+	for (const name of REMOTE_COMMAND_NAMES) {
+		const commandPath = new RegExp(
+			`\\bremote\\s*::\\s*commands\\s*::\\s*${name}\\b`,
+			"g",
+		);
+		const registrations = [...executableLib.matchAll(commandPath)];
+		const registeredInHandler =
+			handlerBodies.length === 1 &&
+			new RegExp(`\\bremote\\s*::\\s*commands\\s*::\\s*${name}\\b`).test(
+				handlerBodies[0][1],
+			);
+		if (registrations.length !== 1 || !registeredInHandler) {
+			failures.push(
+				`src-tauri/src/lib.rs must register remote::commands::${name} exactly once in generate_handler`,
+			);
+		}
+	}
+
+	return failures;
 }

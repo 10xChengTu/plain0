@@ -228,6 +228,14 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		debugDisassemble: vi.fn(),
 		debugOutputAck: vi.fn(),
 		debugWatchEvent: vi.fn(),
+		remoteSessionConnect: vi.fn(),
+		remoteHostKeyConfirm: vi.fn(),
+		remoteSessionConnectCancel: vi.fn(),
+		remoteSessionDisconnect: vi.fn(),
+		remoteSessionState: vi.fn(),
+		remoteHostKeyForget: vi.fn(),
+		remoteHostKeyList: vi.fn(),
+		remoteSessionWatchEvent: vi.fn(),
 		...overrides,
 	};
 }
@@ -428,6 +436,14 @@ describe("workspace Workbench command overrides", () => {
 			debugDisassemble: vi.fn(),
 			debugOutputAck: vi.fn(),
 			debugWatchEvent: vi.fn(),
+			remoteSessionConnect: vi.fn(),
+			remoteHostKeyConfirm: vi.fn(),
+			remoteSessionConnectCancel: vi.fn(),
+			remoteSessionDisconnect: vi.fn(),
+			remoteSessionState: vi.fn(),
+			remoteHostKeyForget: vi.fn(),
+			remoteHostKeyList: vi.fn(),
+			remoteSessionWatchEvent: vi.fn(),
 		};
 		const contextValues = new Map<string, unknown>([
 			["openFolderWorkspaceSupport", false],

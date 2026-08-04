@@ -169,11 +169,33 @@ const excludedIdPatterns: ReadonlyArray<ExcludedIdPattern> = [
  * the currently opened local repository; it cannot open a remote workspace,
  * start a tunnel, or reach any Remote Development service. Its command id is
  * locked independently by the F180 Git-management architecture contract.
- * Close spellings and the same id in a view/container remain denied. */
+ * Close spellings and the same id in a view/container remain denied.
+ *
+ * `F220` S1's own three `plain.remote.*` commands
+ * (`docs/decisions/0006-ssh-remote-workspace-trust.md`/
+ * `docs/decisions/0007-remote-workspace-capability.md`) are the second
+ * deliberate exception, for the identical reason: this pattern exists to
+ * keep upstream `@codingame/monaco-vscode-api`'s own dead Remote Development
+ * extension-host machinery (SSH/WSL/Containers via a *remote* Extension
+ * Host process) unreachable — see either ADR's own background section for
+ * "上游…Remote Development 死代码…不是本能力的任何部分,前端继续保持其不可达".
+ * `plain.remote.connect`/`plain.remote.disconnect`/`plain.remote.forgetHostKey`
+ * are a wholly separate, from-scratch Rust implementation
+ * (`src-tauri/src/remote/`, a pure-Rust `russh` SSH client the WebView never
+ * touches directly) that never imports, activates, or routes through any of
+ * that excluded machinery — confirmed by `validateRemoteSshLibraryOwnershipBoundary`
+ * (`scripts/plain/boundary-contracts.mjs`), which locks `russh` itself to
+ * that one Rust module tree. These three ids are locked independently by
+ * `validateRemoteCommandRegistration`'s own closed Rust-side command set. */
 const allowedExcludedIdCollisions: Readonly<
 	Partial<Record<keyof WorkbenchSurfaceSnapshot, ReadonlySet<string>>>
 > = Object.freeze({
-	commandIds: new Set(["plain.git.manageRemotes"]),
+	commandIds: new Set([
+		"plain.git.manageRemotes",
+		"plain.remote.connect",
+		"plain.remote.disconnect",
+		"plain.remote.forgetHostKey",
+	]),
 });
 
 function matchExcludedId(

@@ -232,6 +232,14 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		debugDisassemble: notImplemented,
 		debugOutputAck: notImplemented,
 		debugWatchEvent: notImplemented,
+		remoteSessionConnect: notImplemented,
+		remoteHostKeyConfirm: notImplemented,
+		remoteSessionConnectCancel: notImplemented,
+		remoteSessionDisconnect: notImplemented,
+		remoteSessionState: notImplemented,
+		remoteHostKeyForget: notImplemented,
+		remoteHostKeyList: notImplemented,
+		remoteSessionWatchEvent: notImplemented,
 		...overrides,
 	};
 }

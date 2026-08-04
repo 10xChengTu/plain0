@@ -40,6 +40,8 @@ import {
 	validateMainCapability,
 	validateMultiDiffEditorOverrideImportBoundary,
 	validateProductConfigurationBoundary,
+	validateRemoteCommandRegistration,
+	validateRemoteSshLibraryOwnershipBoundary,
 	validateSearchCommandRegistration,
 	validateSearchExpandReplacementsCommandRegistration,
 	validateSearchFileBudgetConstants,
@@ -962,6 +964,12 @@ for (const failure of validateDebugRunInTerminalBoundary(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateDebugAdapterConfirmationBoundary(appSources)) {
+	fail(failure);
+}
+for (const failure of validateRemoteSshLibraryOwnershipBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateRemoteCommandRegistration(rustSources)) {
 	fail(failure);
 }
 

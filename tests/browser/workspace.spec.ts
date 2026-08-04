@@ -510,6 +510,24 @@ interface TestUntitledFixture {
 	readonly persistScratchForTest?: boolean;
 }
 
+/** `F220` S1: deterministic `remote_session_connect`/`remote_host_key_confirm`/
+ * `remote_session_state`/`remote_host_key_list` responses — mirrors
+ * `app/platform/tauri/browser-mock.ts`'s own `BrowserMockRemoteFixtureForTest`,
+ * reproduced here for the reason every other `Test*Fixture` interface in this
+ * file is (see `installNativeIpcMock`'s own module doc comment: this file
+ * drives the real `native.ts` transport rather than reusing `browser-mock.ts`). */
+type TestRemoteConnectOutcome = "success" | "authRejected" | "connectTimedOut";
+interface TestRemoteFixture {
+	readonly pinnedHostsForTest?: readonly Readonly<{
+		host: string;
+		port: number;
+	}>[];
+	readonly connectOutcomesForTest?: Readonly<
+		Record<string, TestRemoteConnectOutcome>
+	>;
+	readonly changedHostKeyTargetsForTest?: readonly string[];
+}
+
 async function installNativeIpcMock(
 	page: Page,
 	rawReadTransport: RawReadTransport,
@@ -596,6 +614,11 @@ async function installNativeIpcMock(
 	// levers above) so every existing positional call site above this one
 	// keeps its exact argument index.
 	textSearchMaxFileSizeForTest: number | null = null,
+	// `F220` S1: seeds the mock's own in-memory SSH known-hosts pin store and
+	// scripts post-host-key-check connect outcomes. Only this slice's own
+	// remote SSH tests pass this; every other existing call site keeps the
+	// default (no pins, every target succeeds once past its host-key check).
+	remoteFixtureForTest: TestRemoteFixture = {},
 ): Promise<void> {
 	await page.addInitScript(
 		({
@@ -620,6 +643,7 @@ async function installNativeIpcMock(
 			trashOutcomesForTest,
 			trashBeginFailuresForTest,
 			terminalLifecycleMarkerForTest,
+			remoteFixtureForTest,
 		}) => {
 			const calls: Array<{
 				command: string;
@@ -2365,6 +2389,132 @@ async function installNativeIpcMock(
 			testWindow.__PLAIN_TEST_DEBUG_SESSION_IDS__ = () => [
 				...liveDebugSessions,
 			];
+			// `F220` S1 — the mock's own in-memory SSH known-hosts pin store and
+			// live session table, mirroring `app/platform/tauri/browser-mock.ts`'s
+			// own identical design (see that file's `remoteMockTargetKey`/
+			// `remoteMockFingerprint`/`remoteMockDigest` for the byte-for-byte
+			// twin of this logic).
+			let remoteSessionSerial = 901;
+			const nextRemoteSessionId = (): string =>
+				`00000000-0000-4000-8000-${(remoteSessionSerial++)
+					.toString()
+					.padStart(12, "0")}`;
+			function remoteMockTargetKey(host: string, port: number): string {
+				return `${host}:${port}`;
+			}
+			function remoteMockDigest(input: string): string {
+				let hash = 0x811c9dc5;
+				for (let index = 0; index < input.length; index += 1) {
+					hash ^= input.charCodeAt(index);
+					hash = Math.imul(hash, 0x01000193);
+				}
+				return (hash >>> 0).toString(16).padStart(8, "0");
+			}
+			function remoteMockFingerprint(
+				host: string,
+				port: number,
+				changed: boolean,
+			): string {
+				const digest = remoteMockDigest(
+					`${host}:${port}${changed ? ":changed" : ""}`,
+				);
+				return `SHA256:${digest.repeat(6)}`;
+			}
+			const remoteKnownHosts = new Map<
+				string,
+				{ algorithm: string; sha256Fingerprint: string }
+			>();
+			for (const target of remoteFixtureForTest.pinnedHostsForTest ?? []) {
+				remoteKnownHosts.set(remoteMockTargetKey(target.host, target.port), {
+					algorithm: "ssh-ed25519",
+					sha256Fingerprint: remoteMockFingerprint(
+						target.host,
+						target.port,
+						false,
+					),
+				});
+			}
+			const remoteSessions = new Map<
+				string,
+				{ host: string; port: number; user: string }
+			>();
+			function remoteAgentAuthRejected() {
+				return {
+					code: "REMOTE_AGENT_AUTH_REJECTED",
+					message: "The server rejected every identity the SSH agent offered.",
+				};
+			}
+			function remoteConnectTimedOut() {
+				return {
+					code: "REMOTE_CONNECT_TIMED_OUT",
+					message:
+						"Timed out waiting to establish an SSH connection to the requested host.",
+				};
+			}
+			function remoteHostKeyChanged(
+				host: string,
+				port: number,
+				algorithm: string,
+				oldFingerprint: string,
+				newFingerprint: string,
+			) {
+				return {
+					code: "REMOTE_HOST_KEY_CHANGED",
+					message:
+						`The host key for ${host}:${port} has changed. Previously pinned (${algorithm}): ` +
+						`${oldFingerprint}. Now offered: ${newFingerprint}. This may indicate the host was ` +
+						"reinstalled or a man-in-the-middle attack; the existing pin must be explicitly " +
+						"forgotten (Plain: Forget SSH Host Key…) before reconnecting.",
+				};
+			}
+			function remoteSessionNotFound() {
+				return {
+					code: "REMOTE_SESSION_NOT_FOUND",
+					message: "The requested SSH session does not exist for this window.",
+				};
+			}
+			function emitRemoteSessionEvent(payload: Record<string, unknown>): void {
+				for (const [eventId, registration] of eventHandlers) {
+					if (registration.event !== "plain://remote-session-event") {
+						continue;
+					}
+					const transformed = callbacks.get(registration.handlerId);
+					transformed?.callback({
+						event: registration.event,
+						id: eventId,
+						payload,
+					});
+					if (transformed?.once === true) {
+						callbacks.delete(registration.handlerId);
+					}
+				}
+			}
+			function remoteCompleteConnect(
+				host: string,
+				port: number,
+				user: string,
+			): Record<string, unknown> {
+				const outcome =
+					remoteFixtureForTest.connectOutcomesForTest?.[
+						remoteMockTargetKey(host, port)
+					] ?? "success";
+				if (outcome === "authRejected") {
+					throw remoteAgentAuthRejected();
+				}
+				if (outcome === "connectTimedOut") {
+					throw remoteConnectTimedOut();
+				}
+				const sessionId = nextRemoteSessionId();
+				remoteSessions.set(sessionId, { host, port, user });
+				emitRemoteSessionEvent({
+					event: "connected",
+					sessionId,
+					host,
+					port,
+					user,
+				});
+				return { status: "connected", sessionId };
+			}
 			// Expands this file's own deliberately-terse `TestGitStatusEntry`
 			// (`type`/`indexStatus`/`worktreeStatus`/`path`/`origPath` only) into
 			// the full `GitStatusEntryWire` shape `git-codec.ts`'s
@@ -4356,6 +4506,149 @@ async function installNativeIpcMock(
 							// mirroring `terminal_ack`'s own tolerant shape.
 							return null;
 						}
+						case "remote_session_connect": {
+							const connectRequest = args.request as
+								{ host?: string; port?: number; user?: string } | undefined;
+							const host = connectRequest?.host ?? "";
+							const port = connectRequest?.port ?? 0;
+							const user = connectRequest?.user ?? "";
+							const key = remoteMockTargetKey(host, port);
+							const pinned = remoteKnownHosts.get(key);
+							if (pinned === undefined) {
+								return {
+									status: "hostKeyPendingConfirmation",
+									algorithm: "ssh-ed25519",
+									sha256Fingerprint: remoteMockFingerprint(host, port, false),
+									knownHostsHit: false,
+								};
+							}
+							const changed =
+								remoteFixtureForTest.changedHostKeyTargetsForTest?.includes(
+									key,
+								) ?? false;
+							const liveFingerprint = remoteMockFingerprint(
+								host,
+								port,
+								changed,
+							);
+							if (liveFingerprint !== pinned.sha256Fingerprint) {
+								throw remoteHostKeyChanged(
+									host,
+									port,
+									pinned.algorithm,
+									pinned.sha256Fingerprint,
+									liveFingerprint,
+								);
+							}
+							return remoteCompleteConnect(host, port, user);
+						}
+						case "remote_host_key_confirm": {
+							const confirmRequest = args.request as
+								| {
+										host?: string;
+										port?: number;
+										user?: string;
+										algorithm?: string;
+										sha256Fingerprint?: string;
+								  }
+								| undefined;
+							const host = confirmRequest?.host ?? "";
+							const port = confirmRequest?.port ?? 0;
+							const user = confirmRequest?.user ?? "";
+							const algorithm = confirmRequest?.algorithm ?? "";
+							const sha256Fingerprint = confirmRequest?.sha256Fingerprint ?? "";
+							const key = remoteMockTargetKey(host, port);
+							remoteKnownHosts.set(key, { algorithm, sha256Fingerprint });
+							const changed =
+								remoteFixtureForTest.changedHostKeyTargetsForTest?.includes(
+									key,
+								) ?? false;
+							const liveFingerprint = remoteMockFingerprint(
+								host,
+								port,
+								changed,
+							);
+							if (liveFingerprint !== sha256Fingerprint) {
+								throw remoteHostKeyChanged(
+									host,
+									port,
+									algorithm,
+									sha256Fingerprint,
+									liveFingerprint,
+								);
+							}
+							return remoteCompleteConnect(host, port, user);
+						}
+						case "remote_session_connect_cancel": {
+							// Best-effort in production; this mock never has a
+							// genuinely in-flight connect to cancel (every case
+							// above resolves synchronously), so there is nothing to
+							// do — mirrors `browser-mock.ts`'s identical no-op.
+							return null;
+						}
+						case "remote_session_disconnect": {
+							const disconnectRequest = args.request as
+								{ sessionId?: string } | undefined;
+							const sessionId = disconnectRequest?.sessionId ?? "";
+							const session = remoteSessions.get(sessionId);
+							if (session === undefined) {
+								throw remoteSessionNotFound();
+							}
+							remoteSessions.delete(sessionId);
+							emitRemoteSessionEvent({
+								event: "disconnected",
+								sessionId,
+								host: session.host,
+								port: session.port,
+								user: session.user,
+								reason: "userRequested",
+							});
+							return null;
+						}
+						case "remote_session_state": {
+							const sessions = [...remoteSessions.entries()]
+								.map(([sessionId, session]) => ({
+									sessionId,
+									host: session.host,
+									port: session.port,
+									user: session.user,
+								}))
+								.sort((left, right) =>
+									left.host === right.host
+										? left.port - right.port
+										: left.host.localeCompare(right.host),
+								);
+							return { sessions };
+						}
+						case "remote_host_key_forget": {
+							const forgetRequest = args.request as
+								{ host?: string; port?: number } | undefined;
+							remoteKnownHosts.delete(
+								remoteMockTargetKey(
+									forgetRequest?.host ?? "",
+									forgetRequest?.port ?? 0,
+								),
+							);
+							return null;
+						}
+						case "remote_host_key_list": {
+							const entries = [...remoteKnownHosts.entries()]
+								.map(([key, entry]) => {
+									const separatorIndex = key.lastIndexOf(":");
+									return {
+										host: key.slice(0, separatorIndex),
+										port: Number(key.slice(separatorIndex + 1)),
+										algorithm: entry.algorithm,
+										sha256Fingerprint: entry.sha256Fingerprint,
+									};
+								})
+								.sort((left, right) =>
+									left.host === right.host
+										? left.port - right.port
+										: left.host.localeCompare(right.host),
+								);
+							return { entries };
+						}
 						case "terminal_profiles": {
 							return {
 								profiles: [
@@ -5696,6 +5989,7 @@ async function installNativeIpcMock(
 			trashOutcomesForTest,
 			trashBeginFailuresForTest,
 			terminalLifecycleMarkerForTest,
+			remoteFixtureForTest,
 		},
 	);
 }
@@ -24488,4 +24782,376 @@ test("persists local keybindings and settings through Rust-shaped IPC, reloads t
 
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);
+});
+
+// ---------------------------------------------------------------------
+// `F220` S1 — SSH session and host-key trust foundation. No workspace root
+// is opened for any of these: `plain.remote.*` commands never gate on one
+// (unlike `plain.debug.*`/`plain.search.*`), so `installNativeIpcMock`'s
+// fixed native root is deliberately left unselected throughout.
+// ---------------------------------------------------------------------
+
+/** Drives the three sequential `IQuickInputService.input` prompts "Plain:
+ * Connect to SSH Host…" shows (host, user, port) — the command palette
+ * entry point itself must already have been opened via
+ * `executePaletteCommandThatMayReopenAQuickInput` before calling this,
+ * exactly mirroring `F210` S4's own step-into-target picker precedent for a
+ * command whose own continuation immediately reopens the same
+ * `.quick-input-widget` shell. `port` left `undefined` accepts the
+ * command's own prefilled `"22"` default unchanged. */
+async function fillConnectToSshHostPrompts(
+	page: Page,
+	host: string,
+	user: string,
+	port?: string,
+): Promise<void> {
+	const palette = page.locator(".quick-input-widget");
+	await expect(palette).toBeVisible();
+	await expect(palette.locator("input")).toHaveAttribute(
+		"placeholder",
+		"example.com or 192.168.1.10",
+	);
+	await palette.locator("input").pressSequentially(host);
+	await page.keyboard.press("Enter");
+
+	await expect(palette).toBeVisible();
+	await expect(palette.locator("input")).toHaveAttribute(
+		"placeholder",
+		"octocat",
+	);
+	await palette.locator("input").pressSequentially(user);
+	await page.keyboard.press("Enter");
+
+	await expect(palette).toBeVisible();
+	await expect(palette.locator("input")).toHaveValue("22");
+	if (port !== undefined) {
+		await palette.locator("input").fill(port);
+	}
+	await page.keyboard.press("Enter");
+}
+
+test("Plain: Connect to SSH Host… shows the real algorithm and fingerprint for an unknown host, connects on confirmation, and shows a connected notification", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	const consoleErrors: string[] = [];
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		{},
+		[],
+		0,
+		0,
+		null,
+		{},
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Connect to SSH Host",
+		"Plain: Connect to SSH Host…",
+	);
+	await fillConnectToSshHostPrompts(page, "example.com", "octocat");
+
+	const confirmDialog = page.getByRole("dialog");
+	await expect(confirmDialog).toBeVisible();
+	await expect(confirmDialog).toContainText("example.com:22");
+	await expect(confirmDialog).toContainText("ssh-ed25519");
+	await expect(confirmDialog).toContainText("SHA256:");
+	await expect(confirmDialog).toContainText(
+		"not present in your own ~/.ssh/known_hosts",
+	);
+	await confirmDialog
+		.getByRole("button", { name: "Connect", exact: true })
+		.click();
+	await expect(confirmDialog).toHaveCount(0);
+
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	await expect(toasts).toHaveCount(1);
+	await expect(toasts.first()).toContainText(
+		"connected to octocat@example.com:22",
+	);
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("cancelling the SSH host-key confirmation dialog pins nothing and starts no session", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		{},
+		[],
+		0,
+		0,
+		null,
+		{},
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Connect to SSH Host",
+		"Plain: Connect to SSH Host…",
+	);
+	await fillConnectToSshHostPrompts(page, "example.com", "octocat");
+
+	const confirmDialog = page.getByRole("dialog");
+	await expect(confirmDialog).toBeVisible();
+	await confirmDialog
+		.getByRole("button", { name: "Cancel", exact: true })
+		.click();
+	await expect(confirmDialog).toHaveCount(0);
+
+	// Zero pin: forgetting a host that was never pinned is idempotent, but a
+	// real pin would still show up in the "Forget SSH Host Key…" picker —
+	// asserting an accurate "no pinned host keys" message here is a direct,
+	// user-visible proof that cancelling truly pinned nothing.
+	await executePaletteCommand(
+		page,
+		"Forget SSH Host Key",
+		"Plain: Forget SSH Host Key…",
+	);
+	const noHostKeysToast = page
+		.locator(".notifications-toasts .notification-toast")
+		.filter({ hasText: "no pinned SSH host keys" });
+	await expect(noHostKeysToast).toHaveCount(1);
+
+	// Zero session: the disconnect picker must report no live sessions.
+	await executePaletteCommand(
+		page,
+		"Disconnect SSH Session",
+		"Plain: Disconnect SSH Session…",
+	);
+	const noSessionsToast = page
+		.locator(".notifications-toasts .notification-toast")
+		.filter({ hasText: "no live SSH sessions" });
+	await expect(noSessionsToast).toHaveCount(1);
+
+	// No "connected" notification was ever shown.
+	await expect(
+		page
+			.locator(".notifications-toasts .notification-toast")
+			.filter({ hasText: "connected to" }),
+	).toHaveCount(0);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("a changed SSH host key hard-fails with both fingerprints and offers no bypass", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		{},
+		[],
+		0,
+		0,
+		null,
+		{
+			pinnedHostsForTest: [{ host: "example.com", port: 22 }],
+			changedHostKeyTargetsForTest: ["example.com:22"],
+		},
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Connect to SSH Host",
+		"Plain: Connect to SSH Host…",
+	);
+	await fillConnectToSshHostPrompts(page, "example.com", "octocat");
+
+	// A changed pinned key hard-fails immediately — never a confirmation
+	// dialog with a "connect anyway" escape hatch. Scoped to
+	// `.monaco-dialog-box` (the real `IDialogService.confirm` modal's own
+	// class) rather than a bare `page.getByRole("dialog")`: the real error
+	// notification toast this hard failure *does* legitimately show is
+	// itself an ARIA `role="dialog"` element, so that broader locator would
+	// also match it and prove nothing about a confirm-dialog bypass
+	// specifically. Asserting zero real confirm dialogs exist at all (not
+	// just that a specific button is absent from one) is the strongest
+	// available proof there is no bypass affordance anywhere.
+	await expect(page.locator(".monaco-dialog-box")).toHaveCount(0);
+
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	await expect(toasts).toHaveCount(1);
+	const errorToastText = await toasts.first().innerText();
+	expect(errorToastText).toContain("example.com:22");
+	expect(errorToastText).toContain("has changed");
+	expect(errorToastText).toContain("Previously pinned");
+	expect(errorToastText).toContain("Now offered");
+	// Two distinct fingerprints are both present (the unchanged and the
+	// `changed` mock digest never collide by construction).
+	const fingerprintMatches = [
+		...errorToastText.matchAll(/SHA256:[A-Za-z0-9]+/g),
+	];
+	expect(fingerprintMatches.length).toBe(2);
+	expect(fingerprintMatches[0]?.[0]).not.toBe(fingerprintMatches[1]?.[0]);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("Plain: Disconnect SSH Session… lists the live session, disconnects it, and shows an accurate notification", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		{},
+		[],
+		0,
+		0,
+		null,
+		{},
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Connect to SSH Host",
+		"Plain: Connect to SSH Host…",
+	);
+	await fillConnectToSshHostPrompts(page, "example.com", "octocat");
+	const confirmDialog = page.getByRole("dialog");
+	await expect(confirmDialog).toBeVisible();
+	await confirmDialog
+		.getByRole("button", { name: "Connect", exact: true })
+		.click();
+	await expect(confirmDialog).toHaveCount(0);
+	await expect(
+		page
+			.locator(".notifications-toasts .notification-toast")
+			.filter({ hasText: "connected to octocat@example.com:22" }),
+	).toHaveCount(1);
+
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Disconnect SSH Session",
+		"Plain: Disconnect SSH Session…",
+	);
+	const picker = page.locator(".quick-input-widget");
+	await expect(picker).toBeVisible();
+	await expect(picker.locator("input")).toHaveAttribute(
+		"placeholder",
+		"Select an SSH session to disconnect",
+	);
+	const sessionItem = picker
+		.locator(".quick-input-list .monaco-list-row")
+		.filter({ hasText: "octocat@example.com:22" });
+	await expect(sessionItem).toHaveCount(1);
+	await sessionItem.click();
+	await expect(picker).toBeHidden();
+
+	await expect(
+		page
+			.locator(".notifications-toasts .notification-toast")
+			.filter({ hasText: "disconnected from octocat@example.com:22" }),
+	).toHaveCount(1);
+
+	// A second "Disconnect SSH Session…" now reports no live sessions.
+	await executePaletteCommand(
+		page,
+		"Disconnect SSH Session",
+		"Plain: Disconnect SSH Session…",
+	);
+	await expect(
+		page
+			.locator(".notifications-toasts .notification-toast")
+			.filter({ hasText: "no live SSH sessions" }),
+	).toHaveCount(1);
+
+	expect(pageErrors).toEqual([]);
 });

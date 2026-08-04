@@ -13,6 +13,11 @@ export const TERMINAL_EXIT_EVENT = "plain://terminal-exit" as const;
  * `DebugEventPayload`'s own doc comment. Mirrors
  * `src-tauri/src/debug/commands.rs`'s `DEBUG_EVENT` constant. */
 export const DEBUG_EVENT = "plain://debug-event" as const;
+/** `F220` S1: every live SSH session's connected/disconnected notifications
+ * in this window — see `RemoteSessionEventPayload`'s own doc comment.
+ * Mirrors `src-tauri/src/remote/commands.rs`'s `REMOTE_SESSION_EVENT`
+ * constant. */
+export const REMOTE_SESSION_EVENT = "plain://remote-session-event" as const;
 export const NATIVE_CLOSE_REQUEST_EVENT = "plain://close-requested" as const;
 export const USER_DATA_CHANGED_EVENT = "plain://user-data-changed" as const;
 
@@ -2580,4 +2585,132 @@ export interface PlainBridge {
 	 * listener receives the full decoded event (including `sessionId`) and
 	 * must filter for the session(s) it cares about itself. */
 	debugWatchEvent(listener: (event: DebugEventPayload) => void): Unlisten;
+
+	// --- Remote SSH (F220 S1: session + host-key trust foundation) ---------
+
+	/** Connects to `host:port` as `user` — ADR 0006's own two-phase flow: an
+	 * unknown or changed host key never silently authenticates. A first-time
+	 * `(host, port)` resolves to `RemoteSessionConnectResult.status ===
+	 * "hostKeyPendingConfirmation"` (not a rejection — see that type's own
+	 * doc comment); a `(host, port)` already pinned and still matching
+	 * resolves straight to `"connected"`. A *changed* pinned key is a thrown
+	 * `REMOTE_HOST_KEY_CHANGED` error naming both fingerprints, never a
+	 * result variant — there is no bypass. */
+	remoteSessionConnect(
+		host: string,
+		port: number,
+		user: string,
+	): Promise<RemoteSessionConnectResult>;
+	/** Pins the exact `(algorithm, sha256Fingerprint)` a prior
+	 * `remoteSessionConnect`'s `"hostKeyPendingConfirmation"` response
+	 * reported, then immediately re-runs the connect flow against that pin —
+	 * see `RemoteSessionConnectResult`'s own doc comment for why the second
+	 * phase is a fresh handshake, not a cached continuation of the first. */
+	remoteHostKeyConfirm(
+		host: string,
+		port: number,
+		user: string,
+		algorithm: string,
+		sha256Fingerprint: string,
+	): Promise<RemoteSessionConnectResult>;
+	/** Best-effort: requests cancellation of whatever `remoteSessionConnect`/
+	 * `remoteHostKeyConfirm` call is currently in flight for this exact
+	 * `(host, port)` in this window — a no-op if none is. Never itself
+	 * resolves the in-flight call; that call's own `await` settles on its own
+	 * once the cancellation is actually observed. */
+	remoteSessionConnectCancel(host: string, port: number): Promise<void>;
+	/** Tears down a live session. */
+	remoteSessionDisconnect(sessionId: string): Promise<void>;
+	/** Lists every live SSH session in this window. */
+	remoteSessionState(): Promise<RemoteSessionStateResult>;
+	/** Deletes a pinned host-key entry — idempotent (forgetting a host that
+	 * was never pinned, or already forgotten, succeeds silently). */
+	remoteHostKeyForget(host: string, port: number): Promise<void>;
+	/** Lists every pinned host-key entry — the `Plain: Forget SSH Host Key…`
+	 * QuickPick's own data source. */
+	remoteHostKeyList(): Promise<RemoteHostKeyListResult>;
+	/** Registers a listener for every live SSH session's
+	 * `plain://remote-session-event` deliveries in this window — mirrors
+	 * `debugWatchEvent`'s own all-sessions-in-one-listener shape. */
+	remoteSessionWatchEvent(
+		listener: (event: RemoteSessionEventPayload) => void,
+	): Unlisten;
 }
+
+// --- Remote SSH (F220 S1: session + host-key trust foundation) -------------
+
+/**
+ * `remote_session_connect`/`remote_host_key_confirm`'s shared response.
+ * `"hostKeyPendingConfirmation"` is a normal, successful outcome — not an
+ * error — for a host Plain has never pinned before (or one whose pin was
+ * explicitly forgotten): no session exists yet, and the caller must show
+ * `algorithm`/`sha256Fingerprint` to the user and call `remoteHostKeyConfirm`
+ * with those exact values (or abandon the connect entirely) before any
+ * session can exist. A *changed* pinned key is never modeled here at all —
+ * see `PlainBridge.remoteSessionConnect`'s own doc comment: that case is
+ * always a thrown `REMOTE_HOST_KEY_CHANGED` error instead, with no bypass.
+ */
+export type RemoteSessionConnectResult =
+	| Readonly<{ status: "connected"; sessionId: string }>
+	| Readonly<{
+			status: "hostKeyPendingConfirmation";
+			algorithm: string;
+			sha256Fingerprint: string;
+			/** `true` when this exact `(host, port, algorithm, key)` also
+			 * matches an entry in the user's own read-only `~/.ssh/known_hosts`
+			 * reference (ADR 0006 §3) — purely informational; Plain's own
+			 * pinned store is still what actually governs trust. */
+			knownHostsHit: boolean;
+	  }>;
+
+/** One live session, as reported by `remoteSessionState` — enough to render
+ * a `user@host:port` label without a second round trip. */
+export interface RemoteSessionStateEntry {
+	readonly sessionId: string;
+	readonly host: string;
+	readonly port: number;
+	readonly user: string;
+}
+
+export interface RemoteSessionStateResult {
+	readonly sessions: readonly RemoteSessionStateEntry[];
+}
+
+/** One pinned known-hosts entry, as reported by `remoteHostKeyList`. */
+export interface RemoteHostKeyEntry {
+	readonly host: string;
+	readonly port: number;
+	readonly algorithm: string;
+	readonly sha256Fingerprint: string;
+}
+
+export interface RemoteHostKeyListResult {
+	readonly entries: readonly RemoteHostKeyEntry[];
+}
+
+/** Why a session ended — see `src-tauri/src/remote/dto.rs`'s
+ * `RemoteSessionDisconnectReason` doc comment for why `S1` only ever
+ * produces these two (an unexpected/passive transport closure needs a live
+ * channel or keepalive to observe, which this slice deliberately does not
+ * open yet). */
+export type RemoteSessionDisconnectReason = "userRequested" | "windowClosed";
+
+/** `plain://remote-session-event`'s decoded payload — a discriminated union
+ * tagged by `event`, matching `remote::dto::RemoteSessionEventPayload`'s
+ * exact `#[serde(tag = "event")]` shape. */
+export type RemoteSessionEventPayload =
+	| Readonly<{
+			event: "connected";
+			sessionId: string;
+			host: string;
+			port: number;
+			user: string;
+	  }>
+	| Readonly<{
+			event: "disconnected";
+			sessionId: string;
+			host: string;
+			port: number;
+			user: string;
+			reason: RemoteSessionDisconnectReason;
+	  }>;

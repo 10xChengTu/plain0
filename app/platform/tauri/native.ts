@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import {
 	DEBUG_EVENT,
 	NATIVE_CLOSE_REQUEST_EVENT,
+	REMOTE_SESSION_EVENT,
 	RUNTIME_READY_EVENT,
 	TERMINAL_DATA_EVENT,
 	TERMINAL_EXIT_EVENT,
@@ -108,6 +109,17 @@ import {
 	frozenDebugThreadRequest,
 	frozenDebugVariablesRequest,
 } from "./debug-codec";
+import {
+	decodeRemoteHostKeyListResult,
+	decodeRemoteSessionConnectResult,
+	decodeRemoteSessionEventPayload,
+	decodeRemoteSessionStateResult,
+	decodeRemoteVoid,
+	frozenRemoteHostKeyConfirmRequest,
+	frozenRemoteHostTargetRequest,
+	frozenRemoteSessionConnectRequest,
+	frozenRemoteSessionIdRequest,
+} from "./remote-codec";
 import {
 	decodeWorkspaceSearchExpandReplacementsResult,
 	decodeWorkspaceSearchFilesResult,
@@ -1524,6 +1536,75 @@ export function createNativeBridge(): PlainBridge {
 			let disposed = false;
 			void listen<unknown>(DEBUG_EVENT, (event) => {
 				listener(decodeDebugEventPayload(event.payload));
+			}).then((resolved) => {
+				if (disposed) {
+					void resolved();
+					return;
+				}
+				unlisten = resolved;
+			});
+			return () => {
+				disposed = true;
+				unlisten?.();
+			};
+		},
+		remoteSessionConnect: async (host, port, user) => {
+			const request = frozenRemoteSessionConnectRequest(host, port, user);
+			return decodeRemoteSessionConnectResult(
+				await invoke<unknown>("remote_session_connect", { request }),
+			);
+		},
+		remoteHostKeyConfirm: async (
+			host,
+			port,
+			user,
+			algorithm,
+			sha256Fingerprint,
+		) => {
+			const request = frozenRemoteHostKeyConfirmRequest(
+				host,
+				port,
+				user,
+				algorithm,
+				sha256Fingerprint,
+			);
+			return decodeRemoteSessionConnectResult(
+				await invoke<unknown>("remote_host_key_confirm", { request }),
+			);
+		},
+		remoteSessionConnectCancel: async (host, port) => {
+			const request = frozenRemoteHostTargetRequest(host, port);
+			decodeRemoteVoid(
+				await invoke<unknown>("remote_session_connect_cancel", { request }),
+			);
+		},
+		remoteSessionDisconnect: async (sessionId) => {
+			const request = frozenRemoteSessionIdRequest(sessionId);
+			decodeRemoteVoid(
+				await invoke<unknown>("remote_session_disconnect", { request }),
+			);
+		},
+		remoteSessionState: async () => {
+			return decodeRemoteSessionStateResult(
+				await invoke<unknown>("remote_session_state"),
+			);
+		},
+		remoteHostKeyForget: async (host, port) => {
+			const request = frozenRemoteHostTargetRequest(host, port);
+			decodeRemoteVoid(
+				await invoke<unknown>("remote_host_key_forget", { request }),
+			);
+		},
+		remoteHostKeyList: async () => {
+			return decodeRemoteHostKeyListResult(
+				await invoke<unknown>("remote_host_key_list"),
+			);
+		},
+		remoteSessionWatchEvent: (listener) => {
+			let unlisten: (() => void) | undefined;
+			let disposed = false;
+			void listen<unknown>(REMOTE_SESSION_EVENT, (event) => {
+				listener(decodeRemoteSessionEventPayload(event.payload));
 			}).then((resolved) => {
 				if (disposed) {
 					void resolved();

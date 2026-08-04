@@ -202,6 +202,39 @@ describe("excluded Workbench surfaces", () => {
 		]);
 	});
 
+	it("allows only the exact F220 S1 SSH remote-workspace command collisions", () => {
+		expect(
+			findExcludedWorkbenchSurfaces(
+				snapshot({
+					commandIds: [
+						"plain.remote.connect",
+						"plain.remote.disconnect",
+						"plain.remote.forgetHostKey",
+					],
+				}),
+			),
+		).toEqual([]);
+		expect(
+			findExcludedWorkbenchSurfaces(
+				snapshot({
+					commandIds: ["plain.remote.connect.tunnel"],
+					viewIds: ["plain.remote.connect"],
+				}),
+			),
+		).toEqual([
+			{
+				kind: "commandIds",
+				id: "plain.remote.connect.tunnel",
+				category: "remote development or tunnels",
+			},
+			{
+				kind: "viewIds",
+				id: "plain.remote.connect",
+				category: "remote development or tunnels",
+			},
+		]);
+	});
+
 	it("rejects excluded view containers and views", () => {
 		expect(
 			findExcludedWorkbenchSurfaces(

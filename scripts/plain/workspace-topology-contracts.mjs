@@ -266,6 +266,10 @@ const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 		relativePath: "app/features/search/plain-search-commands.ts",
 		count: 2,
 	}),
+	Object.freeze({
+		relativePath: "app/features/remote/plain-remote-ssh-commands.ts",
+		count: 3,
+	}),
 ]);
 
 // The pinned 35.0.1 packages expose deep wildcard modules, including modules
@@ -727,6 +731,12 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/debug/plain-debug-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
 	"app/features/debug/plain-debug-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service",
 	"app/features/debug/plain-debug-commands.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service",
+	"app/features/remote/plain-remote-ssh-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions",
+	"app/features/remote/plain-remote-ssh-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
+	"app/features/remote/plain-remote-ssh-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
+	"app/features/remote/plain-remote-ssh-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
+	"app/features/remote/plain-remote-ssh-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
+	"app/features/remote/plain-remote-ssh-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput",
 	"app/features/debug/plain-debug-root.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/base/browser/dom",
 	"app/features/debug/plain-debug-console-view.ts:@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration.service",

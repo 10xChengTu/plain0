@@ -554,6 +554,30 @@ function testBridge(
 		debugWatchEvent() {
 			throw new Error("unused");
 		},
+		async remoteSessionConnect() {
+			throw new Error("unused");
+		},
+		async remoteHostKeyConfirm() {
+			throw new Error("unused");
+		},
+		async remoteSessionConnectCancel() {
+			throw new Error("unused");
+		},
+		async remoteSessionDisconnect() {
+			throw new Error("unused");
+		},
+		async remoteSessionState() {
+			throw new Error("unused");
+		},
+		async remoteHostKeyForget() {
+			throw new Error("unused");
+		},
+		async remoteHostKeyList() {
+			throw new Error("unused");
+		},
+		remoteSessionWatchEvent() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

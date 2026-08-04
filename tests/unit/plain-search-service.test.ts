@@ -204,6 +204,14 @@ function fakeBridge(
 		debugDisassemble: notImplemented,
 		debugOutputAck: notImplemented,
 		debugWatchEvent: notImplemented,
+		remoteSessionConnect: notImplemented,
+		remoteHostKeyConfirm: notImplemented,
+		remoteSessionConnectCancel: notImplemented,
+		remoteSessionDisconnect: notImplemented,
+		remoteSessionState: notImplemented,
+		remoteHostKeyForget: notImplemented,
+		remoteHostKeyList: notImplemented,
+		remoteSessionWatchEvent: notImplemented,
 	};
 }
 
@@ -423,6 +431,14 @@ function fakeTextSearchBridge(
 		debugDisassemble: notImplemented,
 		debugOutputAck: notImplemented,
 		debugWatchEvent: notImplemented,
+		remoteSessionConnect: notImplemented,
+		remoteHostKeyConfirm: notImplemented,
+		remoteSessionConnectCancel: notImplemented,
+		remoteSessionDisconnect: notImplemented,
+		remoteSessionState: notImplemented,
+		remoteHostKeyForget: notImplemented,
+		remoteHostKeyList: notImplemented,
+		remoteSessionWatchEvent: notImplemented,
 	};
 
 	return {
