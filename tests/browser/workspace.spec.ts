@@ -13541,6 +13541,303 @@ test("excludes a node_modules directory from both Quick Open file search and Sea
 	expect(consoleErrors).toEqual([]);
 });
 
+// --- F200 S1: entry commands, keybindings and case/word toggles
+// (docs/research/2026-08-04-complete-search.md §"架构裁定 1") ---
+
+test("Cmd/Ctrl+Shift+F opens the Search view and focuses the search input with select-all semantics; both commands are visible and executable via the Command Palette", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+	// Lands on the Explorer view — the shortcut below must both reveal the
+	// Search view (not yet open) and move focus into it, not merely no-op on
+	// an already-visible view.
+	await openNativeWorkspaceExplorer(page);
+
+	await page.keyboard.press("ControlOrMeta+Shift+F");
+	const searchInput = page.locator(".plain-search-view-input");
+	await expect(searchInput).toBeVisible();
+	await expect(searchInput).toBeFocused();
+
+	// A repeat invocation with an existing query re-selects it (VS Code's own
+	// Cmd/Ctrl+F semantics): move focus elsewhere, type a value, press the
+	// shortcut again, then type one character — if the prior value was
+	// selected, that keystroke replaces it entirely rather than appending.
+	await searchInput.fill("stale-query");
+	await page.locator(".plain-search-view-replace-input").focus();
+	await page.keyboard.press("ControlOrMeta+Shift+F");
+	await expect(searchInput).toBeFocused();
+	await page.keyboard.type("x");
+	await expect(searchInput).toHaveValue("x");
+
+	// Both commands appear in and are executable from the Command Palette —
+	// "Search: Find in Files" re-focuses the search input, "Search: Replace
+	// in Files" moves focus to the replace input.
+	await executePaletteCommand(page, "Find in Files", "Search: Find in Files");
+	await expect(searchInput).toBeFocused();
+	await executePaletteCommand(
+		page,
+		"Replace in Files",
+		"Search: Replace in Files",
+	);
+	await expect(page.locator(".plain-search-view-replace-input")).toBeFocused();
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("Cmd/Ctrl+Shift+H opens the Search view and focuses the replace input with select-all semantics", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+	await openNativeWorkspaceExplorer(page);
+
+	await page.keyboard.press("ControlOrMeta+Shift+H");
+	const replaceInput = page.locator(".plain-search-view-replace-input");
+	await expect(replaceInput).toBeVisible();
+	await expect(replaceInput).toBeFocused();
+
+	// Same repeat-invocation select-all semantics as Cmd/Ctrl+Shift+F above,
+	// targeting the replace input instead.
+	await replaceInput.fill("stale-replacement");
+	await page.locator(".plain-search-view-input").focus();
+	await page.keyboard.press("ControlOrMeta+Shift+H");
+	await expect(replaceInput).toBeFocused();
+	await page.keyboard.type("y");
+	await expect(replaceInput).toHaveValue("y");
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+async function lastTextSearchStartRequest(
+	page: Page,
+): Promise<Record<string, unknown>> {
+	const calls = await page.evaluate(
+		() =>
+			(
+				window as unknown as {
+					__PLAIN_TEST_TAURI_CALLS__: readonly {
+						command: string;
+						args: Record<string, unknown>;
+					}[];
+				}
+			).__PLAIN_TEST_TAURI_CALLS__,
+	);
+	const starts = calls.filter(
+		(call) => call.command === "workspace_search_text_start",
+	);
+	const last = starts.at(-1);
+	if (last === undefined) {
+		throw new Error("no workspace_search_text_start call was recorded yet");
+	}
+	return last.args.request as Record<string, unknown>;
+}
+
+test("toggling Match Case and Match Whole Word sends the correct isCaseSensitive/isWordMatch request flags and narrows the result set accordingly", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	// Two files distinguished only by case, and two files distinguished only
+	// by whether "cat" is a whole word or a substring of "category" — lets a
+	// single toggle flip change which file group appears without changing the
+	// query text itself.
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"toggle-fixture/case-upper.txt": "Needle appears here\n",
+		"toggle-fixture/case-lower.txt": "needle appears here\n",
+		"toggle-fixture/word-substring.txt": "category appears here\n",
+		"toggle-fixture/word-whole.txt": "cat appears here\n",
+	});
+	await openNativeWorkspaceExplorer(page);
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	await expect(searchInput).toBeVisible();
+	const status = page.locator(".plain-search-view-status");
+	const fileGroups = page.locator(".plain-search-view-file");
+	const caseToggle = page.locator(".plain-search-view-case-toggle");
+	const wordToggle = page.locator(".plain-search-view-word-toggle");
+	await expect(caseToggle).toHaveAttribute("aria-pressed", "false");
+	await expect(wordToggle).toHaveAttribute("aria-pressed", "false");
+
+	// Case-insensitive (default off) finds both differently-cased files.
+	await searchInput.pressSequentially("needle");
+	await expect(status).toHaveText("2 results in 2 files", { timeout: 5_000 });
+	await expect(lastTextSearchStartRequest(page)).resolves.toMatchObject({
+		isCaseSensitive: false,
+		isWordMatch: false,
+	});
+
+	// Toggling Match Case reruns the already-present query automatically and
+	// narrows to only the exact-case file.
+	await caseToggle.click();
+	await expect(caseToggle).toHaveAttribute("aria-pressed", "true");
+	await expect(status).toHaveText("1 result in 1 file", { timeout: 5_000 });
+	await expect(lastTextSearchStartRequest(page)).resolves.toMatchObject({
+		isCaseSensitive: true,
+		isWordMatch: false,
+	});
+	await expect(
+		fileGroups.filter({ hasText: "toggle-fixture/case-lower.txt" }),
+	).toHaveCount(1);
+	await expect(
+		fileGroups.filter({ hasText: "toggle-fixture/case-upper.txt" }),
+	).toHaveCount(0);
+
+	// Turning Match Case back off restores the case-insensitive result set.
+	await caseToggle.click();
+	await expect(caseToggle).toHaveAttribute("aria-pressed", "false");
+	await expect(status).toHaveText("2 results in 2 files", { timeout: 5_000 });
+
+	// Whole-word: with the toggle off, "cat" matches both the substring
+	// inside "category" and the standalone word.
+	await searchInput.fill("");
+	await searchInput.pressSequentially("cat");
+	await expect(status).toHaveText("2 results in 2 files", { timeout: 5_000 });
+	await expect(lastTextSearchStartRequest(page)).resolves.toMatchObject({
+		isCaseSensitive: false,
+		isWordMatch: false,
+	});
+
+	await wordToggle.click();
+	await expect(wordToggle).toHaveAttribute("aria-pressed", "true");
+	await expect(status).toHaveText("1 result in 1 file", { timeout: 5_000 });
+	await expect(lastTextSearchStartRequest(page)).resolves.toMatchObject({
+		isCaseSensitive: false,
+		isWordMatch: true,
+	});
+	await expect(
+		fileGroups.filter({ hasText: "toggle-fixture/word-whole.txt" }),
+	).toHaveCount(1);
+	await expect(
+		fileGroups.filter({ hasText: "toggle-fixture/word-substring.txt" }),
+	).toHaveCount(0);
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("case-sensitivity and whole-word toggles default off, matching pre-F200 case-insensitive substring behavior exactly", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"regression/mixed-case.txt": "Needle line\n",
+		"regression/substring.txt": "categorization\n",
+	});
+	await openNativeWorkspaceExplorer(page);
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	await expect(searchInput).toBeVisible();
+	const status = page.locator(".plain-search-view-status");
+	const fileGroups = page.locator(".plain-search-view-file");
+	await expect(page.locator(".plain-search-view-case-toggle")).toHaveAttribute(
+		"aria-pressed",
+		"false",
+	);
+	await expect(page.locator(".plain-search-view-word-toggle")).toHaveAttribute(
+		"aria-pressed",
+		"false",
+	);
+
+	// Lowercase "needle" still matches the differently-cased file, exactly
+	// like every pre-F200 search (no accidental default case sensitivity).
+	await searchInput.pressSequentially("needle");
+	await expect(status).toHaveText("1 result in 1 file", { timeout: 5_000 });
+	await expect(
+		fileGroups.filter({ hasText: "regression/mixed-case.txt" }),
+	).toHaveCount(1);
+
+	// "cat" still matches as a substring inside "categorization", exactly
+	// like every pre-F200 search (no accidental default word-boundary
+	// narrowing).
+	await searchInput.fill("");
+	await searchInput.pressSequentially("cat");
+	await expect(status).toHaveText("1 result in 1 file", { timeout: 5_000 });
+	await expect(
+		fileGroups.filter({ hasText: "regression/substring.txt" }),
+	).toHaveCount(1);
+
+	const calls = await page.evaluate(
+		() =>
+			(
+				window as unknown as {
+					__PLAIN_TEST_TAURI_CALLS__: readonly {
+						command: string;
+						args: Record<string, unknown>;
+					}[];
+				}
+			).__PLAIN_TEST_TAURI_CALLS__,
+	);
+	const starts = calls.filter(
+		(call) => call.command === "workspace_search_text_start",
+	);
+	expect(starts.length).toBeGreaterThanOrEqual(2);
+	for (const call of starts) {
+		expect(call.args.request).toMatchObject({
+			isCaseSensitive: false,
+			isWordMatch: false,
+		});
+	}
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
 async function workbenchThemeState(
 	page: Page,
 ): Promise<{ classNames: readonly string[]; editorBackground: string }> {

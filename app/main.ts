@@ -37,6 +37,7 @@ import {
 	createPlainUserDataFileSystemProvider,
 	PLAIN_USER_DATA_SCHEME,
 } from "./features/preferences/user-data-file-system-provider";
+import { registerPlainSearchCommands } from "./features/search/plain-search-commands";
 import "./features/search/search-contribution";
 import "./features/terminal/terminal-contribution";
 import { registerPlainTerminalCommands } from "./features/terminal/plain-terminal-commands";
@@ -174,6 +175,8 @@ async function bootstrap(): Promise<void> {
 		ReturnType<typeof registerPlainProductIconThemePicker> | undefined;
 	let terminalCommandsRegistration:
 		ReturnType<typeof registerPlainTerminalCommands> | undefined;
+	let searchCommandsRegistration:
+		ReturnType<typeof registerPlainSearchCommands> | undefined;
 	let scmCommandsRegistration:
 		ReturnType<typeof registerPlainScmCommands> | undefined;
 	let gitBlameContributionRegistration:
@@ -202,6 +205,7 @@ async function bootstrap(): Promise<void> {
 			fileIconThemePickerRegistration?.dispose();
 			productIconThemePickerRegistration?.dispose();
 			terminalCommandsRegistration?.dispose();
+			searchCommandsRegistration?.dispose();
 			scmCommandsRegistration?.dispose();
 			gitBlameContributionRegistration?.dispose();
 			debugCommandsRegistration?.dispose();
@@ -300,6 +304,7 @@ async function bootstrap(): Promise<void> {
 	);
 	preferenceCommandsRegistration = registerPlainPreferenceCommands();
 	terminalCommandsRegistration = registerPlainTerminalCommands();
+	searchCommandsRegistration = registerPlainSearchCommands();
 	scmCommandsRegistration = registerPlainScmCommands(bridge);
 	// `F090` S0: inline blame decoration + hover + age heatmap — see
 	// `plain-git-blame-contribution.ts`'s own module doc comment.

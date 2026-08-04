@@ -262,6 +262,10 @@ const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 		relativePath: "app/features/debug/plain-debug-commands.ts",
 		count: 3,
 	}),
+	Object.freeze({
+		relativePath: "app/features/search/plain-search-commands.ts",
+		count: 2,
+	}),
 ]);
 
 // The pinned 35.0.1 packages expose deep wildcard modules, including modules
@@ -409,6 +413,12 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/scm/scm-contribution.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/common/views",
 	"app/features/search/plain-replace-coordinator.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/search/plain-replace-coordinator.ts:@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/bulkEditService",
+	"app/features/search/plain-search-commands.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/keyCodes",
+	"app/features/search/plain-search-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions",
+	"app/features/search/plain-search-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
+	"app/features/search/plain-search-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/keybinding/common/keybindingsRegistry",
+	"app/features/search/plain-search-commands.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search",
+	"app/features/search/plain-search-commands.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/views/common/viewsService.service",
 	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/cancellation",
 	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/glob",
 	"app/features/search/plain-search-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
@@ -6227,7 +6237,9 @@ function validateTopologyAuthority(authority) {
 							(sourceFile.fileName ===
 								"app/features/workspace/untitled-workflow.ts" ||
 								sourceFile.fileName ===
-									"app/features/workspace/local-workflow-commands.ts") &&
+									"app/features/workspace/local-workflow-commands.ts" ||
+								sourceFile.fileName ===
+									"app/features/search/plain-search-commands.ts") &&
 							name === "KeybindingsRegistry"
 						)
 					);

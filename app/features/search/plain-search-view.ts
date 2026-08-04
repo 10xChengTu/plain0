@@ -35,6 +35,10 @@ import {
 	replaceSearchMatches,
 	type ReplaceTarget,
 } from "./plain-replace-coordinator";
+import {
+	buildSearchContentPattern,
+	toggleAriaPressed,
+} from "./plain-search-toggles";
 
 // `INotificationService.prompt`'s enum is a default export, while Plain's
 // closed import authority intentionally forbids default imports from the
@@ -93,6 +97,21 @@ const ERROR_NOTIFICATION_SEVERITY = 3 as const;
  * provider vs. the vendor base class's open-editor override) and why each
  * needs a different range source, never the preview-relative coordinates
  * already used to render `previewText`.
+ *
+ * `F200` S1 adds the entry surface: `focusSearchInput`/`focusReplaceInput`
+ * (called from `plain-search-commands.ts`'s `Search: Find/Replace in Files`
+ * commands, `Cmd/Ctrl+Shift+F`/`Cmd/Ctrl+Shift+H`) and two toolbar toggle
+ * buttons — case-sensitivity and whole-word — wired into the same debounced
+ * `scheduleSearch` path the pattern input and regex checkbox already used, so
+ * a toggle flip while a query is present re-runs it. Both toggles are
+ * session-only DOM state (`aria-pressed`, reset on every fresh render); see
+ * `./plain-search-toggles.ts`'s `toggleAriaPressed`/`buildSearchContentPattern`
+ * — the two pure functions this slice extracted into their own
+ * DOM-import-free module specifically so their logic has vitest coverage
+ * independent of both the full `ViewPane` construction *and* this file's own
+ * `@codingame/monaco-vscode-api/vscode/vs/base/browser/dom` import (which
+ * touches the global `window` at module-import time — fatal to a plain Node
+ * `vitest` run; see that module's own doc comment).
  */
 
 /**
@@ -242,6 +261,30 @@ export class PlainSearchView extends ViewPane {
 			document.createTextNode("Use Regular Expression"),
 		);
 
+		// `F200` S1: case-sensitivity and whole-word toggles, styled and behaved
+		// like the terminal find widget's own "Aa" button (`plain-terminal-
+		// pane.ts`'s `#buildFindWidget`) rather than a checkbox — a `<button>`
+		// with `aria-pressed` reflecting on/off, flipped by `toggleAriaPressed`
+		// (see that function's own doc comment for why it is a standalone,
+		// unit-tested pure function). Session-only state: both buttons reset to
+		// `aria-pressed="false"` every time this view is (re)constructed, and
+		// neither is ever read from or written to persisted configuration —
+		// `docs/research/2026-08-04-complete-search.md` §"架构裁定 1" froze this
+		// as in-memory-only, deliberately not a new settings surface.
+		const caseToggle = document.createElement("button");
+		caseToggle.type = "button";
+		caseToggle.className = "plain-search-view-case-toggle";
+		caseToggle.setAttribute("aria-label", "Match Case");
+		caseToggle.setAttribute("aria-pressed", "false");
+		caseToggle.textContent = "Aa";
+
+		const wordToggle = document.createElement("button");
+		wordToggle.type = "button";
+		wordToggle.className = "plain-search-view-word-toggle";
+		wordToggle.setAttribute("aria-label", "Match Whole Word");
+		wordToggle.setAttribute("aria-pressed", "false");
+		wordToggle.textContent = "ab|";
+
 		const replaceInput = document.createElement("input");
 		replaceInput.type = "text";
 		replaceInput.className = "plain-search-view-replace-input";
@@ -273,6 +316,8 @@ export class PlainSearchView extends ViewPane {
 		container.append(
 			input,
 			regexLabel,
+			caseToggle,
+			wordToggle,
 			replaceInput,
 			replaceAllButton,
 			status,
@@ -304,19 +349,78 @@ export class PlainSearchView extends ViewPane {
 			}
 			const pattern = input.value;
 			const isRegExp = regexToggle.checked;
+			const isCaseSensitive =
+				caseToggle.getAttribute("aria-pressed") === "true";
+			const isWordMatch = wordToggle.getAttribute("aria-pressed") === "true";
 			debounceHandle = setTimeout(() => {
-				void this.runSearch(pattern, isRegExp, status, messages, results);
+				void this.runSearch(
+					pattern,
+					isRegExp,
+					isCaseSensitive,
+					isWordMatch,
+					status,
+					messages,
+					results,
+				);
 			}, 200);
 		};
 		this._register(addDisposableListener(input, "input", scheduleSearch));
 		this._register(
 			addDisposableListener(regexToggle, "change", scheduleSearch),
 		);
+		// Case/word toggles reuse the exact same debounced `scheduleSearch` path
+		// as the pattern input and the regex checkbox above — flipping one of
+		// them while a query is already present re-runs that query with the new
+		// flag (F200 S1's "切换后若已有查询自动重跑" contract), and while the
+		// input is empty it is a no-op, matching `runSearch`'s own early return
+		// for an empty pattern.
+		this._register(
+			addDisposableListener(caseToggle, "click", () => {
+				caseToggle.setAttribute(
+					"aria-pressed",
+					String(toggleAriaPressed(caseToggle.getAttribute("aria-pressed"))),
+				);
+				scheduleSearch();
+			}),
+		);
+		this._register(
+			addDisposableListener(wordToggle, "click", () => {
+				wordToggle.setAttribute(
+					"aria-pressed",
+					String(toggleAriaPressed(wordToggle.getAttribute("aria-pressed"))),
+				);
+				scheduleSearch();
+			}),
+		);
+	}
+
+	/**
+	 * `F200` S1: `Search: Find in Files` (`plain-search-commands.ts`) routes
+	 * here after opening/revealing this view. Focuses the search input and
+	 * selects its full existing value — VS Code's own `Cmd/Ctrl+F` semantics,
+	 * so a repeat invocation with an existing query re-selects it (ready to be
+	 * overwritten by typing) instead of leaving the caret wherever it was.
+	 * `#searchInput` is only ever `undefined` before `renderBody` has run once,
+	 * which cannot happen here since `IViewsService.openView` does not resolve
+	 * until the view has rendered.
+	 */
+	focusSearchInput(): void {
+		this.#searchInput?.focus();
+		this.#searchInput?.select();
+	}
+
+	/** `Search: Replace in Files`'s counterpart to `focusSearchInput` — same
+	 * focus+select-all semantics, targeting the replace input instead. */
+	focusReplaceInput(): void {
+		this.#replaceInput?.focus();
+		this.#replaceInput?.select();
 	}
 
 	private async runSearch(
 		pattern: string,
 		isRegExp: boolean,
+		isCaseSensitive: boolean,
+		isWordMatch: boolean,
 		status: HTMLElement,
 		messages: HTMLElement,
 		results: HTMLElement,
@@ -384,7 +488,11 @@ export class PlainSearchView extends ViewPane {
 				{
 					type: QueryType.Text,
 					folderQueries,
-					contentPattern: { pattern, isRegExp },
+					contentPattern: buildSearchContentPattern(pattern, {
+						isRegExp,
+						isCaseSensitive,
+						isWordMatch,
+					}),
 					excludePattern,
 				},
 				tokenSource.token,
