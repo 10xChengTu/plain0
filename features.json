@@ -1250,13 +1250,47 @@
 			"id": "F230",
 			"name": "Non-release end-to-end completion audit",
 			"phase": 6,
-			"status": "in_progress",
+			"status": "complete",
 			"acceptance": [
 				"Every non-release requirement is mapped to current executable evidence",
 				"Unit integration Browser and real Tauri evidence tiers are reported separately",
 				"No excluded AI account sync general extension host or language-runtime surface is reachable",
 				"The repository is clean and every completed work item is independently committed"
-			]
+			],
+			"evidence": {
+				"commands": ["pnpm check", "pnpm test:e2e:browser"],
+				"results": [
+					"The audit ran as a parallel read-only sweep over ten domains plus an adversarial completeness critic, published as docs/completion-audit.md: a 187-row requirement-by-tier matrix mapping every product-scope promise and every F010-F220 acceptance line to Rust, frontend, Browser and real-desktop evidence. After remediation the matrix counts 127 achieved, 33 achieved-automated-pending-desktop, 27 narrowed with recorded provenance and 0 unresolved gaps.",
+					"The audit surfaced nine real findings. Four were fixed in place (itemized trust-consent wording per product-scope and ADR 0003, hostile-mutation tests for seven previously untested architecture validators, a stale guard message derived dynamically, stale E2E-025 handover wording) and five were honestly registered as platformGaps on their owning features (Monaco editing sub-capability evidence, layout persistence, bundled TextMate grammars, commit search, DAP threads). Final gates: 117 frontend test files with 2326 tests, 1562/1562 Rust tests, 192/192 Browser scenarios, a 2206-module build, architecture over 125 app and 210 Rust sources with 17 pinned dependencies, the 2021-source bundle audit with 53 tracked debt sources and clean notices."
+				],
+				"nativeScenarios": [
+					"E2E-001 through E2E-024 are completed real-desktop evidence and are cited per matrix row where applicable.",
+					"E2E-025, E2E-026, E2E-027 and E2E-028 remain registered and pending as the user-directed batched desktop matrix; the audit reports that tier separately and never counts a pending entry as executed."
+				],
+				"platformGaps": [
+					"The four batched desktop matrices are still pending execution; rows depending on them are reported as achieved-automated-pending-desktop rather than achieved.",
+					"The five registered known gaps live as platformGaps entries on F030, F050, F090, F100 and F170 and remain candidate follow-up features.",
+					"Release signing, notarization, DMG, Windows/Linux packaging, application icons and legal confirmation stay outside this non-release phase as recorded throughout."
+				],
+				"acceptanceResults": [
+					{
+						"acceptance": "Every non-release requirement is mapped to current executable evidence",
+						"result": "Achieved. docs/completion-audit.md maps product-scope and all F010-F220 acceptance lines across 187 matrix rows; an adversarial critic verified coverage, its six discovered mapping omissions (including all four F150 lines) were backfilled, and every row cites concrete tests, scenarios or recorded narrowings."
+					},
+					{
+						"acceptance": "Unit integration Browser and real Tauri evidence tiers are reported separately",
+						"result": "Achieved. Every matrix row carries four explicit tier columns; the desktop tier distinguishes completed E2E-001-024 entries from the pending batched E2E-025-028 matrices, which are never reported as executed."
+					},
+					{
+						"acceptance": "No excluded AI account sync general extension host or language-runtime surface is reachable",
+						"result": "Achieved. The exclusion audit re-verified the 53-source bundle floors and category rationales, the runtime excluded-surface policy including its two precise allowlist exceptions, the architecture validator inventory now fully backed by hostile-mutation tests, and dependency-level greps confirming no AI, account, sync, extension-host or language-runtime SDKs."
+					},
+					{
+						"acceptance": "The repository is clean and every completed work item is independently committed",
+						"result": "Achieved. The integrity domain verified a clean working tree, resolved every slice commit hash recorded in progress.md from F140 onward against git history with matching subjects, and confirmed the machine-checked feature contract passes with complete evidence on every closed feature."
+					}
+				]
+			}
 		}
 	]
 }
