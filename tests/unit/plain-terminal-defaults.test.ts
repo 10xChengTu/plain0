@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
 	DEFAULT_TERMINAL_FUTURE_TAB_DEFAULTS,
+	REMOTE_DEFAULT_SHELL_PROFILE_LABEL,
+	REMOTE_TERMINAL_CWD_DISABLED_TITLE,
+	REMOTE_TERMINAL_FUTURE_TAB_DEFAULTS,
+	REMOTE_TERMINAL_PROFILE_DISABLED_TITLE,
 	TERMINAL_DEFAULT_CWD_CONFIG_KEY,
 	TERMINAL_DEFAULT_PROFILE_CONFIG_KEY,
 	TERMINAL_DEFAULT_PROFILE_FALLBACK_ID,
@@ -128,5 +132,33 @@ describe("configuration key constants", () => {
 			"plain.terminal.defaultProfile",
 		);
 		expect(TERMINAL_DEFAULT_CWD_CONFIG_KEY).toBe("plain.terminal.cwd");
+	});
+});
+
+describe("F220 S5 REMOTE_TERMINAL_FUTURE_TAB_DEFAULTS", () => {
+	it("forces the systemDefault profile and a null cwd, matching what terminal::service::start_remote requires", () => {
+		expect(REMOTE_TERMINAL_FUTURE_TAB_DEFAULTS).toEqual({
+			kind: "ok",
+			profileId: TERMINAL_DEFAULT_PROFILE_FALLBACK_ID,
+			cwd: null,
+		});
+	});
+
+	it("is frozen (cannot be mutated by a careless caller)", () => {
+		expect(Object.isFrozen(REMOTE_TERMINAL_FUTURE_TAB_DEFAULTS)).toBe(true);
+	});
+
+	it("is a distinct object from the local DEFAULT_TERMINAL_FUTURE_TAB_DEFAULTS (never accidentally aliased)", () => {
+		expect(REMOTE_TERMINAL_FUTURE_TAB_DEFAULTS).not.toBe(
+			DEFAULT_TERMINAL_FUTURE_TAB_DEFAULTS,
+		);
+	});
+});
+
+describe("F220 S5 remote-root control copy", () => {
+	it("exposes a non-empty, stable label and tooltip text for the disabled profile/cwd controls", () => {
+		expect(REMOTE_DEFAULT_SHELL_PROFILE_LABEL.length).toBeGreaterThan(0);
+		expect(REMOTE_TERMINAL_PROFILE_DISABLED_TITLE.length).toBeGreaterThan(0);
+		expect(REMOTE_TERMINAL_CWD_DISABLED_TITLE.length).toBeGreaterThan(0);
 	});
 });

@@ -21,12 +21,17 @@ import type {
 	PlainBridge,
 	TerminalProfile,
 } from "../../platform/tauri/contracts";
+import { isKnownRemoteRootId } from "../remote/plain-remote-workspace-commands";
 import {
 	PlainWorkspaceRootSelection,
 	plainWorkspaceRootsFromFolders,
 	type PlainWorkspaceRoot,
 } from "../workspace/plain-workspace-roots";
 import {
+	REMOTE_DEFAULT_SHELL_PROFILE_LABEL,
+	REMOTE_TERMINAL_CWD_DISABLED_TITLE,
+	REMOTE_TERMINAL_FUTURE_TAB_DEFAULTS,
+	REMOTE_TERMINAL_PROFILE_DISABLED_TITLE,
 	TERMINAL_DEFAULT_CWD_CONFIG_KEY,
 	TERMINAL_DEFAULT_PROFILE_CONFIG_KEY,
 	TERMINAL_DEFAULT_PROFILE_FALLBACK_ID,
@@ -479,8 +484,13 @@ export class PlainTerminalView extends ViewPane {
 		// `F190` S2: computed exactly once, here, and frozen onto the new
 		// tab/pane — a later change to the profile/cwd controls must never
 		// redirect this tab (see `#resolveFutureTabDefaults`'s own doc
-		// comment).
-		const defaults = this.#resolveFutureTabDefaults();
+		// comment). `F220` S5: a remote root always freezes the fixed remote
+		// defaults instead — never whatever the (disabled, for a remote root)
+		// profile/cwd controls' persisted configuration currently holds; see
+		// `REMOTE_TERMINAL_FUTURE_TAB_DEFAULTS`'s own doc comment.
+		const defaults = isKnownRemoteRootId(root.rootId)
+			? REMOTE_TERMINAL_FUTURE_TAB_DEFAULTS
+			: this.#resolveFutureTabDefaults();
 		const { tabId, paneId } = this.#tabsModel.createTab(root, defaults);
 		this.#createTabRecord(tabId);
 		this.#createPane(paneId, tabId, undefined, root.rootId, defaults);
@@ -791,6 +801,44 @@ export class PlainTerminalView extends ViewPane {
 		selector.replaceChildren(...options);
 		selector.value = selected?.rootId ?? "";
 		selector.disabled = roots.length < 2;
+		// `F220` S5: the profile/cwd controls must always reflect *this*
+		// selection, not whatever they showed before it changed — every path
+		// that can change which root is selected re-renders this selector
+		// (the selector's own `change` listener, `openNewTab`, initial mount),
+		// so re-syncing them here covers all of those in one place.
+		this.#renderProfileSelector(this.#currentRootIsRemote());
+		this.#renderCwdControlAvailability(this.#currentRootIsRemote());
+	}
+
+	/** `F220` S5: whether the currently *selected* root (not necessarily any
+	 * already-running tab's own frozen root) is remote-backed — see
+	 * `isKnownRemoteRootId`'s own doc comment for why this is a plain
+	 * boolean query rather than a richer accessor. `undefined` (no root
+	 * selected, e.g. an empty or ambiguous multi-root workspace) is never
+	 * remote. */
+	#currentRootIsRemote(): boolean {
+		const selected = this.#rootSelection.resolve(this.#workspaceRoots());
+		return selected !== undefined && isKnownRemoteRootId(selected.rootId);
+	}
+
+	/** `F220` S5: disables the cwd input (with an explanatory `title`) for a
+	 * remote root — a remote terminal always starts at the remote user's own
+	 * home directory in this v1 slice (see
+	 * `terminal::service::TerminalService::start_remote`'s own doc comment),
+	 * so there is nothing a cwd override could do there. Mirrors
+	 * `#renderProfileSelector`'s identical disabled-with-tooltip shape for
+	 * the profile control. */
+	#renderCwdControlAvailability(isRemote: boolean): void {
+		const input = this.#cwdInputElement;
+		if (input === undefined) {
+			return;
+		}
+		input.disabled = isRemote;
+		if (isRemote) {
+			input.title = REMOTE_TERMINAL_CWD_DISABLED_TITLE;
+		} else {
+			input.removeAttribute("title");
+		}
 	}
 
 	/** Populates the two future-tab-default controls' initial values from
@@ -810,12 +858,13 @@ export class PlainTerminalView extends ViewPane {
 			cwdInput.value = typeof configuredCwd === "string" ? configuredCwd : "";
 			this.#renderCwdValidation(validateFutureTabCwdInput(cwdInput.value));
 		}
-		this.#renderProfileSelector();
+		this.#renderCwdControlAvailability(this.#currentRootIsRemote());
+		this.#renderProfileSelector(this.#currentRootIsRemote());
 		requireTerminalBridge()
 			.terminalProfiles()
 			.then((result) => {
 				this.#availableProfiles = result.profiles;
-				this.#renderProfileSelector();
+				this.#renderProfileSelector(this.#currentRootIsRemote());
 			})
 			.catch(() => {
 				// The profile dropdown's own System-Default-only fallback (see
@@ -834,12 +883,31 @@ export class PlainTerminalView extends ViewPane {
 	 * shown instead — the WebView never invents a profile id of its own),
 	 * then selects whichever option matches the currently configured
 	 * default (falling back to the fallback id if the configured value does
-	 * not match any known profile — e.g. a profile no longer installed). */
-	#renderProfileSelector(): void {
+	 * not match any known profile — e.g. a profile no longer installed).
+	 *
+	 * `F220` S5: `isRemote` short-circuits all of that — a remote root shows
+	 * exactly one fixed, disabled option ({@link REMOTE_DEFAULT_SHELL_PROFILE_LABEL})
+	 * instead, regardless of `#availableProfiles` or persisted configuration
+	 * (v1 does no remote profile enumeration; see `REMOTE_TERMINAL_FUTURE_TAB_DEFAULTS`'s
+	 * own doc comment for why the *value* actually spawned with is forced the
+	 * same way, independently of this rendering). */
+	#renderProfileSelector(isRemote: boolean): void {
 		const select = this.#profileSelectElement;
 		if (select === undefined) {
 			return;
 		}
+		if (isRemote) {
+			const option = document.createElement("option");
+			option.value = TERMINAL_DEFAULT_PROFILE_FALLBACK_ID;
+			option.textContent = REMOTE_DEFAULT_SHELL_PROFILE_LABEL;
+			select.replaceChildren(option);
+			select.value = TERMINAL_DEFAULT_PROFILE_FALLBACK_ID;
+			select.disabled = true;
+			select.title = REMOTE_TERMINAL_PROFILE_DISABLED_TITLE;
+			return;
+		}
+		select.disabled = false;
+		select.removeAttribute("title");
 		const profiles: readonly TerminalProfile[] =
 			this.#availableProfiles.length > 0
 				? this.#availableProfiles

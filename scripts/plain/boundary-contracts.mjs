@@ -7251,9 +7251,9 @@ const TERMINAL_COMMAND_CONTRACTS = Object.freeze([
 		file: "src-tauri/src/terminal/commands.rs",
 		name: "terminal_start",
 		parameters:
-			"window:WebviewWindow,terminal:State<'_,TerminalService>,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:TerminalStartRequest",
+			"window:WebviewWindow,terminal:State<'_,TerminalService>,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,remote:State<'_,RemoteSessionService>,request:TerminalStartRequest",
 		returnType: "->Result<TerminalStartResult,CommandError>",
-		body: "letquery=request.into_parts()?;letsink:Arc<dynTerminalOutputSink>=Arc::new(WindowEmitSink{app:window.app_handle().clone(),window_label:window.label().to_owned(),});let(session_id,shell_integration)=terminal.inner().start(trust.inner(),workspace.inner(),window.label(),query.root_id,query.profile_id,query.cwd,query.cols,query.rows,sink,).await?;Ok(TerminalStartResult::new(session_id,shell_integration))",
+		body: "letquery=request.into_parts()?;letsink:Arc<dynTerminalOutputSink>=Arc::new(WindowEmitSink{app:window.app_handle().clone(),window_label:window.label().to_owned(),});let(session_id,shell_integration)=terminal.inner().start(trust.inner(),workspace.inner(),remote.inner(),window.label(),query.root_id,query.profile_id,query.cwd,query.cols,query.rows,sink,).await?;Ok(TerminalStartResult::new(session_id,shell_integration))",
 	},
 	{
 		file: "src-tauri/src/terminal/commands.rs",

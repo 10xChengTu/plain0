@@ -90,8 +90,9 @@ use std::time::Duration;
 
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
-use russh::client::{DisconnectReason, Handle, Handler};
+use russh::client::{DisconnectReason, Handle, Handler, Msg};
 use russh::keys::ssh_key::{HashAlg, PublicKey};
+use russh::Channel;
 
 use crate::error::CommandError;
 
@@ -842,6 +843,36 @@ impl RemoteSessionService {
         russh_sftp::client::SftpSession::new(channel.into_stream())
             .await
             .map_err(|_| super::remote_sftp_unavailable())
+    }
+
+    /// `F220` S5: opens a brand-new session channel on `session_id`'s live
+    /// SSH connection for `remote::remote_terminal`'s own `pty-req`/`shell`
+    /// sequencing — mirrors [`Self::open_sftp`]'s identical on-demand,
+    /// no-persistent-pool shape (this domain's channel-management
+    /// precedent), just without the SFTP subsystem request:
+    /// `remote::remote_terminal` drives every subsequent channel request
+    /// itself, on the raw [`Channel`] this returns. Never itself reachable
+    /// from outside `remote::` — `remote::remote_terminal` is the sole
+    /// caller, so the raw, `russh`-typed [`Channel`] this returns never
+    /// crosses into `terminal::` (which is mechanically forbidden from
+    /// importing `russh` at all — see this module's own "russh is this
+    /// module's alone to import" doc section).
+    pub(crate) async fn open_terminal_session_channel(
+        &self,
+        window_label: &str,
+        session_id: RemoteSessionId,
+    ) -> Result<Channel<Msg>, CommandError> {
+        let handle = {
+            lock(&self.state.windows)
+                .get(window_label)
+                .and_then(|sessions| sessions.get(&session_id))
+                .map(|record| Arc::clone(&record.handle))
+                .ok_or_else(remote_session_not_found)?
+        };
+        handle
+            .channel_open_session()
+            .await
+            .map_err(|_| super::remote_terminal_unavailable())
     }
 }
 

@@ -14,6 +14,7 @@ use portable_pty::CommandBuilder;
 use tempfile::TempDir;
 
 use super::{FrameEmitGate, TerminalExitStatus, TerminalOutputSink, TerminalService};
+use crate::remote::session::RemoteSessionService;
 use crate::terminal::dto::TerminalSessionId;
 use crate::terminal::flow::TERMINAL_FLOW_HIGH_WATER_MARK;
 use crate::terminal::vt;
@@ -1455,10 +1456,13 @@ fn an_unknown_profile_id_is_rejected_before_spawn() {
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
     let terminal_base = TempDir::new().unwrap();
     let terminal = TerminalService::new(terminal_base.path().to_path_buf());
+    let remote_base = TempDir::new().unwrap();
+    let remote = RemoteSessionService::new(remote_base.path().to_path_buf());
 
     let result = block_on(terminal.start(
         &trust,
         &workspace,
+        &remote,
         "main",
         root_id_at(&workspace, "main", 0),
         "attacker".to_owned(),

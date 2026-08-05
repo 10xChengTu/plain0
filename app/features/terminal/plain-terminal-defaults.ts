@@ -146,3 +146,40 @@ export const DEFAULT_TERMINAL_FUTURE_TAB_DEFAULTS: TerminalFutureTabDefaults =
 		profileId: TERMINAL_DEFAULT_PROFILE_FALLBACK_ID,
 		cwd: null,
 	});
+
+/** `F220` S5: the fixed label the future-tab profile `<select>` shows
+ * (disabled, single option) whenever the currently selected root is remote
+ * — mirrors `src-tauri/src/terminal/service.rs`'s own `start_remote` doc
+ * comment: v1 does no remote profile enumeration at all, so this is never a
+ * live-fetched value the way the local profile list is. */
+export const REMOTE_DEFAULT_SHELL_PROFILE_LABEL = "Remote default shell";
+
+/** `F220` S5: why the cwd input is disabled for a remote root — shown as
+ * that `<input>`'s own `title` tooltip. */
+export const REMOTE_TERMINAL_CWD_DISABLED_TITLE =
+	"Remote terminals always start in the remote user's home directory.";
+
+/** `F220` S5: why the profile `<select>` is disabled for a remote root. */
+export const REMOTE_TERMINAL_PROFILE_DISABLED_TITLE =
+	"Remote terminals always use the remote host's default shell.";
+
+/**
+ * `F220` S5: the frozen defaults every remote-root tab/pane must actually
+ * spawn with — `TerminalPaneController`/`terminal_start` never see whatever
+ * the future-tab-default controls' *persisted configuration* currently
+ * holds when the target root is remote (the controls are disabled in the UI
+ * for exactly this reason — see `plain-terminal-view.ts`'s own
+ * `#currentRootIsRemote`), even if a hand-edited `settings.json` still names
+ * a local profile id or a cwd override. Mirrors
+ * `terminal::service::TerminalService::start_remote`'s own backend-side
+ * fail-closed rejection of anything else (`profileId` must be exactly
+ * {@link TERMINAL_DEFAULT_PROFILE_FALLBACK_ID}, `cwd` must be `null`) — this
+ * is the frontend never sending a value Rust would reject in the first
+ * place, not the frontend's own enforcement of that rule.
+ */
+export const REMOTE_TERMINAL_FUTURE_TAB_DEFAULTS: TerminalFutureTabDefaults =
+	Object.freeze({
+		kind: "ok",
+		profileId: TERMINAL_DEFAULT_PROFILE_FALLBACK_ID,
+		cwd: null,
+	});

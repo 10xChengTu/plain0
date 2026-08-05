@@ -81,6 +81,23 @@ let unlistenRemoteSessionEvents: (() => void | Promise<void>) | undefined;
  * `Plain: Reconnect Remote Session…` invocation instead. */
 const knownRemoteRoots = new Map<string, KnownRemoteRootRecord>();
 
+/**
+ * `F220` S5: the one place outside this module that needs to tell a remote
+ * root apart from a local one — the terminal view's own future-tab-default
+ * controls (profile/cwd), which must disable themselves and force the fixed
+ * remote defaults for a remote root (see `plain-terminal-view.ts`'s own
+ * `#currentRootIsRemote`/`REMOTE_TERMINAL_FUTURE_TAB_DEFAULTS` doc comments).
+ * Deliberately a plain boolean query, not a snapshot of `knownRemoteRoots`
+ * itself: `WorkspaceRootSnapshot` staying backend-opaque to the frontend
+ * (see `knownRemoteRoots`'s own doc comment) is a real, intentional
+ * boundary — this is the one narrow, read-only crack in it, kept as small
+ * as a single "is this rootId one I authorized as remote" fact, not a
+ * general-purpose accessor onto this module's own bookkeeping.
+ */
+export function isKnownRemoteRootId(rootId: string): boolean {
+	return knownRemoteRoots.has(rootId);
+}
+
 function bridge(): PlainBridge {
 	if (configuredBridge === undefined) {
 		throw new Error(
@@ -344,7 +361,23 @@ async function mountRemoteRoot(
 	displayName: string | undefined,
 ): Promise<void> {
 	try {
-		const previouslyKnownRootIds = new Set(knownRemoteRoots.keys());
+		// `F220` S5 fix: identifying "the root this call just added" by
+		// diffing against `knownRemoteRoots.keys()` (this module's own
+		// *remote-only* bookkeeping) undercounts whenever a *local* root is
+		// already open in the same window — the very first remote root ever
+		// authorized would then see an empty `previouslyKnownRootIds`, so
+		// `.find()` below could match *any* already-open local root instead
+		// of the genuinely new remote one (whichever happens to sort first
+		// in `snapshot.roots`), silently mis-keying `knownRemoteRoots` under
+		// the wrong `rootId` (or a local one). Reading the *authoritative*
+		// current root set (local and remote alike) immediately before the
+		// mutation — exactly what `snapshot.roots` will be diffed against —
+		// is what makes this correct regardless of whether any local root is
+		// also open.
+		const before = await bridge().workspaceSnapshot();
+		const previouslyKnownRootIds = new Set(
+			before.roots.map((root) => root.rootId),
+		);
 		const snapshot = await topologyCoordinator().runMutation(async () => {
 			const snapshot = await bridge().remoteWorkspaceAddRoot(
 				sessionId,

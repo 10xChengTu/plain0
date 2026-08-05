@@ -138,9 +138,14 @@ use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, Master
 
 use crate::backup::{store as backup_store, BackupKey};
 use crate::error::CommandError;
+use crate::remote::remote_terminal::{
+    self, RemoteTerminalExitOutcome, RemoteTerminalKiller, RemoteTerminalResizer,
+    RemoteTerminalWaiter,
+};
+use crate::remote::session::RemoteSessionService;
 use crate::trust::service::TrustService;
 use crate::workspace::service::WorkspaceService;
-use crate::workspace::RootId;
+use crate::workspace::{RemoteRootContext, RootId};
 
 use super::dto::TerminalSessionId;
 use super::flow::FlowControl;
@@ -148,9 +153,22 @@ use super::shell;
 use super::shell_integration::{self, ShellIntegrationStatus};
 use super::vt;
 use super::{
-    terminal_cwd_invalid, terminal_io_failed, terminal_session_limit_exceeded,
-    terminal_session_not_found, terminal_unavailable, MAX_TERMINAL_SESSIONS_PER_WINDOW,
+    terminal_cwd_invalid, terminal_io_failed, terminal_profile_invalid,
+    terminal_session_limit_exceeded, terminal_session_not_found, terminal_unavailable,
+    MAX_TERMINAL_SESSIONS_PER_WINDOW,
 };
+
+/// `F220` S5: the fixed placeholder `signal` text an emitted
+/// `plain://terminal-exit` carries whenever a remote terminal's SSH channel
+/// closed (or was force-released — see `remote::remote_terminal`'s own doc)
+/// without ever reporting a real `exit-status`/`exit-signal` — the
+/// "断连型退出状态,不伪装成正常退出" the S5 contract requires. Reuses
+/// [`TerminalExitStatus`]'s existing `signal` field rather than widening the
+/// wire DTO at all (`terminal::dto::TerminalExitEvent` already treats any
+/// non-`null` `signal` as "not a normal exit, `exitCode` is not meaningful
+/// on its own" — see that type's own doc comment — so this reads correctly
+/// in the exit banner with zero frontend changes).
+pub(crate) const REMOTE_TERMINAL_DISCONNECTED_SIGNAL: &str = "SSH session disconnected";
 
 /// Bytes requested per blocking `read()` call against the pty master.
 const TERMINAL_READ_BUFFER_BYTES: usize = 8192;
@@ -291,11 +309,108 @@ struct SessionThreads {
     vt: Option<JoinHandle<()>>,
 }
 
+/// `F220` S5: the closed, two-variant PTY-control backend a session's
+/// [`TerminalService::resize`] dispatches through — `Local` is byte-for-byte
+/// the pre-S5 shape (`portable_pty`'s own `MasterPty::resize`); `Remote`
+/// defers to `remote::remote_terminal::RemoteTerminalResizer::window_change`
+/// (an SSH `window-change` channel request). Neither the reader/vt/waiter
+/// thread model nor `FlowControl`'s backpressure gate above this needs to
+/// know which variant a given session holds — resize is the *only* thing
+/// this abstraction exists for, exactly like the pre-S5 `master` field it
+/// replaces was.
+enum PtyResizer {
+    Local(Box<dyn MasterPty + Send>),
+    Remote(RemoteTerminalResizer),
+}
+
+impl PtyResizer {
+    fn resize(&self, cols: u16, rows: u16) -> Result<(), CommandError> {
+        match self {
+            Self::Local(master) => master
+                .resize(PtySize {
+                    rows,
+                    cols,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .map_err(|_| terminal_io_failed()),
+            Self::Remote(resizer) => resizer.window_change(cols, rows),
+        }
+    }
+}
+
+/// `F220` S5: the closed, two-variant kill backend [`terminate_session`]
+/// dispatches through — `Local` is byte-for-byte the pre-S5 shape
+/// (`portable_pty`'s own `ChildKiller::kill`, a `SIGKILL`-equivalent signal
+/// to the child process); `Remote` defers to
+/// `remote::remote_terminal::RemoteTerminalKiller::shutdown` (`eof`/`close`
+/// then a bounded-grace forced local release — see that method's own doc
+/// comment for why a remote kill can never simply "wait for the process to
+/// die" the way a local one's `wait()` companion thread does).
+enum PtyKiller {
+    Local(Box<dyn ChildKiller + Send + Sync>),
+    Remote(RemoteTerminalKiller),
+}
+
+impl PtyKiller {
+    fn kill(&mut self) -> Result<(), CommandError> {
+        match self {
+            Self::Local(killer) => killer.kill().map_err(|_| terminal_io_failed()),
+            Self::Remote(killer) => killer.shutdown(),
+        }
+    }
+}
+
+/// `F220` S5: the closed, two-variant waiter-thread backend [`run_waiter`]
+/// dispatches through — `Local` mirrors this file's pre-S5 `run_waiter` body
+/// exactly (a real `portable_pty::Child::wait()`, mapped through
+/// [`TerminalExitStatus::from`]); `Remote` maps
+/// `remote::remote_terminal::RemoteTerminalExitOutcome` (see that type's own
+/// doc comment) onto the exact same [`TerminalExitStatus`] shape — a real
+/// `exit-status`/`exit-signal` channel request maps to the equivalent
+/// `exit_code`/`signal` pair a local exit would produce, while
+/// `Disconnected` (channel closed, or force-released, without either) maps
+/// to [`REMOTE_TERMINAL_DISCONNECTED_SIGNAL`] — a non-`null` `signal`, so the
+/// existing exit banner renders it as an abnormal termination, never a
+/// disguised normal exit.
+enum PtyWaiter {
+    Local(Box<dyn Child + Send + Sync>),
+    Remote(RemoteTerminalWaiter),
+}
+
+impl PtyWaiter {
+    fn wait(&mut self) -> TerminalExitStatus {
+        match self {
+            Self::Local(child) => match child.wait() {
+                Ok(status) => TerminalExitStatus::from(status),
+                Err(_) => TerminalExitStatus {
+                    exit_code: u32::MAX,
+                    signal: None,
+                },
+            },
+            Self::Remote(waiter) => match waiter.wait_exit() {
+                RemoteTerminalExitOutcome::Exited { code } => TerminalExitStatus {
+                    exit_code: code,
+                    signal: None,
+                },
+                RemoteTerminalExitOutcome::Signaled { signal } => TerminalExitStatus {
+                    exit_code: 1,
+                    signal: Some(signal),
+                },
+                RemoteTerminalExitOutcome::Disconnected => TerminalExitStatus {
+                    exit_code: u32::MAX,
+                    signal: Some(REMOTE_TERMINAL_DISCONNECTED_SIGNAL.to_owned()),
+                },
+            },
+        }
+    }
+}
+
 struct TerminalSession {
     flow: Arc<FlowControl>,
-    master: Mutex<Box<dyn MasterPty + Send>>,
+    resizer: Mutex<PtyResizer>,
     writer: Mutex<Box<dyn Write + Send>>,
-    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    killer: Mutex<PtyKiller>,
     threads: Mutex<SessionThreads>,
     /// The vt thread's latest emitted [`vt::DirtyFrame`], if any yet — see
     /// the module doc's "VT integration" section. Written by the vt thread
@@ -366,6 +481,7 @@ impl TerminalService {
         &self,
         trust: &TrustService,
         workspace: &WorkspaceService,
+        remote: &RemoteSessionService,
         window_label: &str,
         root_id: RootId,
         profile_id: String,
@@ -375,6 +491,26 @@ impl TerminalService {
         sink: Arc<dyn TerminalOutputSink>,
     ) -> Result<(TerminalSessionId, ShellIntegrationStatus), CommandError> {
         trust.require_trusted(workspace, window_label).await?;
+        // `F220` S5: a remote-backed root routes to `remote::remote_terminal`
+        // *before* any of the local-only calls below — `root_canonical_path`
+        // itself fails closed with `ROOT_BACKEND_UNSUPPORTED` for a remote
+        // root, so this check must come first, exactly like
+        // `workspace::remote_backend`'s own dispatch precedent for every
+        // other domain that grew a remote twin.
+        if let Some(context) = workspace.remote_context(window_label, root_id)? {
+            return self
+                .start_remote(
+                    remote,
+                    window_label,
+                    context,
+                    profile_id,
+                    cwd,
+                    cols,
+                    rows,
+                    sink,
+                )
+                .await;
+        }
         let root_canonical = workspace.root_canonical_path(window_label, root_id)?;
         let resolved_cwd = resolve_cwd(workspace, window_label, root_id, cwd)?;
         let shell_path =
@@ -424,6 +560,82 @@ impl TerminalService {
             )
             .await?;
         Ok((session_id, plan.status))
+    }
+
+    /// `F220` S5: the remote-root twin of [`Self::start`] — routes to
+    /// `remote::remote_terminal` instead of `portable_pty` (`trust` has
+    /// already been checked by [`Self::start`], the sole caller, before this
+    /// runs). Two deliberate v1 narrowings, both fail-closed rather than
+    /// best-effort (see the research doc's "架构裁定 §4"):
+    ///
+    /// - `profile_id` must be exactly [`shell::SYSTEM_DEFAULT_PROFILE_ID`] —
+    ///   v1 does no remote profile enumeration at all (the frontend disables
+    ///   its own profile control for a remote root and always sends this
+    ///   value; a request naming anything else is rejected rather than
+    ///   silently coerced).
+    /// - `cwd` must be `None` — a remote terminal always starts at the
+    ///   remote user's own home directory (`remote::remote_terminal`'s own
+    ///   doc comment explains why no shell-string `cd &&` workaround is
+    ///   used); the frontend disables its own cwd control for a remote root
+    ///   for the same reason, and a request naming one is rejected rather
+    ///   than silently ignored.
+    ///
+    /// Shell integration is always reported [`ShellIntegrationStatus::Unsupported`]:
+    /// v1 never uploads the injection files to a remote host at all (research
+    /// doc: "不上传注入文件"), so there is nothing to have injected.
+    #[allow(clippy::too_many_arguments)]
+    async fn start_remote(
+        &self,
+        remote: &RemoteSessionService,
+        window_label: &str,
+        context: RemoteRootContext,
+        profile_id: String,
+        cwd: Option<String>,
+        cols: u16,
+        rows: u16,
+        sink: Arc<dyn TerminalOutputSink>,
+    ) -> Result<(TerminalSessionId, ShellIntegrationStatus), CommandError> {
+        if profile_id != shell::SYSTEM_DEFAULT_PROFILE_ID {
+            return Err(terminal_profile_invalid());
+        }
+        if cwd.is_some() {
+            return Err(terminal_cwd_invalid());
+        }
+        self.session_capacity_gate(window_label)?;
+        let handles = remote_terminal::open_remote_terminal_channel(
+            remote,
+            window_label,
+            context.session_id,
+            cols,
+            rows,
+        )
+        .await?;
+        let window_label_owned = window_label.to_owned();
+        let state = Arc::clone(&self.state);
+        let session_id = tauri::async_runtime::spawn_blocking(move || {
+            finish_spawn_sync(
+                &state,
+                &window_label_owned,
+                Box::new(handles.reader),
+                Box::new(handles.writer),
+                PtyResizer::Remote(handles.resizer),
+                PtyKiller::Remote(handles.killer),
+                PtyWaiter::Remote(handles.waiter),
+                // No workspace-root-relative pwd projection for a remote
+                // session — v1 never injects shell integration remotely (see
+                // this method's own doc comment), so no OSC 7 pwd is ever
+                // reported for it to project in the first place; `None`
+                // mirrors `start_program`'s own identical "no workspace root
+                // concept" case.
+                None,
+                cols,
+                rows,
+                sink,
+            )
+        })
+        .await
+        .map_err(|_| terminal_unavailable())??;
+        Ok((session_id, ShellIntegrationStatus::Unsupported))
     }
 
     /// Test-only seam: identical to [`Self::start`] except the caller
@@ -577,20 +789,6 @@ impl TerminalService {
         let window_label = window_label.to_owned();
         let state = Arc::clone(&self.state);
         tauri::async_runtime::spawn_blocking(move || {
-            // The whole spawn (limit check through thread creation) runs
-            // while holding the single window table lock: this makes the
-            // session-limit check and the eventual insert atomic (no two
-            // concurrent `start` calls for the same window can both pass
-            // the check and together exceed the limit), at the cost of
-            // serializing concurrent starts across *every* window against
-            // each other too. Acceptable: starting a terminal is a rare,
-            // human-triggered action and `openpty`+spawn is fast.
-            let mut windows = lock(&state.windows);
-            let sessions = windows.entry(window_label.clone()).or_default();
-            if sessions.len() >= MAX_TERMINAL_SESSIONS_PER_WINDOW {
-                return Err(terminal_session_limit_exceeded());
-            }
-
             let pty_system = native_pty_system();
             let size = PtySize {
                 rows,
@@ -601,14 +799,14 @@ impl TerminalService {
             let pair = pty_system
                 .openpty(size)
                 .map_err(|_| terminal_unavailable())?;
-            let mut child = pair
+            let child = pair
                 .slave
                 .spawn_command(command)
                 .map_err(|_| terminal_unavailable())?;
-            // Captured before `child` is moved into the waiter thread's
-            // closure below — `Child::process_id` only ever needs `&self`,
-            // but the waiter thread takes ownership for its whole lifetime
-            // (see [`run_waiter`]), so this is the last point this value is
+            // Captured before `child` is moved into `PtyWaiter::Local` below
+            // — `Child::process_id` only ever needs `&self`, but the waiter
+            // thread takes ownership for its whole lifetime (see
+            // [`run_waiter`]), so this is the last point this value is
             // reachable at all. Since this session never wraps `command` in
             // a shell (every caller — `start`/`start_with_command_for_test`/
             // `start_program` — spawns the target program directly), this is
@@ -638,74 +836,46 @@ impl TerminalService {
                 .take_writer()
                 .map_err(|_| terminal_unavailable())?;
 
-            let session_id = TerminalSessionId::new();
-            let flow = Arc::new(FlowControl::new());
-            let vt_frame = Arc::new(Mutex::new(None));
-            let (vt_sender, vt_receiver) = mpsc::channel::<VtCommand>();
-            let session = Arc::new(TerminalSession {
-                flow: Arc::clone(&flow),
-                master: Mutex::new(pair.master),
-                writer: Mutex::new(writer),
-                killer: Mutex::new(killer),
-                threads: Mutex::new(SessionThreads {
-                    reader: None,
-                    waiter: None,
-                    vt: None,
-                }),
-                vt_frame: Arc::clone(&vt_frame),
-                vt_sender: vt_sender.clone(),
-            });
-
-            let reader_flow = Arc::clone(&flow);
-            let reader_vt_sender = vt_sender;
-            let reader_thread = std::thread::Builder::new()
-                .name(format!("plain-terminal-{}", session_id.as_wire()))
-                .spawn(move || run_reader(reader, &reader_flow, &reader_vt_sender))
-                .ok();
-
-            let waiter_sink = Arc::clone(&sink);
-            let waiter_thread = std::thread::Builder::new()
-                .name(format!("plain-terminal-wait-{}", session_id.as_wire()))
-                .spawn(move || run_waiter(session_id, child.as_mut(), waiter_sink.as_ref()))
-                .ok();
-
-            let vt_flow = Arc::clone(&flow);
-            let vt_thread = std::thread::Builder::new()
-                .name(format!("plain-terminal-vt-{}", session_id.as_wire()))
-                .spawn(move || {
-                    run_vt(
-                        cols,
-                        rows,
-                        &vt_receiver,
-                        &vt_flow,
-                        &vt_frame,
-                        session_id,
-                        root_canonical,
-                        sink.as_ref(),
-                    )
-                })
-                .ok();
-
-            {
-                let mut threads = lock(&session.threads);
-                threads.reader = reader_thread;
-                threads.waiter = waiter_thread;
-                threads.vt = vt_thread;
-            }
-
-            sessions.insert(session_id, session);
-            // `F190` S6: dropped explicitly (rather than just letting the
-            // closure end) so the marker's own best-effort file I/O below
-            // never runs while `state.windows` is still locked — it does not
-            // need that lock at all (it has its own, independent one), and
-            // there is no reason to hold every other window's `start`/`kill`
-            // calls behind it for the duration of an unrelated write.
-            drop(windows);
-            state.lifecycle.record_started(&window_label);
+            let session_id = finish_spawn_sync(
+                &state,
+                &window_label,
+                Box::new(reader),
+                Box::new(writer),
+                PtyResizer::Local(pair.master),
+                PtyKiller::Local(killer),
+                PtyWaiter::Local(child),
+                root_canonical,
+                cols,
+                rows,
+                sink,
+            )?;
             Ok((session_id, child_pid))
         })
         .await
         .map_err(|_| terminal_unavailable())?
+    }
+
+    /// `F220` S5: a cheap, best-effort pre-check against
+    /// `MAX_TERMINAL_SESSIONS_PER_WINDOW` — called before either backend
+    /// does its own expensive spawn work (`openpty`+`spawn_command` locally,
+    /// an SSH channel-open/`pty-req`/`shell` round trip remotely), purely to
+    /// avoid paying for that work in the common "already at the cap" case.
+    /// [`finish_spawn_sync`]'s own check-and-insert (taken under the same
+    /// `state.windows` lock the insert itself uses) remains the sole
+    /// authoritative enforcement — this gate can race a concurrent spawn for
+    /// the same window and let both proceed past it, exactly as
+    /// `remote::session::RemoteSessionService::session_capacity_gate`
+    /// already accepts for the identical reason (see that method's own
+    /// precedent) — but no more than `MAX_TERMINAL_SESSIONS_PER_WINDOW`
+    /// sessions can ever actually be *inserted*, local and remote sharing
+    /// the exact same `state.windows` table and limit.
+    fn session_capacity_gate(&self, window_label: &str) -> Result<(), CommandError> {
+        let windows = lock(&self.state.windows);
+        let count = windows.get(window_label).map_or(0, HashMap::len);
+        if count >= MAX_TERMINAL_SESSIONS_PER_WINDOW {
+            return Err(terminal_session_limit_exceeded());
+        }
+        Ok(())
     }
 
     /// Writes `text` (an IME composition commit, or a pasted block) to the
@@ -790,15 +960,8 @@ impl TerminalService {
         let session = self.get_session(window_label, session_id)?;
         tauri::async_runtime::spawn_blocking(move || {
             {
-                let master = lock(&session.master);
-                master
-                    .resize(PtySize {
-                        rows,
-                        cols,
-                        pixel_width: 0,
-                        pixel_height: 0,
-                    })
-                    .map_err(|_| terminal_io_failed())?;
+                let resizer = lock(&session.resizer);
+                resizer.resize(cols, rows)?;
             }
             // Best-effort: a disconnected vt thread just means this
             // session's VT mirror is already gone (e.g. its `VtSession`
@@ -1279,16 +1442,117 @@ fn relativize_pwd(root_canonical: Option<&Path>, raw_pwd: Option<&str>) -> Optio
     Some(relative.to_string_lossy().into_owned())
 }
 
-fn run_waiter(session_id: TerminalSessionId, child: &mut dyn Child, sink: &dyn TerminalOutputSink) {
-    let status = child.wait();
-    let exit_status = match status {
-        Ok(status) => TerminalExitStatus::from(status),
-        Err(_) => TerminalExitStatus {
-            exit_code: u32::MAX,
-            signal: None,
-        },
-    };
+/// `F220` S5: dispatches through [`PtyWaiter`] — see that enum's own doc
+/// comment for exactly what each backend's `wait()` blocks on and how its
+/// outcome maps onto [`TerminalExitStatus`].
+fn run_waiter(
+    session_id: TerminalSessionId,
+    waiter: &mut PtyWaiter,
+    sink: &dyn TerminalOutputSink,
+) {
+    let exit_status = waiter.wait();
     sink.emit_exit(session_id, exit_status);
+}
+
+/// `F220` S5: the shared tail of both backends' spawn path — session-limit
+/// check, [`TerminalSession`] construction, reader/vt/waiter thread spawn,
+/// window-table insert and `F190` S6 lifecycle-marker recording, all under
+/// one hold of `state.windows` (the atomic "check-and-insert" half of the
+/// session-limit contract — see [`TerminalService::session_capacity_gate`]'s
+/// own doc comment for the other, best-effort half). The local
+/// `spawn_session` closure calls this synchronously from inside its own
+/// `spawn_blocking` (after `openpty`+`spawn_command`, still off the async
+/// executor); `TerminalService::start_remote` calls it from inside its own,
+/// separate `spawn_blocking` (after the async SSH channel-open/`pty-req`/
+/// `shell` round trip has already completed) — see that method's own doc
+/// comment. Deliberately a free function, not a method: it needs no `&self`
+/// beyond the `state` it is explicitly handed, exactly like every other
+/// free helper in this file (`run_reader`/`run_vt`/`terminate_session`/…).
+#[allow(clippy::too_many_arguments)]
+fn finish_spawn_sync(
+    state: &TerminalState,
+    window_label: &str,
+    reader: Box<dyn Read + Send>,
+    writer: Box<dyn Write + Send>,
+    resizer: PtyResizer,
+    killer: PtyKiller,
+    mut waiter: PtyWaiter,
+    root_canonical: Option<PathBuf>,
+    cols: u16,
+    rows: u16,
+    sink: Arc<dyn TerminalOutputSink>,
+) -> Result<TerminalSessionId, CommandError> {
+    let mut windows = lock(&state.windows);
+    let sessions = windows.entry(window_label.to_owned()).or_default();
+    if sessions.len() >= MAX_TERMINAL_SESSIONS_PER_WINDOW {
+        return Err(terminal_session_limit_exceeded());
+    }
+
+    let session_id = TerminalSessionId::new();
+    let flow = Arc::new(FlowControl::new());
+    let vt_frame = Arc::new(Mutex::new(None));
+    let (vt_sender, vt_receiver) = mpsc::channel::<VtCommand>();
+    let session = Arc::new(TerminalSession {
+        flow: Arc::clone(&flow),
+        resizer: Mutex::new(resizer),
+        writer: Mutex::new(writer),
+        killer: Mutex::new(killer),
+        threads: Mutex::new(SessionThreads {
+            reader: None,
+            waiter: None,
+            vt: None,
+        }),
+        vt_frame: Arc::clone(&vt_frame),
+        vt_sender: vt_sender.clone(),
+    });
+
+    let reader_flow = Arc::clone(&flow);
+    let reader_vt_sender = vt_sender;
+    let reader_thread = std::thread::Builder::new()
+        .name(format!("plain-terminal-{}", session_id.as_wire()))
+        .spawn(move || run_reader(reader, &reader_flow, &reader_vt_sender))
+        .ok();
+
+    let waiter_sink = Arc::clone(&sink);
+    let waiter_thread = std::thread::Builder::new()
+        .name(format!("plain-terminal-wait-{}", session_id.as_wire()))
+        .spawn(move || run_waiter(session_id, &mut waiter, waiter_sink.as_ref()))
+        .ok();
+
+    let vt_flow = Arc::clone(&flow);
+    let vt_thread = std::thread::Builder::new()
+        .name(format!("plain-terminal-vt-{}", session_id.as_wire()))
+        .spawn(move || {
+            run_vt(
+                cols,
+                rows,
+                &vt_receiver,
+                &vt_flow,
+                &vt_frame,
+                session_id,
+                root_canonical,
+                sink.as_ref(),
+            )
+        })
+        .ok();
+
+    {
+        let mut threads = lock(&session.threads);
+        threads.reader = reader_thread;
+        threads.waiter = waiter_thread;
+        threads.vt = vt_thread;
+    }
+
+    sessions.insert(session_id, session);
+    // `F190` S6: dropped explicitly (rather than just letting the function
+    // end) so the marker's own best-effort file I/O below never runs while
+    // `state.windows` is still locked — it does not need that lock at all
+    // (it has its own, independent one), and there is no reason to hold
+    // every other window's `start`/`kill` calls behind it for the duration
+    // of an unrelated write.
+    drop(windows);
+    state.lifecycle.record_started(window_label);
+    Ok(session_id)
 }
 
 /// Sends the kill signal and either joins every one of the session's
@@ -1535,5 +1799,7 @@ fn ensure_directory_ambiently(path: &Path) -> std::io::Result<()> {
     }
 }
 
+#[cfg(test)]
+mod remote_tests;
 #[cfg(test)]
 mod tests;

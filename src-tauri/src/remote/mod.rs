@@ -37,6 +37,7 @@ pub mod commands;
 pub mod dto;
 pub(crate) mod known_hosts;
 pub(crate) mod remote_fs;
+pub(crate) mod remote_terminal;
 pub mod session;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -342,6 +343,19 @@ pub(crate) fn remote_root_path_changed() -> CommandError {
     )
 }
 
+/// `F220` S5: folds every unrecoverable-differently failure of the
+/// `pty-req`/`shell` channel sequencing `remote::remote_terminal` drives
+/// (channel-open rejected, either request's `SSH_MSG_CHANNEL_FAILURE` reply,
+/// a malformed/absent reply) into one caller-facing code — mirrors
+/// `remote_sftp_unavailable`'s identical "fold every unrecoverable-
+/// differently case together" precedent for the sibling SFTP transport.
+pub(crate) fn remote_terminal_unavailable() -> CommandError {
+    CommandError::new(
+        "REMOTE_TERMINAL_UNAVAILABLE",
+        "The remote terminal channel is not available.",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -350,6 +364,7 @@ mod tests {
         remote_connect_timed_out, remote_host_key_changed, remote_host_key_store_unavailable,
         remote_request_invalid, remote_root_identity_changed, remote_root_path_changed,
         remote_session_disconnected, remote_session_limit_reached, remote_session_not_found,
+        remote_terminal_unavailable,
     };
 
     #[test]
@@ -400,6 +415,10 @@ mod tests {
         assert_eq!(
             remote_root_path_changed().code(),
             "REMOTE_ROOT_PATH_CHANGED"
+        );
+        assert_eq!(
+            remote_terminal_unavailable().code(),
+            "REMOTE_TERMINAL_UNAVAILABLE"
         );
     }
 

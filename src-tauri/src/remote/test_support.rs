@@ -751,3 +751,374 @@ pub(crate) async fn start_sftp_fixture(identity: &PrivateKey) -> SftpFixture {
         _agent_task: agent_task,
     }
 }
+
+// -----------------------------------------------------------------------
+// `F220` S5's own hermetic `pty-req`/`shell`-serving test fixture — see
+// `remote::remote_terminal`'s own module doc for what this exercises.
+// Deliberately a *separate* handler/server/fixture triple from
+// `SftpTestSshHandler`/`SftpTestSshServer`/`SftpFixture` above (mirroring
+// this file's own module doc rationale for why the SFTP fixture is not
+// reused by `session::tests` either): every existing S1-S4 test keeps using
+// exactly the fixture shape it already does, untouched by this addition.
+// -----------------------------------------------------------------------
+
+/// The one live session channel this fixture ever serves, plus whatever this
+/// slice's tests need to observe/act on it from outside the `Handler`
+/// callbacks that populate it (mirrors `SftpTestSshHandler`'s own
+/// `kill_switch` capture pattern, generalized to more than one piece of
+/// state).
+#[derive(Default)]
+struct TerminalChannelState {
+    channel_id: Option<ChannelId>,
+    last_pty_request: Option<(String, u32, u32)>,
+    last_window_change: Option<(u32, u32)>,
+}
+
+/// Real server-side `pty-req`/`shell` handling plus a deterministic "echo
+/// shell": every byte of client input this fixture's one live channel
+/// receives (`Handler::data`) is reflected straight back — a `cat`-like
+/// stand-in for a real interactive shell, exactly like
+/// `terminal::service::tests`' own local `cat`/`sh -c` fixture programs, just
+/// served over a real SSH channel instead of a real pty. `pty_request`/
+/// `shell_request`/`window_change_request` each reply with a real
+/// `SSH_MSG_CHANNEL_SUCCESS` — this fixture never simulates a rejected
+/// request (a dedicated hostile-mutation test covers `expect_success`'s own
+/// `Failure`/unrelated-message handling with a purpose-built minimal
+/// handler instead, so this shared fixture's happy path stays simple).
+#[derive(Clone)]
+struct TerminalTestSshHandler {
+    accepted_key: Option<russh::keys::ssh_key::PublicKey>,
+    kill_switch: Arc<AsyncMutex<Option<ServerHandle>>>,
+    channel_state: Arc<AsyncMutex<TerminalChannelState>>,
+}
+
+impl ServerHandler for TerminalTestSshHandler {
+    type Error = russh::Error;
+
+    async fn auth_publickey(
+        &mut self,
+        _user: &str,
+        public_key: &russh::keys::ssh_key::PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        let accepted = self
+            .accepted_key
+            .as_ref()
+            .is_some_and(|accepted| accepted == public_key);
+        Ok(if accepted {
+            Auth::Accept
+        } else {
+            Auth::reject()
+        })
+    }
+
+    async fn auth_succeeded(&mut self, session: &mut Session) -> Result<(), Self::Error> {
+        *self.kill_switch.lock().await = Some(session.handle());
+        Ok(())
+    }
+
+    async fn channel_open_session(
+        &mut self,
+        channel: Channel<Msg>,
+        reply: ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.channel_state.lock().await.channel_id = Some(channel.id());
+        reply.accept().await;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn pty_request(
+        &mut self,
+        channel: ChannelId,
+        term: &str,
+        col_width: u32,
+        row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _modes: &[(russh::Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.channel_state.lock().await.last_pty_request =
+            Some((term.to_owned(), col_width, row_height));
+        session.channel_success(channel)?;
+        Ok(())
+    }
+
+    async fn shell_request(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        Ok(())
+    }
+
+    async fn window_change_request(
+        &mut self,
+        channel: ChannelId,
+        col_width: u32,
+        row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.channel_state.lock().await.last_window_change = Some((col_width, row_height));
+        session.channel_success(channel)?;
+        Ok(())
+    }
+
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.data(channel, data.to_vec())?;
+        Ok(())
+    }
+
+    /// Replies with the server's own `SSH_MSG_CHANNEL_CLOSE` the instant the
+    /// client sends one — the real-sshd-like cooperative half of
+    /// `remote::remote_terminal::RemoteTerminalKiller::shutdown`'s "graceful
+    /// signal" leg, so a hermetic kill test observes the channel finish
+    /// closing promptly rather than needing to wait out the full
+    /// `REMOTE_TERMINAL_KILL_GRACE` forced-release timeout.
+    async fn channel_close(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.close(channel)?;
+        Ok(())
+    }
+}
+
+struct TerminalTestSshServer {
+    accepted_key: Option<russh::keys::ssh_key::PublicKey>,
+    kill_switch: Arc<AsyncMutex<Option<ServerHandle>>>,
+    channel_state: Arc<AsyncMutex<TerminalChannelState>>,
+}
+
+impl ServerTrait for TerminalTestSshServer {
+    type Handler = TerminalTestSshHandler;
+
+    fn new_client(&mut self, _peer_addr: Option<SocketAddr>) -> TerminalTestSshHandler {
+        TerminalTestSshHandler {
+            accepted_key: self.accepted_key.clone(),
+            kill_switch: Arc::clone(&self.kill_switch),
+            channel_state: Arc::clone(&self.channel_state),
+        }
+    }
+}
+
+pub(crate) struct TerminalFixture {
+    pub(crate) address: SocketAddr,
+    pub(crate) agent_socket_path: PathBuf,
+    kill_switch: Arc<AsyncMutex<Option<ServerHandle>>>,
+    channel_state: Arc<AsyncMutex<TerminalChannelState>>,
+    _agent_temp: TempDir,
+    _server_task: tokio::task::JoinHandle<()>,
+    _agent_task: tokio::task::JoinHandle<()>,
+}
+
+impl TerminalFixture {
+    /// Polls briefly for the server-side session `Handle` to become
+    /// available — mirrors [`SftpFixture::force_server_disconnect`]'s own
+    /// identical bounded-poll rationale (only captured once a connection
+    /// actually authenticates).
+    async fn server_handle(&self) -> ServerHandle {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(handle) = self.kill_switch.lock().await.clone() {
+                return handle;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("server-side session handle never became available");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Polls briefly for this fixture's one live channel id to become
+    /// available — only set once `channel_open_session` actually ran.
+    async fn channel_id(&self) -> ChannelId {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(channel_id) = self.channel_state.lock().await.channel_id {
+                return channel_id;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("server-side channel id never became available");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// The most recent `pty-req`'s `(term, cols, rows)`, if any yet.
+    pub(crate) async fn last_pty_request(&self) -> Option<(String, u32, u32)> {
+        self.channel_state.lock().await.last_pty_request.clone()
+    }
+
+    /// The most recent `window-change`'s `(cols, rows)`, if any yet.
+    pub(crate) async fn last_window_change(&self) -> Option<(u32, u32)> {
+        self.channel_state.lock().await.last_window_change
+    }
+
+    /// Sends a real `exit-status` channel request for this fixture's one
+    /// live channel, then `eof`/`close` — mirroring exactly the sequence a
+    /// real sshd sends once its spawned program exits normally.
+    pub(crate) async fn exit_normally(&self, code: u32) {
+        let handle = self.server_handle().await;
+        let channel = self.channel_id().await;
+        let _ = handle.exit_status_request(channel, code).await;
+        let _ = handle.eof(channel).await;
+        let _ = handle.close(channel).await;
+    }
+
+    /// Sends a real `exit-signal` channel request for this fixture's one
+    /// live channel, then `eof`/`close` — mirrors [`Self::exit_normally`]'s
+    /// identical trailing sequence.
+    pub(crate) async fn exit_with_signal(&self, signal_name: &str) {
+        let handle = self.server_handle().await;
+        let channel = self.channel_id().await;
+        let _ = handle
+            .exit_signal_request(
+                channel,
+                russh::Sig::Custom(signal_name.to_owned()),
+                false,
+                String::new(),
+                "en-US".to_owned(),
+            )
+            .await;
+        let _ = handle.eof(channel).await;
+        let _ = handle.close(channel).await;
+    }
+
+    /// Forces the **server** side of this fixture's live connection to send
+    /// a real SSH disconnect message — the whole-session "the peer actively
+    /// disconnects" scenario, tearing down every channel (including this
+    /// fixture's one live terminal channel) without either side ever having
+    /// sent `exit-status`/`exit-signal` for it. Mirrors
+    /// [`SftpFixture::force_server_disconnect`] exactly (see that method's
+    /// own doc comment for the full rationale).
+    pub(crate) async fn force_server_disconnect(&self) {
+        let handle = self.server_handle().await;
+        handle
+            .disconnect(
+                russh::Disconnect::ByApplication,
+                "forced test disconnect".to_owned(),
+                "en-US".to_owned(),
+            )
+            .await
+            .expect("server-side disconnect message sends");
+    }
+}
+
+/// Starts a loopback sshd serving real `pty-req`/`shell` channel requests
+/// (see [`TerminalTestSshHandler`]'s own doc comment) plus a real agent
+/// server offering `identity`.
+pub(crate) async fn start_terminal_fixture(identity: &PrivateKey) -> TerminalFixture {
+    let agent_temp = TempDir::new().expect("tempdir creates");
+
+    let host_key = generate_key();
+    let config = Arc::new(russh::server::Config {
+        keys: vec![host_key],
+        ..Default::default()
+    });
+
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind loopback");
+    let address = listener.local_addr().expect("local addr");
+
+    let kill_switch: Arc<AsyncMutex<Option<ServerHandle>>> = Arc::new(AsyncMutex::new(None));
+    let channel_state = Arc::new(AsyncMutex::new(TerminalChannelState::default()));
+    let mut server = TerminalTestSshServer {
+        accepted_key: Some(identity.public_key().clone()),
+        kill_switch: Arc::clone(&kill_switch),
+        channel_state: Arc::clone(&channel_state),
+    };
+    let server_task = tokio::spawn(async move {
+        let running = server.run_on_socket(config, &listener);
+        let _ = running.await;
+    });
+
+    let agent_socket_path = agent_temp.path().join("agent.sock");
+    let listener = UnixListener::bind(&agent_socket_path).expect("bind agent socket");
+    let stream = tokio_stream::wrappers::UnixListenerStream::new(listener);
+    let agent_task = tokio::spawn(async move {
+        let _ = agent_server::serve(stream, ()).await;
+    });
+    let mut loader = AgentClient::connect_uds(&agent_socket_path)
+        .await
+        .expect("connect to test agent");
+    loader
+        .add_identity(identity, &[])
+        .await
+        .expect("load identity into test agent");
+
+    TerminalFixture {
+        address,
+        agent_socket_path,
+        kill_switch,
+        channel_state,
+        _agent_temp: agent_temp,
+        _server_task: server_task,
+        _agent_task: agent_task,
+    }
+}
+
+fn terminal_connect_target(fixture: &TerminalFixture, user: &str) -> RemoteConnectTarget {
+    RemoteConnectTarget {
+        host: fixture.address.ip().to_string(),
+        port: fixture.address.port(),
+        user: user.to_owned(),
+    }
+}
+
+/// [`connect_test_session`]'s twin for [`TerminalFixture`] — see that
+/// function's own doc comment for the full two-phase-connect rationale this
+/// drives identically.
+pub(crate) async fn connect_terminal_test_session(
+    service: &RemoteSessionService,
+    window_label: &str,
+    fixture: &TerminalFixture,
+) -> RemoteSessionId {
+    let sink: Arc<dyn RemoteSessionEventSink> = Arc::new(NullRemoteSessionEventSink);
+    let target = terminal_connect_target(fixture, "octocat");
+    let pending = service
+        .connect(
+            window_label,
+            target.clone(),
+            &fixture.agent_socket_path,
+            Arc::clone(&sink),
+        )
+        .await
+        .expect("connect call itself succeeds for an unknown host");
+    let (algorithm, sha256_fingerprint) = match pending {
+        RemoteSessionConnectResult::HostKeyPendingConfirmation {
+            algorithm,
+            sha256_fingerprint,
+            ..
+        } => (algorithm, sha256_fingerprint),
+        other => panic!("expected pending confirmation, got {other:?}"),
+    };
+    let confirmed = service
+        .confirm_host_key(
+            window_label,
+            RemoteHostKeyConfirmParts {
+                target,
+                algorithm,
+                sha256_fingerprint,
+            },
+            &fixture.agent_socket_path,
+            sink,
+        )
+        .await
+        .expect("confirm_host_key succeeds");
+    match confirmed {
+        RemoteSessionConnectResult::Connected { session_id } => session_id,
+        other => panic!("expected connected, got {other:?}"),
+    }
+}

@@ -5482,32 +5482,71 @@ async function installNativeIpcMock(
 										rows?: number;
 								  }
 								| undefined;
-							if (
-								currentSnapshot.roots.length !== 1 ||
-								startRequest?.rootId !== rootId
-							) {
+							const isNativeRoot =
+								startRequest?.rootId === rootId &&
+								currentSnapshot.roots.some(
+									(candidate) => candidate.rootId === rootId,
+								);
+							// `F220` S5: a remote-bound root is also a legitimate
+							// `terminal_start` target — mirrors
+							// `TerminalService::start`'s own `workspace.remote_context(...)`
+							// dispatch, which routes to `start_remote` *before* any of the
+							// local-only checks below.
+							const remoteBinding =
+								startRequest?.rootId === undefined
+									? undefined
+									: remoteRootBindings.get(startRequest.rootId);
+							const isRemoteRoot =
+								remoteBinding !== undefined &&
+								currentSnapshot.roots.some(
+									(candidate) => candidate.rootId === startRequest?.rootId,
+								);
+							if (!isNativeRoot && !isRemoteRoot) {
 								throw new Error(
-									"terminal_start must target the one authorized test root",
+									"terminal_start must target the one authorized native root or an authorized remote root",
 								);
 							}
-							// `F190` S2: this fixture's `terminal_profiles` snapshot (see
-							// that case below) only ever issues `systemDefault`/`zsh`/`sh`
-							// — the same bounded set a real `terminal_start` would accept.
-							// `cwd` mirrors Rust's own `resolve_cwd`: `null`, or a relative
-							// path that does not try to leave the root.
-							if (
-								startRequest.profileId !== "systemDefault" &&
-								startRequest.profileId !== "zsh" &&
-								startRequest.profileId !== "sh"
-							) {
-								throw terminalProfileInvalid();
-							}
-							if (
-								typeof startRequest.cwd === "string" &&
-								(startRequest.cwd.startsWith("/") ||
-									startRequest.cwd.split("/").includes(".."))
-							) {
-								throw terminalCwdInvalid();
+							if (isRemoteRoot) {
+								// Mirrors `treeForRootId`'s own identical "disconnected
+								// binding fails closed" check for FS operations.
+								if (!remoteSessions.has(remoteBinding.sessionId)) {
+									throw remoteSessionDisconnected();
+								}
+								// `F220` S5 v1 narrowing
+								// (`terminal::service::TerminalService::start_remote`): no
+								// remote profile enumeration, and no cwd override — a remote
+								// terminal always starts at the remote user's own home
+								// directory.
+								if (startRequest?.profileId !== "systemDefault") {
+									throw terminalProfileInvalid();
+								}
+								if (
+									startRequest?.cwd !== undefined &&
+									startRequest.cwd !== null
+								) {
+									throw terminalCwdInvalid();
+								}
+							} else {
+								// `F190` S2: this fixture's `terminal_profiles` snapshot (see
+								// that case below) only ever issues
+								// `systemDefault`/`zsh`/`sh` — the same bounded set a real
+								// `terminal_start` would accept. `cwd` mirrors Rust's own
+								// `resolve_cwd`: `null`, or a relative path that does not try
+								// to leave the root.
+								if (
+									startRequest?.profileId !== "systemDefault" &&
+									startRequest?.profileId !== "zsh" &&
+									startRequest?.profileId !== "sh"
+								) {
+									throw terminalProfileInvalid();
+								}
+								if (
+									typeof startRequest?.cwd === "string" &&
+									(startRequest.cwd.startsWith("/") ||
+										startRequest.cwd.split("/").includes(".."))
+								) {
+									throw terminalCwdInvalid();
+								}
 							}
 							const sessionId = nextTerminalSessionId();
 							const session: FakeTerminalSession = {
@@ -5542,11 +5581,14 @@ async function installNativeIpcMock(
 							// (`injected`); `sh` is deliberately not, exactly like the real
 							// `SHELL_PROFILE_SPECS` entry of the same name, so a test can
 							// exercise the accurate `unsupportedShell` degrade status without
-							// this fixture needing to model every real shell family.
+							// this fixture needing to model every real shell family. `F220`
+							// S5: a remote root is always `unsupportedShell` — v1 never
+							// uploads the injection files to a remote host at all (see
+							// `TerminalService::start_remote`'s own doc comment).
 							return {
 								sessionId,
 								shellIntegration:
-									startRequest.profileId === "sh"
+									isRemoteRoot || startRequest?.profileId === "sh"
 										? "unsupportedShell"
 										: "injected",
 							};
@@ -27749,6 +27791,314 @@ test("a host key that changed since the original connect hard-fails Plain: Recon
 	).toHaveCount(1);
 	await page.keyboard.press("Escape");
 	await expect(picker).toBeHidden();
+
+	expect(pageErrors).toEqual([]);
+});
+
+// ---------------------------------------------------------------------
+// `F220` S5 — remote terminal (`pty-req`/`shell` channel). Every scenario
+// here opens both the fixed native root *and* one mock remote root in the
+// same window (mirrors the real "mixed local+remote workspace" shape
+// `terminal::service::service::tests::remote_tests`'s own `RemoteHarness`
+// doc comment records as this slice's own known trust-identity scope
+// boundary), then drives the terminal view's root selector to the remote
+// root before creating a terminal.
+// ---------------------------------------------------------------------
+
+/** Opens the fixed native root, connects a mock SSH session, authorizes one
+ * remote root through it, and returns that remote root's own `rootId` (read
+ * back off the terminal view's own root `<select>`, the only place this
+ * mock's dynamically-issued remote root id is otherwise observable from the
+ * test side). `terminalTrustedForTest: true` — every scenario below starts
+ * at least one terminal. */
+async function openMixedLocalAndRemoteWorkspaceForTerminal(
+	page: Page,
+): Promise<string> {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await connectMockSshSession(page, "example.com", "octocat");
+	await openRemoteFolderViaQuickPick(page, ["home", "octocat", "project"]);
+
+	await createTerminal(page);
+	const selector = page.getByRole("combobox", {
+		name: "New Terminal Working Folder",
+	});
+	await expect(selector).toBeEnabled();
+	const optionValues = await selector
+		.locator("option")
+		.evaluateAll((options) =>
+			options.map((option) => (option as HTMLOptionElement).value),
+		);
+	const remoteRootId = optionValues.find(
+		(value) => value.length > 0 && value !== nativeRootId,
+	);
+	if (remoteRootId === undefined) {
+		throw new Error(
+			"expected the root selector to list the newly authorized remote root",
+		);
+	}
+
+	expect(pageErrors).toEqual([]);
+	return remoteRootId;
+}
+
+test("F220 S5: creates a remote terminal, renders scripted output, echoes typed input, and starts with the audited fixed request shape", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	const remoteRootId = await openMixedLocalAndRemoteWorkspaceForTerminal(page);
+
+	// Configure a *non-default* profile/cwd first, while the root selection
+	// is still ambiguous (so both controls are enabled) — proves the
+	// remote terminal created below genuinely *forces*
+	// `REMOTE_TERMINAL_FUTURE_TAB_DEFAULTS` rather than merely coinciding
+	// with the ordinary unconfigured fallback (which happens to be the same
+	// `systemDefault`/`null` values, so a terminal created against a never-
+	// touched configuration would not actually distinguish the two).
+	const profileSelect = page.getByRole("combobox", {
+		name: "Default Terminal Profile",
+	});
+	await profileSelect.selectOption("zsh");
+	const cwdInput = page.getByRole("textbox", {
+		name: "Default Terminal Working Directory",
+	});
+	await cwdInput.fill("nested/project");
+	await cwdInput.blur();
+
+	// `openMixedLocalAndRemoteWorkspaceForTerminal` already ran "Plain:
+	// Create Terminal" once while the root selection was still ambiguous
+	// (two roots, none explicitly chosen), which left the view pending a
+	// root pick (mirrors "Terminal requires an explicit root in a
+	// multi-root workspace…"'s own identical pattern) — selecting the
+	// remote root here is what actually starts the one terminal this test
+	// exercises.
+	const selector = page.getByRole("combobox", {
+		name: "New Terminal Working Folder",
+	});
+	await selector.selectOption(remoteRootId);
+
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+	const [startCall] = await terminalCallsFor(page, "terminal_start");
+	expect(startCall?.args.request).toMatchObject({
+		rootId: remoteRootId,
+		// `F220` S5: the frontend always forces these two exact values for a
+		// remote root, *despite* the "zsh"/"nested/project" configuration
+		// just persisted above — see `REMOTE_TERMINAL_FUTURE_TAB_DEFAULTS`'s
+		// own doc comment; `terminal::service::TerminalService::start_remote`
+		// fails closed on anything else.
+		profileId: "systemDefault",
+		cwd: null,
+	});
+
+	const surface = page.locator(".plain-terminal-surface");
+	await expect(surface).toBeVisible();
+
+	await pushTerminalOutput(page, "remote shell ready");
+	await expect(page.locator(".plain-terminal-grid")).toContainText(
+		"remote shell ready",
+	);
+
+	const input = page.locator(".plain-terminal-input");
+	await input.focus();
+	await page.keyboard.type("echo");
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "terminal_input_key")).filter(
+					({ args }) =>
+						typeof args.request === "object" &&
+						args.request !== null &&
+						typeof (args.request as { utf8?: unknown }).utf8 === "string",
+				).length,
+		)
+		.toBeGreaterThanOrEqual(4);
+	await expect(page.locator(".plain-terminal-grid")).toContainText(
+		"remote shell readyecho",
+	);
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("F220 S5: the profile and cwd controls are disabled with an explanatory tooltip for a remote root, and re-enabled back to normal for the native root", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	const remoteRootId = await openMixedLocalAndRemoteWorkspaceForTerminal(page);
+	const selector = page.getByRole("combobox", {
+		name: "New Terminal Working Folder",
+	});
+	const profileSelect = page.getByRole("combobox", {
+		name: "Default Terminal Profile",
+	});
+	const cwdInput = page.getByRole("textbox", {
+		name: "Default Terminal Working Directory",
+	});
+
+	// Selecting the remote root disables both controls and shows the fixed
+	// remote profile label — never the live-fetched local profile list.
+	await selector.selectOption(remoteRootId);
+	await expect(profileSelect).toBeDisabled();
+	await expect(profileSelect).toHaveValue("systemDefault");
+	await expect(profileSelect.locator("option")).toHaveCount(1);
+	await expect(profileSelect.locator("option")).toHaveText(
+		"Remote default shell",
+	);
+	await expect(cwdInput).toBeDisabled();
+
+	// Switching back to the native root restores the ordinary, enabled
+	// local-profile-list behavior.
+	await selector.selectOption(nativeRootId);
+	await expect(profileSelect).toBeEnabled();
+	await expect(cwdInput).toBeEnabled();
+	const localOptionCount = await profileSelect.locator("option").count();
+	expect(localOptionCount).toBeGreaterThan(1);
+
+	// And selecting the remote root again disables them again — this is a
+	// live, reversible reflection of the current selection, not a one-time
+	// decision.
+	await selector.selectOption(remoteRootId);
+	await expect(profileSelect).toBeDisabled();
+	await expect(cwdInput).toBeDisabled();
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("F220 S5: a real remote exit-status shows the ordinary accurate banner, and a session-level disconnect shows a distinct, never-disguised-as-normal banner with input inert afterward", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	const remoteRootId = await openMixedLocalAndRemoteWorkspaceForTerminal(page);
+	const selector = page.getByRole("combobox", {
+		name: "New Terminal Working Folder",
+	});
+	// Selecting the remote root here is what actually starts the terminal —
+	// see `openMixedLocalAndRemoteWorkspaceForTerminal`'s own doc comment for
+	// why the view is already pending a root pick at this point.
+	await selector.selectOption(remoteRootId);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+
+	const activePane = page.locator('.plain-terminal-pane[data-active="true"]');
+	await emitTerminalProcessExit(page, 0);
+	await expect(activePane).toHaveAttribute("data-terminal-exited", "true");
+	await expect(activePane).toHaveAttribute("data-terminal-exit-code", "0");
+	await expect(activePane).not.toHaveAttribute("data-terminal-exit-signal");
+	await expect(activePane.locator(".plain-terminal-status")).toHaveText(
+		"The shell process exited with code 0. This session has ended and cannot be resumed — close this pane when you are done with it.",
+	);
+
+	// A second remote pane, ended by a session-level disconnect instead of a
+	// real remote exit-status/exit-signal — `terminal::service`'s own
+	// `REMOTE_TERMINAL_DISCONNECTED_SIGNAL` — must render as a distinct,
+	// non-`null`-signal (never-a-normal-exit) banner, exactly like a real
+	// signal-terminated local process would.
+	await page.getByRole("button", { name: "Split Terminal Right" }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBeGreaterThanOrEqual(2);
+	const secondActivePane = page.locator(
+		'.plain-terminal-pane[data-active="true"]',
+	);
+	await emitTerminalProcessExit(page, 1, "SSH session disconnected");
+	await expect(secondActivePane).toHaveAttribute(
+		"data-terminal-exit-signal",
+		"SSH session disconnected",
+	);
+	const disconnectStatus = secondActivePane.locator(".plain-terminal-status");
+	await expect(disconnectStatus).toHaveText(
+		"The shell process was terminated (SSH session disconnected). This session has ended and cannot be resumed — close this pane when you are done with it.",
+	);
+	expect(await disconnectStatus.innerText()).not.toContain("exited with code");
+
+	// Input into the now-disconnected pane is inert — no further
+	// `terminal_input_key`, and (the real point) no unhandled-rejection
+	// `pageerror` from writing to a session nothing reads from anymore.
+	const inputKeyCallsBeforeTyping = (
+		await terminalCallsFor(page, "terminal_input_key")
+	).length;
+	await secondActivePane.locator(".plain-terminal-input").focus();
+	await page.keyboard.type("still typing after disconnect");
+	expect((await terminalCallsFor(page, "terminal_input_key")).length).toBe(
+		inputKeyCallsBeforeTyping,
+	);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("F220 S5: local terminal creation, echo, and exit banners are unaffected by the remote-terminal routing added to the same mock", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+	);
+	await openNativeWorkspaceExplorer(page);
+	await createTerminal(page);
+
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "terminal_start")).length)
+		.toBe(1);
+	const [startCall] = await terminalCallsFor(page, "terminal_start");
+	expect(startCall?.args.request).toMatchObject({
+		rootId: nativeRootId,
+		profileId: "systemDefault",
+		cwd: null,
+	});
+
+	await pushTerminalOutput(page, "still local");
+	await expect(page.locator(".plain-terminal-grid")).toContainText(
+		"still local",
+	);
+
+	const pane = page.locator(".plain-terminal-pane");
+	await emitTerminalProcessExit(page, 0);
+	await expect(pane).toHaveAttribute("data-terminal-exit-code", "0");
+	await expect(pane).not.toHaveAttribute("data-terminal-exit-signal");
 
 	expect(pageErrors).toEqual([]);
 });

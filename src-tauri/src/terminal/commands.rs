@@ -3,6 +3,7 @@ use std::sync::Arc;
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State, WebviewWindow};
 
 use crate::error::CommandError;
+use crate::remote::session::RemoteSessionService;
 use crate::trust::service::TrustService;
 use crate::workspace::service::WorkspaceService;
 
@@ -91,6 +92,7 @@ pub(crate) async fn terminal_start(
     terminal: State<'_, TerminalService>,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    remote: State<'_, RemoteSessionService>,
     request: TerminalStartRequest,
 ) -> Result<TerminalStartResult, CommandError> {
     let query = request.into_parts()?;
@@ -103,6 +105,7 @@ pub(crate) async fn terminal_start(
         .start(
             trust.inner(),
             workspace.inner(),
+            remote.inner(),
             window.label(),
             query.root_id,
             query.profile_id,
