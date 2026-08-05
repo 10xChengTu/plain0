@@ -197,6 +197,22 @@ Workbench model ← Plain feature service ← typed bridge/events
 - 解包防 zip-slip、symlink escape、zip bomb；canonical id、目标目录和每个资源路径都要验证。
 - SVG 禁止脚本、事件属性和外部 URL；TextMate grammar 是应用内静态资源，不是可执行语言扩展。
 
+### Remote SSH
+
+- 会话由 `src-tauri/src/remote/` 域唯一持有：纯 Rust `russh`/`russh-sftp`（精确 pin）在 Plain 进程内建立并保持 SSH 连接，不 spawn 系统 `ssh` 二进制；其余模块禁止直接引用 russh 类型或建立出站 TCP，由架构守卫锁定单一 owner。`remote_session_connect/disconnect/state` 等窄 IPC 把会话登记为 `(window, sessionId)`，会话状态经有界事件流下发；系统 Git 既有的 SSH 委托（`git/exec.rs` 网络模式）不受影响，两条路径互不混用（ADR 0006 §1）。
+- 认证只走 `SSH_AUTH_SOCK` 的真实 agent 协议；不实现密码认证、不读磁盘私钥、不接触或缓存任何密钥材料，无 agent、无可用身份或被拒各自给出独立错误码并 fail closed（ADR 0006 §2）。
+- host-key 由 Plain 自有版本化 known-hosts 存储（app-local-data，沿用 ADR 0005 的原子写纪律）显式确认与 pin：首次连接展示算法与全量指纹，取消即零连接；指纹变化硬失败且 v1 不提供「仍然连接」旁路，删除 pin 是显式确认过的产品命令；用户 `~/.ssh/known_hosts` 只读参考，Plain 从不写入（ADR 0006 §3）。
+- 来自远程的一切字节（目录名、文件内容、stat、PTY 输出、Git 输出、DAP 消息）按既有 strict 解码纪律处理：有界、fail-closed、拒绝畸形；路径必须相对且经容器化重验，拒绝符号链接逃逸（ADR 0006 §4）。
+- `WorkspaceRoot` 是封闭后端枚举：`Local`（`cap_std::fs::Dir` 语义逐字节不变）与 `RemoteSsh`（持有会话引用 + 远程规范化基路径）；既有 `rootId` + `(rootId, relativePath)` 寻址协议与 `plain-workspace://<rootId>/` provider 原样复用，前端对 root 背后是什么后端完全无感。远程 root identity 是 `(host-key 指纹, canonical 远程路径)`，指纹是 identity 的一部分：主机重装后同名路径视为不同 root，旧 root 的信任与备份不迁移（ADR 0007 §1–2）。
+- 远程文件系统经 SFTP 通道：`RemoteSsh` 后端实现既有工作区 DTO 面（stat/read/readdir/write/mkdir/rename/delete），每次路径解析都在 Rust 内完成「拼接 → SFTP `realpath` 重验 → 必须仍在基路径之下」，不存在先检查后使用的 ambient 路径组合；写入沿用现有大小上限与版本化写入合同，远程没有本地 staged rename，改用 SFTP 临时名 + rename 近似原子并如实记录差异。远程分支不提供实时 watcher：v1 语义是无自动文件事件，依赖写入/删除/重命名后的显式失效加用户显式刷新，等价于永久处于 ADR 0004 watcher 队列满时的 rescan-on-demand 降级语义（ADR 0007 §3）。
+- 远程终端复用 SSH session channel 的 `pty-req` + `shell`，接入既有终端域 DTO/背压/生命周期合同；v1 收窄为远程默认 shell 在远程 home 目录启动，不透传本地环境、不做 profile 枚举或 shell-integration 注入。
+- 远程 Git 经 SSH `exec` 通道以参数数组运行远程 `git`（命令行由专用 shell 转义器编码，往返可逆性经敌意矩阵验证），支持核心读子集（status/diff/log）加 stage/commit；fetch/pull/push 等网络或凭据类操作 v1 明确 fail closed（独立错误码，不复用「域未接入」的通用兜底），不做端口转发或凭据代理；后台读取的 hardened 模式只中和 `core.hooksPath`/`core.fsmonitor`，不做本地分支已有的按仓库 filter 名单逐条中和。
+- 远程 DAP 经 `exec` 通道启动远程 adapter，`debug::framing` 的 `Content-Length` framing 直接架在通道读写流上，`russh` 类型不外泄到 `debug::session`；v1 只支持 `stdio` 传输，`tcp`/`tcpSpawn` 对远程 root 显式 fail closed（SSH exec 通道无法承载回环端口语义，也不通过端口转发绕过）。DAP 的 `runInTerminal` 反向请求路由到同一会话的远程终端（`pty-req` + `exec` 变体）；adapter 确认门新增「远程」维度，按 host 指纹去重，与本地及其他远程主机各自独立。
+- 生命周期严格 fail closed：连接建立、认证与每个通道打开都有独立超时与协作式取消。会话断开时，所有依赖该会话的 root/终端/调试会话立即标记不可用并停止接受操作，不做静默自动重连；脏编辑器内容留在内存，hot-exit 备份分区键从 canonical path digest 扩展为 identity digest（远程 = 指纹 + 路径）以便跨进程按 identity 恢复。显式重连是一次新的信任决策：必须重新校验 host-key（指纹须与 pin 一致）并重新验证 root 身份后才恢复能力；冷启动恢复远程 workspace 不自动连接，展示「需要重连」状态，由用户显式触发。窗口或应用关闭时会话与全部通道显式 shutdown，远程侧不留守护进程，Plain 不在远程主机安装任何常驻组件（ADR 0006 §5，ADR 0007 §4）。
+- Recent 记录远程 root 时只存展示名、opaque id 与重连所需的 `(host, port, user, 远程路径)`，不存指纹之外的任何密钥材料。
+- 搜索 v1 不接远程，对选中的远程 root 返回 `ROOT_BACKEND_UNSUPPORTED`；其余各域对远程 root 的支持逐域显式声明与实现，未接入的域统一走同一错误码，不静默降级、不半工作（ADR 0007 §5）。
+- 不实现端口转发、X11 转发、agent 转发、SOCKS 代理或反向隧道；不存在远程 extension host、远程 settings 同步或远程插件安装。
+
 ## 7. 安全边界
 
 - Tauri capability 按窗口和插件最小化；默认不给前端 shell/fs 全局权限，绝不设置 `$HOME/**` 资源 scope。
@@ -205,6 +221,7 @@ Workbench model ← Plain feature service ← typed bridge/events
 - 主题导入、文件预览和 Markdown 禁止任意网络请求与脚本执行。
 - 危险 Git/文件操作返回预览并由 UI 二次确认。
 - IPC DTO 做长度、数量、路径和枚举校验；错误不泄露敏感主目录内容。
+- Remote SSH 不做端口转发、agent 转发、X11 转发、SOCKS 代理或反向隧道，也不在远程主机安装任何常驻组件；不存在远程 extension host、远程 settings 同步或远程插件安装。上游 `monaco-vscode-api` 的 Remote Development 死代码（第 4 节提及的 `remote` 类 bundle 残留）继续保持不可达——Plain 自有的 Rust Remote SSH 实现（`remote/` 域，ADR 0006/0007）与它完全独立，是经过重新审计的窄能力，不是重新激活上游 Remote 栈。
 
 ## 8. 旧代码迁移与退役门
 
@@ -230,3 +247,6 @@ Workbench model ← Plain feature service ← typed bridge/events
 - `docs/decisions/0002-theme-only-extension-boundary.md`
 - `docs/decisions/0003-native-git-and-generic-dap.md`
 - `docs/decisions/0004-capability-workspace-roots.md`
+- `docs/decisions/0005-rust-owned-local-workflows.md`
+- `docs/decisions/0006-ssh-remote-workspace-trust.md`
+- `docs/decisions/0007-remote-workspace-capability.md`

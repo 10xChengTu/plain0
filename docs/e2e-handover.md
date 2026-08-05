@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-08-05（E2E-027 已登记待执行；既有条目的完成或阻塞状态以各自小节为准）
+更新时间：2026-08-05（E2E-028 已登记待执行；既有条目的完成或阻塞状态以各自小节为准）
 
 ## 分工模式
 
@@ -734,6 +734,49 @@ fixture（本条专用临时目录，不使用真实开发仓库或用户密钥�
 
 完成后：将真实结果写入 `features.json` F210 的 `evidence`（`nativeScenarios`/`platformGaps`/`acceptanceResults`），补齐桌面证据（F210 已按例外收账处于 `complete`，无需再次改动状态）。
 
+### E2E-028 · F220 完整 SSH 远程工作区真实主机矩阵（ssh-agent 真实认证、首次指纹确认与 pin、SFTP 工作区读写、断连 fail closed 与显式重连、冷启动需要重连、远程终端/Git/DAP、指纹变化硬失败、进程与远程守护零残留）
+
+状态：**待执行**（按用户指示与 `E2E-025`/`E2E-026`/`E2E-027` 攒批统一执行）。本条覆盖 `F220` S1–S7（含 S3B）全部实现切片累计的真实主机面——Rust hermetic sshd fixture（真实 `russh::server` 在 loopback 起的受控 sshd + 真实 agent 协议 server，均非 mock）与 Browser mock 已逐切片验证协议/状态机/DTO/UI 文案正确性，但真实 SSH 握手（真实密钥交换与加密套件协商）、真实 ssh-agent 二进制签名、真实 SFTP 服务器行为、真实网络断连/超时竞态与真实远程 debugpy/Git 进程只能在真实主机上验证。`F220` 已按用户指示例外收账转 `complete`（同 `F190`/`F200`/`F210` 模式）：不代表真实远程主机验收已通过，本条通过后再回写 `features.json` F220 的 `evidence`（`nativeScenarios`/`platformGaps`/`acceptanceResults`）补齐主机证据。
+
+前置条件：
+
+- 同 E2E-025/026/027：以系统工具优先 PATH 与 `APPLE_SIGNING_IDENTITY=-` 从当前工作树执行 `pnpm tauri:build:e2e`，只按仓库绝对路径启动新生成的 `src-tauri/target/debug/bundle/macos/Plain.app`；`codesign --verify --deep --strict` 通过后再取样。执行前确认真实空闲窗口（合成键盘遇真人键鼠活动即让位中止）。
+- 需要一个执行方可控、真实可达的 SSH 主机（二选一）：（a）本机 localhost sshd——macOS 系统设置 → 通用 → 共享 → 远程登录（Remote Login）显式打开并允许当前账户；（b）局域网内另一台可控主机，已装 OpenSSH server 且执行方拥有账户。两种情况都不使用生产主机、第三方主机或用户日常个人服务器凭据。
+- 执行机已有一个真实身份加载到运行中的 ssh-agent（`ssh-add -l` 可见至少一条），且该公钥已加入目标主机 `~/.ssh/authorized_keys`（本条验收专用账户/身份，不混用用户日常长期身份）。
+- 执行前清空或备份 Plain 的 known-hosts 存储（app-local-data 下 `known-hosts.plain.json`），并确保目标主机对 Plain 而言是「从未 pin 过」的全新主机身份（若之前已连过，改用新开的第二 sshd 实例或未连过的局域网主机），使步骤 1 的首次连接路径真实可测。
+
+fixture（远程主机上创建，本条专用临时目录/仓库，不使用远程主机上的生产数据）：
+
+- 远程主机上一个专用临时目录（如 `~/tmp-f220-e2e/`），内含若干文本文件，用于 SFTP 打开/编辑/保存核对字节与 SHA-256、新建/重命名/删除核对。
+- 远程主机上一个真实 Git 仓库（`git init` 加至少一次提交），预置一个未跟踪文件与一个已修改文件，用于远程 Git status/stage/commit 验证。
+- 远程主机已安装真实 Python 3 与 `debugpy`（同 `E2E-027` 前置要求，`python3 -m pip show debugpy` 核实版本），配套一个远程可断点的小程序与指向远程 root 的 `launch.json`。
+
+步骤与断言：
+
+1. **首次连接与指纹确认**：对「从未 pin 过」的目标主机执行 Plain 远程连接命令（host/port/user），断言真实弹出 host-key 确认对话框，其展示的算法与指纹与该主机 `ssh-keyscan`/`ssh-keygen -lf` 独立核验结果逐字节一致；确认后连接建立并可继续操作。取消路径额外验证一次：取消后零会话、known-hosts 未落盘。
+2. **ssh-agent 真实认证**：全程不出现任何密码/passphrase 输入框，确认使用的是 agent 签名；核对认证使用的身份与 `ssh-add -l` 中的目标身份一致。
+3. **SFTP 工作区**：远程目录选择器选中 fixture 目录后 Explorer 正确投影远程文件树；打开一个远程文件、编辑、保存，用远程 shell `sha256sum`/`wc -c` 核对远程磁盘字节与 SHA-256 精确匹配编辑内容；新建、重命名、删除远程文件各一次，每步都用远程 shell 独立核对真实发生。
+4. **断连 fail closed**：编辑一个远程文件产生 dirty 状态后，在远程主机上停止 sshd 服务或断开网络，断言 Plain 侧所有依赖该会话的 root/终端/调试会话立即标记不可用并停止接受操作，dirty 编辑器内容保留在内存，不丢失、不静默重连。
+5. **显式重连恢复**：恢复 sshd/网络后，通过 Plain 的显式重连命令重新建立会话，断言重新走一次 host-key 校验（指纹与既有 pin 一致时无需重新确认对话）与 root 身份重验后，Explorer/终端/相关能力恢复可用，此前 dirty 内容仍在。
+6. **冷启动「需要重连」**：完全退出 Plain 后重新启动，断言此前打开的远程 workspace 以「需要重连」状态呈现且不自动发起任何网络连接，用户显式触发后成功恢复。
+7. **远程终端**：新建远程终端，`pwd` 输出核对确为远程主机 home 目录（而非本地路径或 fixture 目录）；输入输出往返正常；执行 `exit` 后终端进入正确退出状态，远程侧 `ps`/`who` 核对对应 shell 进程已终止。
+8. **远程 Git**：对 fixture Git 仓库执行 status（未跟踪/已修改文件正确显示）、stage、commit，用远程 shell `git log`/`git status --porcelain` 核对提交真实落地、工作区状态与 Plain UI 一致。
+9. **远程 DAP**：对 fixture Python 目标执行 `Plain: Start Debugging`（`stdio` 传输），断言远程 debugpy 会话建立、断点命中、调用栈/变量正确显示；若 fixture 配置触发 `runInTerminal`，验证反向请求路由到同一会话的远程终端而非本地终端。
+10. **指纹变化硬失败**：在远程主机上重新生成或替换 host key（例如换用第二个使用不同 host key 的 sshd 实例监听原端口），断言 Plain 对该 `(host, port)` 的下一次连接尝试硬失败并展示新旧指纹对比，没有「仍然连接」旁路；用显式忘记 pin 命令删除旧 pin 后重连成功并建立新 pin。
+11. **退出零残留**：完成以上全部步骤后 `Cmd+Q`，本地用 `ps`/`pgrep` 核对无残留 Plain 进程或本条产生的后台进程；远程主机用 `ps`/`who` 核对无 Plain 相关守护进程、无残留 SSH 会话、无残留 debugpy/git 子进程。
+
+证据要求：每一步除 UI 观察外，需要至少一项独立于 Plain 自身的核验证据（远程 shell 命令输出、`ssh-keyscan`/`ssh-keygen -lf` 指纹核对、远程 `ps`/`git log`、本地 `ps`/`pgrep`），不得仅凭 UI 文案判定通过；发现的任何真实缺陷需按既有条目先修复代码、补自动化回归（Rust hermetic 或 Browser 均可），再重跑受影响步骤，不得带着已知缺陷标记通过。
+
+已知边界（执行方须知）：
+
+- 本条依赖执行机之外的真实网络与主机资源（本机 sshd 需要用户在系统设置中显式开启 Remote Login，局域网主机需要执行方拥有账户与控制权），无法在当前沙箱/CI 环境内自动满足；这是本条与只需真实 Tauri 构建的 `E2E-025`/`E2E-026`/`E2E-027` 的结构性差异，也是它继续待执行的部分原因。
+- 步骤 10（指纹变化硬失败）需要执行方能够控制目标主机的 host key；若使用无法控制 host key 的局域网主机，改用「仅本机 sshd」变体执行该步骤。
+- 断连步骤（4）若使用局域网主机且无法直接停止其 sshd 服务，可改用本机防火墙规则临时阻断到目标主机的出站连接达到等价效果，需在执行记录中注明实际采用的断连方式。
+
+清理：删除远程主机上的 `~/tmp-f220-e2e/` fixture 目录与专用 Git 仓库；删除本条为验收新增的 `authorized_keys` 条目（若为专用账户新增）；若本机 sshd 仅为本条临时开启，验收后在系统设置中关闭 Remote Login 恢复原状；本地删除 `dist`、`test-results` 与 `src-tauri/target`；`git status --short` 确认工作树干净。
+
+完成后：将真实结果写入 `features.json` F220 的 `evidence`（`nativeScenarios`/`platformGaps`/`acceptanceResults`），补齐真实主机证据（F220 已按例外收账处于 `complete`，无需再次改动状态）。
+
 ## 后续条目（随切片追加）
 
 - F030 遗留：真实 `CloseRequested` 关窗握手协议实现后，补「正常关窗 → 重开恢复」的桌面验收变体。
@@ -756,3 +799,4 @@ fixture（本条专用临时目录，不使用真实开发仓库或用户密钥�
 - F190 S1–S6（profile/cwd、future-tab defaults、递归 split、OSC 7/8/133 与链接、终端查找、live scrollback、真实 exit banner 与不可恢复 marker）自动化两层已闭合；真实桌面 profile/cwd 冷启动持久化、OSC 真实注入与降级、链接 opener、split 上限、查找、live scrollback、真实 shell 退出/信号 banner、异常 kill 重启不可恢复说明、`SSH_AUTH_SOCK` 继承与零残留进程矩阵已登记为 E2E-025（**待执行**）；按用户 2026-08-04 指示例外收账，F190 已转 `complete`，E2E-025 保持登记待执行、与后续 feature 的桌面矩阵攒批统一跑，唯一 WIP 切到 F200。
 - F200 S1–S3（搜索入口命令/快捷键与 case/word 开关、Rust 捕获组替换展开、正则能力背书与跳过/截断可见状态）自动化两层已闭合；真实桌面 `Cmd/Ctrl+Shift+F`/`Cmd/Ctrl+Shift+H` 键位打开聚焦、Aa/全字开关真实请求、正则捕获组模板 Replace All 真实落盘与越界组 fail-closed 零写入、真实 >8 MiB 大文件与二进制文件跳过提示、20,000 结果截断提示、真实 undo 逐文件回滚与退出后零残留进程矩阵已登记为 E2E-026（**待执行**）；按用户 2026-08-04 指示，E2E-026 与 E2E-025 一并暂缓、攒批统一执行，F200 同样按例外收账模式转 `complete`，唯一 WIP 切到 F210。
 - F210 S1–S6（launch 配置 QuickPick 选择器、共享 Watch/Variables 树展开、hit-count 断点、step-in targets、只读 disassembly 视图、tcpSpawn spawn-then-connect 编排）自动化两层已闭合；真实桌面多配置选择、真实 debugpy hit-count 命中计数、真实嵌套 Watch 对象展开、step-in targets 能力核实、真实 debugpy spawn-then-connect（覆盖端口延迟就绪与进程早退）与退出后零残留进程矩阵已登记为 E2E-027（**待执行**）；`lldb-dap` 原生半边（disassembly、原生 step-in targets）如实登记双重阻塞（攒批暂缓 + F120 签名 entitlement 前提，两者相互独立）。按用户 2026-08-04 指示，E2E-027 与 E2E-025/E2E-026 一并暂缓、攒批统一执行，F210 同样按例外收账模式转 `complete`，唯一 WIP 切到 F220。
+- F220 S1–S7（含 S3B：SSH 会话与信任底座、root 后端封闭枚举化、SFTP 远程文件系统、远程生命周期、远程终端、远程 Git 核心子集、远程 DAP）自动化两层已闭合；真实远程主机 ssh-agent 认证、首次指纹确认与 pin、SFTP 工作区读写、断连 fail closed 与显式重连、冷启动需要重连、远程终端/Git/DAP、指纹变化硬失败与退出后本地/远程零残留矩阵已登记为 E2E-028（**待执行**）；本条额外要求执行方可控的真实可达 SSH 主机（本机 sshd 或局域网主机），是它与仅需真实 Tauri 构建的 E2E-025/026/027 的结构性差异。按用户指示，E2E-028 与 E2E-025/E2E-026/E2E-027 一并暂缓、攒批统一执行，F220 同样按例外收账模式转 `complete`，唯一 WIP 切到 F230。

@@ -1192,19 +1192,59 @@
 			"id": "F220",
 			"name": "Rust SSH remote workspace",
 			"phase": 6,
-			"status": "in_progress",
+			"status": "complete",
 			"acceptance": [
 				"Product scope architecture and ADRs explicitly define the Remote SSH trust and threat model",
 				"Rust owns SSH authentication host-key verification remote filesystem PTY Git and DAP transports",
 				"The WebView receives only opaque remote workspace capabilities and no general shell filesystem or extension-host access",
 				"Connection loss reconnect cancellation cleanup and real remote-host E2E pass"
-			]
+			],
+			"evidence": {
+				"commands": ["pnpm check", "pnpm test:e2e:browser"],
+				"results": [
+					"S0 froze the research plan and ADR 0006/0007 defining the trust/threat model and the parallel remote capability abstraction (abc518f0). S1 added a dedicated remote/ domain owning russh/russh-sftp session establishment with agent-only ssh-agent authentication, a Plain-owned pinned known-hosts store with explicit first-connection confirmation and hard failure on fingerprint change, and independent connect/authentication timeouts with cooperative cancellation (6325ce04). S2 refactored WorkspaceRoot into a closed Local/RemoteSsh backend enum, keeping local cap_std::fs::Dir behaviour byte-for-byte unchanged while establishing remote identity as (host-key fingerprint, canonical remote path) (f36cedab). S3/S3B implemented the SFTP filesystem backend covering stat/read/readdir/write/mkdir/rename/delete with per-call realpath containment revalidation against the base path, plus a writable-fixture Rust integration layer exercising real CRUD over a real hermetic sshd (57a61a0c, 383d2050). S4 added explicit fail-closed disconnect propagation to every dependent root/terminal/debug session, explicit reconnect that re-verifies the pinned fingerprint and root identity before restoring capability, cold-start reconnect-required Recent handling, and an identity-digest-keyed hot-exit backup partition (78821712). S5 wired remote terminals over SSH session pty-req+shell channels into the existing terminal domain's DTO, backpressure and lifecycle contract (dd5cbfe4). S6 added the remote Git core subset (status/diff/log/stage/commit) over an SSH exec channel, including a from-scratch, exhaustively tested POSIX shell-argument escaper, fail-closed network/credential operations under a distinct error code, and an extension of the workspace trust identity to cover purely-remote and mixed local/remote workspaces (50de1393). S7 added remote DAP over an SSH exec channel that reuses debug::framing and debug::session verbatim with no russh type ever crossing that boundary, a remote dimension on the adapter confirmation gate keyed by host fingerprint, and runInTerminal reverse-request routing to the same session's remote terminal; tcp and tcpSpawn transports are explicitly rejected for remote roots since SSH exec channels cannot carry loopback port semantics (a7f18f16). Every slice passed its focused gates and was committed independently, following the research plan and ADR 0006/0007 frozen in docs/research/2026-08-05-ssh-remote-workspace.md.",
+					"The final automated baseline passed 117 frontend test files and 2294 tests, architecture over 125 app and 210 Rust sources with 17 pinned runtime dependencies, the 2021-source bundle audit with 53 tracked transitional sources, 35 audited JS production dependencies plus 544 crate and 128 license-block third-party notices, all-target Clippy and 1562/1562 Rust tests. The full Chromium matrix passed 192/192 including every scenario added across F220's slices."
+				],
+				"nativeScenarios": [
+					"E2E-028 is registered in docs/e2e-handover.md as the pending real-remote-host matrix for every F220 surface (real ssh-agent authentication, first-connection fingerprint confirmation and pinning, SFTP workspace open/edit/save/create/rename/delete with byte and SHA verification, fail-closed behaviour on a real disconnect via a killed sshd or a severed network plus explicit reconnect recovery, cold-start reconnect-required state, a real remote terminal rooted at the remote home directory, real remote Git status/stage/commit, a full real remote debugpy session plus runInTerminal remote routing, hard failure on fingerprint change, and zero residual local or remote processes after quit), usable against either a local loopback sshd (macOS Remote Login) or a controlled LAN host. By explicit user decision it is deferred and will be executed together with E2E-025/E2E-026/E2E-027 in a batched run; this completion is an exception-close and the real-remote-host evidence will be backfilled."
+				],
+				"platformGaps": [
+					"The E2E-028 real remote-host matrix is deferred by user decision and has not run yet; feature closure rests on the Rust hermetic sshd/agent fixture tier (a real russh::server plus a real agent-protocol server on loopback, not a mock) and the Browser mock tier.",
+					"Authentication is agent-only (SSH_AUTH_SOCK signing via a real agent-protocol client); there is no password authentication, no on-disk private-key reading, no passphrase UI and no credential caching of any kind, so an environment without a running agent holding an accepted identity cannot use Remote SSH at all, by design.",
+					"Search is not wired to remote roots in v1; text and Quick Open search return ROOT_BACKEND_UNSUPPORTED for a selected remote root.",
+					"Remote terminals launch only the remote default shell at the remote home directory; there is no remote shell-profile enumeration, no forwarding of the local environment beyond the terminal domain's existing narrow allowlist, and no remote shell-integration injection.",
+					"Remote Git supports only the core subset (status/diff/log/stage/commit); fetch/pull/push and other network or credential operations fail closed under a distinct GIT_REMOTE_NETWORK_UNSUPPORTED code, and the remote BackgroundRead hardening profile neutralizes core.hooksPath/core.fsmonitor but does not perform the local branch's per-repository filter.<name> neutralization pass.",
+					"Remote DAP supports only the stdio transport; tcp and tcpSpawn are explicitly rejected for remote roots since SSH exec channels cannot carry loopback port semantics, and no port forwarding exists to work around that.",
+					"No port forwarding, agent forwarding, X11 forwarding, SOCKS proxying or reverse tunnelling is implemented, and no remote extension host, remote settings sync or remote plugin installation exists.",
+					"Remote roots have no live filesystem watcher; v1 semantics are explicit rescan-on-demand only (post-write/delete/rename invalidation plus a user-triggered refresh), equivalent to the existing local watcher's queue-full degradation mode made permanent.",
+					"Host-key fingerprint changes hard-fail with no override path in v1; the user must explicitly forget the pinned entry after independently verifying the new host before reconnecting.",
+					"Windows and Linux packaging, release signing and notarization remain outside this non-release completion phase."
+				],
+				"acceptanceResults": [
+					{
+						"acceptance": "Product scope architecture and ADRs explicitly define the Remote SSH trust and threat model",
+						"result": "Achieved. S0 froze ADR 0006 (process-owned russh transport, agent-only authentication, a Plain-owned pinned known-hosts store, untrusted remote bytes, and a fail-closed lifecycle) and ADR 0007 (a closed WorkspaceRoot backend enum, fingerprint-plus-path remote identity, rescan-on-demand watcher semantics, identity-digest-keyed backups, and per-domain explicit opt-in). docs/product-scope.md's exclusion list was revised so Remote SSH is in-scope while port/agent/X11 forwarding and a remote extension host remain explicitly excluded, and docs/architecture.md gained a Remote SSH subsection under its domain-design section plus a matching security-boundary bullet, both cross-referencing ADR 0006/0007."
+					},
+					{
+						"acceptance": "Rust owns SSH authentication host-key verification remote filesystem PTY Git and DAP transports",
+						"result": "Achieved in the automated tiers. S1 gave the remote/ domain sole ownership of session establishment, agent-only authentication and pinned host-key verification; S2 established the closed root-backend enum and remote identity; S3/S3B delivered the SFTP filesystem backend with realpath containment; S5 through S7 wired remote PTY, Git core subset and DAP transports over SSH session/exec channels reusing each domain's existing DTO contract verbatim. Real remote-host confirmation of the full transport stack end to end is part of the deferred E2E-028."
+					},
+					{
+						"acceptance": "The WebView receives only opaque remote workspace capabilities and no general shell filesystem or extension-host access",
+						"result": "Achieved. The existing rootId plus (rootId, relativePath) addressing protocol and the plain-workspace://<rootId>/ provider are reused unchanged from the local backend (ADR 0004); the frontend never receives a native remote path, a host-key fingerprint's raw bytes beyond display, an agent socket path or any credential material, only opaque root ids, display labels and the (host, port, user, path) metadata needed to reconnect. No remote extension host, remote settings sync or remote plugin installation exists, and the upstream monaco-vscode-api Remote Development dead bundles referenced in architecture.md section 4 remain unreachable."
+					},
+					{
+						"acceptance": "Connection loss reconnect cancellation cleanup and real remote-host E2E pass",
+						"result": "Partially achieved pending E2E-028. S4's fail-closed disconnect propagation, explicit reconnect that re-verifies the pinned fingerprint and root identity, cold-start reconnect-required Recent state, and every slice's connect/authentication/channel-open cancellation and window-teardown cleanup are covered end to end by the Rust hermetic sshd/agent fixture tier (a real russh::server plus a real agent-protocol server on loopback, not a mock) and the Browser mock tier. E2E-028 is registered in docs/e2e-handover.md as the pending real remote-host matrix (real ssh-agent authentication, first-connection pinning, SFTP CRUD, disconnect/reconnect against a real killed sshd or severed network, cold-start reconnect-required state, real remote terminal/Git/DAP, fingerprint-change hard failure, and zero residual local/remote processes), usable against a local loopback sshd or a controlled LAN host. Per explicit user decision, this is an exception-close and the real-remote-host evidence will be backfilled once E2E-028 executes."
+					}
+				]
+			}
 		},
 		{
 			"id": "F230",
 			"name": "Non-release end-to-end completion audit",
 			"phase": 6,
-			"status": "planned",
+			"status": "in_progress",
 			"acceptance": [
 				"Every non-release requirement is mapped to current executable evidence",
 				"Unit integration Browser and real Tauri evidence tiers are reported separately",
