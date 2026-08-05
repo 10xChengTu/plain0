@@ -625,7 +625,7 @@ Close Folder 时序：主窗口在执行 `Cmd+K F` 前把 primary 最后一个 r
 
 ### E2E-025 · F190 完整终端工作流真实桌面矩阵（profile/cwd 持久化、OSC 注入、split、查找、live scrollback、退出/不可恢复、SSH agent、进程清理）
 
-状态：**待执行**。本条覆盖 `F190` S1–S6 全部六个切片累计的真实桌面面——Browser mock 已逐切片验证协议/状态机正确性，但 zsh/bash/fish 启动注入、真实链接 opener、`SSH_AUTH_SOCK` 继承与真实进程退出/信号只能在真实 shell 子进程上验证。F190 在本条通过前保持 `in_progress`；本条通过后再回写 `features.json` evidence 并关闭 F190，转入 F200。
+状态：**待执行**（按用户 2026-08-04 指示暂缓，与 `E2E-026`/`E2E-027`/`E2E-028` 攒批统一执行）。本条覆盖 `F190` S1–S6 全部六个切片累计的真实桌面面——Browser mock 已逐切片验证协议/状态机正确性，但 zsh/bash/fish 启动注入、真实链接 opener、`SSH_AUTH_SOCK` 继承与真实进程退出/信号只能在真实 shell 子进程上验证。`F190` 已按用户指示例外收账转 `complete`（同 `F200`/`F210`/`F220` 模式）：不代表桌面验收已通过，本条通过后再回写 `features.json` F190 的 `evidence`（`nativeScenarios`/`platformGaps`/`acceptanceResults`）补齐桌面证据。
 
 前置条件：
 
@@ -657,7 +657,7 @@ fixture（本条专用临时目录，不使用真实开发仓库或用户密钥�
 
 清理：删除 `tmp-f190-e2e/` fixture、一次性 SSH 密钥对（若新生成）、临时 `ssh-agent`（若新起）、`dist`、`test-results` 与 `src-tauri/target`；`git status --short` 确认工作树干净。
 
-完成后：将真实结果写入 `features.json` F190 的 `evidence`（`nativeScenarios`/`platformGaps`），并把 F190 状态改为 `complete`；随后 `progress.md`「当前最小工作项」切到 F200。
+完成后：将真实结果写入 `features.json` F190 的 `evidence`（`nativeScenarios`/`platformGaps`/`acceptanceResults`），补齐桌面证据（F190 已按例外收账处于 `complete`，无需再次改动状态）。
 
 ### E2E-026 · F200 完整搜索工作流真实桌面矩阵（Cmd/Ctrl+Shift+F/H 真实键位、Aa/全字真实请求、捕获组模板 Replace All 真实落盘、越界组 fail-closed 零写入、大文件/二进制跳过提示、20,000 截断提示、真实 undo 回滚、进程清理）
 

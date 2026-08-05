@@ -71,6 +71,13 @@ import {
 	validateDebugFramingBounds,
 	validateRootBackendOwnershipBoundary,
 	validateShellEscapeSoleCallerBoundary,
+	validateRemoteCommandRegistration,
+	validateRemoteSshLibraryOwnershipBoundary,
+	validateSearchCommandRegistration,
+	validateSearchExpandReplacementsCommandRegistration,
+	validateSearchFileBudgetConstants,
+	validateSearchTextBudgetConstants,
+	validateSearchTextCommandRegistration,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
 const baselineWindow = {
@@ -15047,5 +15054,515 @@ fn build(argv: &[String]) -> Result<String, CommandError> {
 				`${source}\n// Never call encode_posix_command_line or shell_escape here.\nconst NOTE: &str = "encode_posix_command_line and shell_escape";\n`,
 		);
 		expect(validateShellEscapeSoleCallerBoundary(commented)).toEqual([]);
+	});
+});
+
+describe("Plain F040 search files command registration Harness", () => {
+	const searchCommandsSource = readFileSync(
+		new URL("../../src-tauri/src/search/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const libSourceForSearch = readFileSync(
+		new URL("../../src-tauri/src/lib.rs", import.meta.url),
+		"utf8",
+	);
+
+	const baselineSearchFilesRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/search/commands.rs",
+			source: searchCommandsSource,
+		},
+		{ relativePath: "src-tauri/src/lib.rs", source: libSourceForSearch },
+	]);
+
+	it("passes for the real, unmodified search files command files", () => {
+		expect(
+			validateSearchCommandRegistration(baselineSearchFilesRustSources),
+		).toEqual([]);
+	});
+
+	it("fails if workspace_search_files's body is rewired to bypass window.label()", () => {
+		const rewired = mutateWorkspaceSource(
+			baselineSearchFilesRustSources,
+			"src-tauri/src/search/commands.rs",
+			(source) =>
+				source.replace(
+					"WorkspaceService::search_files(service.inner(), window.label(), query).await",
+					'WorkspaceService::search_files(service.inner(), "main", query).await',
+				),
+		);
+		expect(validateSearchCommandRegistration(rewired)).toContain(
+			"workspace_search_files must contain only its DTO decode and a single WorkspaceService::search_files route",
+		);
+	});
+
+	it("fails if workspace_search_files drops its window parameter", () => {
+		const rewired = mutateWorkspaceSource(
+			baselineSearchFilesRustSources,
+			"src-tauri/src/search/commands.rs",
+			(source) =>
+				source.replace(
+					"pub(crate) async fn workspace_search_files(\n    window: WebviewWindow,\n    service:",
+					"pub(crate) async fn workspace_search_files(\n    service:",
+				),
+		);
+		expect(validateSearchCommandRegistration(rewired)).toContain(
+			"workspace_search_files must accept request: WorkspaceSearchFilesRequest and return Result<WorkspaceSearchFilesResult, CommandError>",
+		);
+	});
+
+	it("fails if workspace_search_files is missing from lib.rs's generate_handler", () => {
+		const missingRegistration = mutateWorkspaceSource(
+			baselineSearchFilesRustSources,
+			"src-tauri/src/lib.rs",
+			(source) =>
+				source.replace(
+					"            search::commands::workspace_search_files,\n",
+					"",
+				),
+		);
+		expect(validateSearchCommandRegistration(missingRegistration)).toContain(
+			"src-tauri/src/lib.rs must register search::commands::workspace_search_files exactly once in generate_handler",
+		);
+	});
+});
+
+describe("Plain F040 S3 search text command registration Harness", () => {
+	const searchCommandsSource = readFileSync(
+		new URL("../../src-tauri/src/search/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const libSourceForSearchText = readFileSync(
+		new URL("../../src-tauri/src/lib.rs", import.meta.url),
+		"utf8",
+	);
+
+	const baselineSearchTextRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/search/commands.rs",
+			source: searchCommandsSource,
+		},
+		{ relativePath: "src-tauri/src/lib.rs", source: libSourceForSearchText },
+	]);
+
+	it("passes for the real, unmodified search text command files", () => {
+		expect(
+			validateSearchTextCommandRegistration(baselineSearchTextRustSources),
+		).toEqual([]);
+	});
+
+	it("fails if workspace_search_text_start is renamed away from its audited name", () => {
+		const rewired = mutateWorkspaceSource(
+			baselineSearchTextRustSources,
+			"src-tauri/src/search/commands.rs",
+			(source) =>
+				source.replace(
+					"pub(crate) async fn workspace_search_text_start(",
+					"pub(crate) async fn workspace_search_text_start_renamed(",
+				),
+		);
+		expect(validateSearchTextCommandRegistration(rewired)).toContain(
+			"search/commands.rs must define exactly one audited workspace_search_text_start Tauri command",
+		);
+	});
+
+	it("fails if workspace_search_text_poll's body is rewired to hardcode its cursor", () => {
+		const rewired = mutateWorkspaceSource(
+			baselineSearchTextRustSources,
+			"src-tauri/src/search/commands.rs",
+			(source) =>
+				source.replace(
+					".search_text_poll(window.label(), search_id, cursor)",
+					".search_text_poll(window.label(), search_id, 0)",
+				),
+		);
+		expect(validateSearchTextCommandRegistration(rewired)).toContain(
+			"workspace_search_text_poll must contain only its audited DTO decode and single WorkspaceService route",
+		);
+	});
+
+	it("fails if workspace_search_text_cancel drops its window parameter", () => {
+		const rewired = mutateWorkspaceSource(
+			baselineSearchTextRustSources,
+			"src-tauri/src/search/commands.rs",
+			(source) =>
+				source.replace(
+					"pub(crate) async fn workspace_search_text_cancel(\n    window: WebviewWindow,\n    service:",
+					"pub(crate) async fn workspace_search_text_cancel(\n    service:",
+				),
+		);
+		expect(validateSearchTextCommandRegistration(rewired)).toContain(
+			"workspace_search_text_cancel must accept request: its own DTO and return the audited Result type",
+		);
+	});
+
+	it("fails if workspace_search_text_cancel is missing from lib.rs's generate_handler", () => {
+		const missingRegistration = mutateWorkspaceSource(
+			baselineSearchTextRustSources,
+			"src-tauri/src/lib.rs",
+			(source) =>
+				source.replace(
+					"            search::commands::workspace_search_text_cancel,\n",
+					"",
+				),
+		);
+		expect(
+			validateSearchTextCommandRegistration(missingRegistration),
+		).toContain(
+			"src-tauri/src/lib.rs must register search::commands::workspace_search_text_cancel exactly once in generate_handler",
+		);
+	});
+});
+
+describe("Plain F200 S2 search expand-replacements command registration Harness", () => {
+	const searchCommandsSource = readFileSync(
+		new URL("../../src-tauri/src/search/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const libSourceForExpandReplacements = readFileSync(
+		new URL("../../src-tauri/src/lib.rs", import.meta.url),
+		"utf8",
+	);
+
+	const baselineExpandReplacementsRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/search/commands.rs",
+			source: searchCommandsSource,
+		},
+		{
+			relativePath: "src-tauri/src/lib.rs",
+			source: libSourceForExpandReplacements,
+		},
+	]);
+
+	it("passes for the real, unmodified search expand-replacements command files", () => {
+		expect(
+			validateSearchExpandReplacementsCommandRegistration(
+				baselineExpandReplacementsRustSources,
+			),
+		).toEqual([]);
+	});
+
+	it("fails if workspace_search_expand_replacements's body is rewired to skip its DTO decode", () => {
+		const rewired = mutateWorkspaceSource(
+			baselineExpandReplacementsRustSources,
+			"src-tauri/src/search/commands.rs",
+			(source) =>
+				source.replace(
+					"replace::expand_replacements(query)",
+					"replace::expand_replacements(query.clone())",
+				),
+		);
+		expect(
+			validateSearchExpandReplacementsCommandRegistration(rewired),
+		).toContain(
+			"workspace_search_expand_replacements must contain only its DTO decode and a single replace::expand_replacements route",
+		);
+	});
+
+	it("fails if workspace_search_expand_replacements gains an unaudited extra parameter", () => {
+		const rewired = mutateWorkspaceSource(
+			baselineExpandReplacementsRustSources,
+			"src-tauri/src/search/commands.rs",
+			(source) =>
+				source.replace(
+					"pub(crate) async fn workspace_search_expand_replacements(\n    request: WorkspaceSearchExpandReplacementsRequest,\n)",
+					"pub(crate) async fn workspace_search_expand_replacements(\n    request: WorkspaceSearchExpandReplacementsRequest,\n    extra: bool,\n)",
+				),
+		);
+		expect(
+			validateSearchExpandReplacementsCommandRegistration(rewired),
+		).toContain(
+			"workspace_search_expand_replacements must accept request: WorkspaceSearchExpandReplacementsRequest and return Result<WorkspaceSearchExpandReplacementsResult, CommandError>",
+		);
+	});
+
+	it("fails if workspace_search_expand_replacements is missing from lib.rs's generate_handler", () => {
+		const missingRegistration = mutateWorkspaceSource(
+			baselineExpandReplacementsRustSources,
+			"src-tauri/src/lib.rs",
+			(source) =>
+				source.replace(
+					"            search::commands::workspace_search_expand_replacements,\n",
+					"",
+				),
+		);
+		expect(
+			validateSearchExpandReplacementsCommandRegistration(missingRegistration),
+		).toContain(
+			"src-tauri/src/lib.rs must register search::commands::workspace_search_expand_replacements exactly once in generate_handler",
+		);
+	});
+});
+
+describe("Plain F040 search file traversal budget constants Harness", () => {
+	const fileSearchSource = readFileSync(
+		new URL("../../src-tauri/src/search/file_search.rs", import.meta.url),
+		"utf8",
+	);
+
+	const baselineSearchFileBudgetRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/search/file_search.rs",
+			source: fileSearchSource,
+		},
+	]);
+
+	it("passes for the real, unmodified search file_search.rs budget constants", () => {
+		expect(
+			validateSearchFileBudgetConstants(baselineSearchFileBudgetRustSources),
+		).toEqual([]);
+	});
+
+	it("fails if MAX_SEARCH_TREE_ENTRIES is widened", () => {
+		const widened = mutateWorkspaceSource(
+			baselineSearchFileBudgetRustSources,
+			"src-tauri/src/search/file_search.rs",
+			(source) =>
+				source.replace(
+					"pub(crate) const MAX_SEARCH_TREE_ENTRIES: usize = 50_000;",
+					"pub(crate) const MAX_SEARCH_TREE_ENTRIES: usize = 100_000;",
+				),
+		);
+		expect(validateSearchFileBudgetConstants(widened)).toContain(
+			"search/file_search.rs must define exactly one MAX_SEARCH_TREE_ENTRIES: usize = 50000",
+		);
+	});
+
+	it("fails if MAX_SEARCH_TREE_DEPTH is widened", () => {
+		const widened = mutateWorkspaceSource(
+			baselineSearchFileBudgetRustSources,
+			"src-tauri/src/search/file_search.rs",
+			(source) =>
+				source.replace(
+					"pub(crate) const MAX_SEARCH_TREE_DEPTH: usize = 256;",
+					"pub(crate) const MAX_SEARCH_TREE_DEPTH: usize = 512;",
+				),
+		);
+		expect(validateSearchFileBudgetConstants(widened)).toContain(
+			"search/file_search.rs must define exactly one MAX_SEARCH_TREE_DEPTH: usize = 256",
+		);
+	});
+
+	it("fails if search/file_search.rs is missing entirely", () => {
+		expect(validateSearchFileBudgetConstants([])).toContain(
+			"search budget boundary requires search/file_search.rs",
+		);
+	});
+});
+
+describe("Plain F040 S3 search text budget constants Harness", () => {
+	const textSearchSource = readFileSync(
+		new URL("../../src-tauri/src/search/text_search.rs", import.meta.url),
+		"utf8",
+	);
+	const searchDtoSource = readFileSync(
+		new URL("../../src-tauri/src/search/dto.rs", import.meta.url),
+		"utf8",
+	);
+	const workspaceServiceSource = readFileSync(
+		new URL("../../src-tauri/src/workspace/service.rs", import.meta.url),
+		"utf8",
+	);
+
+	const baselineSearchTextBudgetRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/search/text_search.rs",
+			source: textSearchSource,
+		},
+		{ relativePath: "src-tauri/src/search/dto.rs", source: searchDtoSource },
+		{
+			relativePath: "src-tauri/src/workspace/service.rs",
+			source: workspaceServiceSource,
+		},
+	]);
+
+	it("passes for the real, unmodified search text budget constants", () => {
+		expect(
+			validateSearchTextBudgetConstants(baselineSearchTextBudgetRustSources),
+		).toEqual([]);
+	});
+
+	it("fails if SEARCH_BATCH_QUEUE_CAPACITY is widened", () => {
+		const widened = mutateWorkspaceSource(
+			baselineSearchTextBudgetRustSources,
+			"src-tauri/src/search/text_search.rs",
+			(source) =>
+				source.replace(
+					"pub(crate) const SEARCH_BATCH_QUEUE_CAPACITY: usize = 512;",
+					"pub(crate) const SEARCH_BATCH_QUEUE_CAPACITY: usize = 1024;",
+				),
+		);
+		expect(validateSearchTextBudgetConstants(widened)).toContain(
+			"src-tauri/src/search/text_search.rs must define exactly one SEARCH_BATCH_QUEUE_CAPACITY: usize = 512",
+		);
+	});
+
+	it("fails if MAX_TEXT_SEARCH_RESULTS_HARD_CAP is widened", () => {
+		const widened = mutateWorkspaceSource(
+			baselineSearchTextBudgetRustSources,
+			"src-tauri/src/search/dto.rs",
+			(source) =>
+				source.replace(
+					"pub(crate) const MAX_TEXT_SEARCH_RESULTS_HARD_CAP: u32 = 20_000;",
+					"pub(crate) const MAX_TEXT_SEARCH_RESULTS_HARD_CAP: u32 = 50_000;",
+				),
+		);
+		expect(validateSearchTextBudgetConstants(widened)).toContain(
+			"src-tauri/src/search/dto.rs must define exactly one MAX_TEXT_SEARCH_RESULTS_HARD_CAP: u32 = 20000",
+		);
+	});
+
+	it("fails if SEARCH_TASK_IDLE_TTL is widened", () => {
+		const widened = mutateWorkspaceSource(
+			baselineSearchTextBudgetRustSources,
+			"src-tauri/src/workspace/service.rs",
+			(source) =>
+				source.replace(
+					"const SEARCH_TASK_IDLE_TTL: Duration = Duration::from_secs(120);",
+					"const SEARCH_TASK_IDLE_TTL: Duration = Duration::from_secs(300);",
+				),
+		);
+		expect(validateSearchTextBudgetConstants(widened)).toContain(
+			"workspace/service.rs must define exactly one SEARCH_TASK_IDLE_TTL: Duration = Duration::from_secs(120)",
+		);
+	});
+});
+
+describe("Plain F220 S1 remote command registration Harness", () => {
+	const remoteCommandsSource = readFileSync(
+		new URL("../../src-tauri/src/remote/commands.rs", import.meta.url),
+		"utf8",
+	);
+	const libSourceForRemote = readFileSync(
+		new URL("../../src-tauri/src/lib.rs", import.meta.url),
+		"utf8",
+	);
+
+	const baselineRemoteCommandRustSources = Object.freeze([
+		{
+			relativePath: "src-tauri/src/remote/commands.rs",
+			source: remoteCommandsSource,
+		},
+		{ relativePath: "src-tauri/src/lib.rs", source: libSourceForRemote },
+	]);
+
+	it("passes for the real, unmodified remote command files", () => {
+		expect(
+			validateRemoteCommandRegistration(baselineRemoteCommandRustSources),
+		).toEqual([]);
+	});
+
+	it("fails if remote_session_connect is renamed away from its audited name", () => {
+		const rewired = mutateWorkspaceSource(
+			baselineRemoteCommandRustSources,
+			"src-tauri/src/remote/commands.rs",
+			(source) =>
+				source.replace(
+					"pub(crate) async fn remote_session_connect(",
+					"pub(crate) async fn remote_session_connect_v2(",
+				),
+		);
+		expect(validateRemoteCommandRegistration(rewired)).toContain(
+			"remote/commands.rs must define exactly one audited remote_session_connect Tauri command",
+		);
+	});
+
+	it("fails if remote_host_key_list is missing from lib.rs's generate_handler", () => {
+		const missingRegistration = mutateWorkspaceSource(
+			baselineRemoteCommandRustSources,
+			"src-tauri/src/lib.rs",
+			(source) =>
+				source.replace(
+					"            remote::commands::remote_host_key_list,\n",
+					"",
+				),
+		);
+		expect(validateRemoteCommandRegistration(missingRegistration)).toContain(
+			"src-tauri/src/lib.rs must register remote::commands::remote_host_key_list exactly once in generate_handler",
+		);
+	});
+
+	it("fails if an extra unaudited remote_* command is added alongside the audited eight", () => {
+		const extraCommand = mutateWorkspaceSource(
+			baselineRemoteCommandRustSources,
+			"src-tauri/src/remote/commands.rs",
+			(source) =>
+				`${source}\n#[tauri::command]\npub(crate) async fn remote_extra_command() -> Result<(), CommandError> {\n    Ok(())\n}\n`,
+		);
+		expect(validateRemoteCommandRegistration(extraCommand)).toContain(
+			"remote/commands.rs must define exactly the 8 audited remote_* Tauri commands, no more and no fewer",
+		);
+	});
+});
+
+describe("Plain F220 S1/S3 remote SSH library ownership boundary Harness", () => {
+	const remoteSshLibrarySources = [
+		{
+			relativePath: "src-tauri/src/remote/session.rs",
+			source: `
+use russh::client;
+use russh_sftp::client::SftpSession;
+fn connect() -> russh::client::Config {
+  russh::client::Config::default()
+}
+`,
+		},
+		{
+			relativePath: "src-tauri/src/git/exec.rs",
+			source: `
+use std::process::Command;
+fn spawn_git() -> Command {
+  Command::new("git")
+}
+`,
+		},
+	];
+
+	it("accepts russh/russh_sftp confined to src-tauri/src/remote/", () => {
+		expect(
+			validateRemoteSshLibraryOwnershipBoundary(remoteSshLibrarySources),
+		).toEqual([]);
+	});
+
+	it("rejects an outside file referencing russh", () => {
+		const hostile = mutateWorkspaceSource(
+			remoteSshLibrarySources,
+			"src-tauri/src/git/exec.rs",
+			(source) => `${source}\nuse russh::client::Config;\n`,
+		);
+		expect(validateRemoteSshLibraryOwnershipBoundary(hostile)).toContain(
+			"src-tauri/src/git/exec.rs must not reference russh/russh_sftp — SSH/SFTP transport is owned exclusively by src-tauri/src/remote/",
+		);
+	});
+
+	it("rejects an outside file referencing russh_sftp", () => {
+		const hostile = mutateWorkspaceSource(
+			remoteSshLibrarySources,
+			"src-tauri/src/git/exec.rs",
+			(source) => `${source}\nuse russh_sftp::client::SftpSession;\n`,
+		);
+		expect(validateRemoteSshLibraryOwnershipBoundary(hostile)).toContain(
+			"src-tauri/src/git/exec.rs must not reference russh/russh_sftp — SSH/SFTP transport is owned exclusively by src-tauri/src/remote/",
+		);
+	});
+
+	it("ignores russh/russh_sftp spelled out inside comments or string literals in an outside file", () => {
+		const commented = mutateWorkspaceSource(
+			remoteSshLibrarySources,
+			"src-tauri/src/git/exec.rs",
+			(source) =>
+				`${source}\n// Do not use russh or russh_sftp here.\nconst NOTE: &str = "russh and russh_sftp";\n`,
+		);
+		expect(validateRemoteSshLibraryOwnershipBoundary(commented)).toEqual([]);
+	});
+
+	it("does not false-positive on an unrelated identifier that merely contains the russh substring", () => {
+		const hostile = mutateWorkspaceSource(
+			remoteSshLibrarySources,
+			"src-tauri/src/git/exec.rs",
+			(source) => `${source}\nfn myrussh_helper() {}\n`,
+		);
+		expect(validateRemoteSshLibraryOwnershipBoundary(hostile)).toEqual([]);
 	});
 });

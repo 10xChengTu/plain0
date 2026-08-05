@@ -54,7 +54,7 @@ export const TERMINAL_TRUST_EMPTY_WORKSPACE_DETAIL =
 export const TERMINAL_TRUST_CONFIRM_MESSAGE =
 	"Trust this workspace to run a terminal?";
 export const TERMINAL_TRUST_CONFIRM_DETAIL =
-	"Plain will allow starting shell processes (and anything they in turn run) in this workspace. Only continue if you trust the code and configuration here.";
+	"Plain will allow starting shell processes (and anything they in turn run) in this workspace — including repository hooks, filters/textconv, fsmonitor, credential helpers and SSH (or GPG) commands the workspace's configuration can trigger. Only continue if you trust the code and configuration here.";
 export const TERMINAL_TRUST_CONFIRM_PRIMARY_BUTTON = "Trust & Continue";
 
 /** The user-facing explanation `PlainTerminalView` shows in place of a

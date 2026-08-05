@@ -133,4 +133,16 @@ describe("resolveDebugTrust", () => {
 		expect(decision).toEqual({ kind: "declined" });
 		expect(bridge.grantCalls).toBe(0);
 	});
+
+	it("documents each external execution surface trust unlocks, per product-scope.md:53 and ADR 0003:27", () => {
+		for (const term of [
+			"hooks",
+			"filters",
+			"fsmonitor",
+			"credential helper",
+			"SSH",
+		]) {
+			expect(DEBUG_TRUST_CONFIRM_DETAIL).toContain(term);
+		}
+	});
 });

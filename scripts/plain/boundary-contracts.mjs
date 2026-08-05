@@ -25334,7 +25334,7 @@ export function validateRemoteCommandRegistration(rustSources) {
 	const expectedNames = [...REMOTE_COMMAND_NAMES].sort();
 	if (JSON.stringify(definedNames) !== JSON.stringify(expectedNames)) {
 		failures.push(
-			"remote/commands.rs must define exactly the seven audited remote_* Tauri commands, no more and no fewer",
+			`remote/commands.rs must define exactly the ${REMOTE_COMMAND_NAMES.length} audited remote_* Tauri commands, no more and no fewer`,
 		);
 	}
 

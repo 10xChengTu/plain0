@@ -42,7 +42,7 @@ export const DEBUG_TRUST_EMPTY_WORKSPACE_DETAIL =
 export const DEBUG_TRUST_CONFIRM_MESSAGE =
 	"Trust this workspace to run a debug adapter?";
 export const DEBUG_TRUST_CONFIRM_DETAIL =
-	"Plain will allow starting debug adapter processes (and anything they in turn run) in this workspace. Only continue if you trust the code and configuration here.";
+	"Plain will allow starting debug adapter processes (and anything they in turn run) in this workspace — including repository hooks, filters/textconv, fsmonitor, credential helpers and SSH (or GPG) commands the workspace's configuration can trigger. Only continue if you trust the code and configuration here.";
 export const DEBUG_TRUST_CONFIRM_PRIMARY_BUTTON = "Trust & Continue";
 
 export type DebugTrustDecision =
