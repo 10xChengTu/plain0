@@ -105,6 +105,7 @@ describe("workspace local workflow codec", () => {
 					recentId,
 					label: "workspace + 1 folders",
 					rootLabels: ["workspace", "library"],
+					remoteRoots: [],
 				},
 			],
 		});
@@ -112,9 +113,84 @@ describe("workspace local workflow codec", () => {
 			recentId,
 			label: "workspace + 1 folders",
 			rootLabels: ["workspace", "library"],
+			remoteRoots: [],
 		});
 		expect(JSON.stringify(decoded)).not.toContain("/Users/");
 		expect(Object.isFrozen(decoded.entries[0]?.rootLabels)).toBe(true);
+		expect(Object.isFrozen(decoded.entries[0]?.remoteRoots)).toBe(true);
+	});
+
+	// `F220` S4 (ADR 0007 §4): `remoteRoots` — a Recent entry can carry remote
+	// roots alongside (or, for a purely remote workspace, instead of) local
+	// ones; never anything credential-shaped.
+	it("decodes a purely remote entry (zero local roots) and a mixed entry with both backends", () => {
+		const remoteOnly = decodeWorkspaceRecentListResult({
+			revision: 3,
+			restoreStatus: "restored",
+			entries: [
+				{
+					recentId,
+					label: "project",
+					rootLabels: [],
+					remoteRoots: [
+						{
+							host: "build.example.com",
+							port: 22,
+							user: "dev",
+							path: "/srv/project",
+							label: "project",
+						},
+					],
+				},
+			],
+		});
+		expect(remoteOnly.entries[0]).toEqual({
+			recentId,
+			label: "project",
+			rootLabels: [],
+			remoteRoots: [
+				{
+					host: "build.example.com",
+					port: 22,
+					user: "dev",
+					path: "/srv/project",
+					label: "project",
+				},
+			],
+		});
+		expect(Object.isFrozen(remoteOnly.entries[0]?.remoteRoots)).toBe(true);
+		expect(Object.isFrozen(remoteOnly.entries[0]?.remoteRoots[0])).toBe(true);
+
+		const mixed = decodeWorkspaceRecentListResult({
+			revision: 4,
+			restoreStatus: "restored",
+			entries: [
+				{
+					recentId,
+					label: "workspace + 1 folders",
+					rootLabels: ["workspace"],
+					remoteRoots: [
+						{
+							host: "10.0.0.5",
+							port: 2222,
+							user: "root",
+							path: "/",
+							label: "root-fs",
+						},
+					],
+				},
+			],
+		});
+		expect(mixed.entries[0]?.rootLabels).toEqual(["workspace"]);
+		expect(mixed.entries[0]?.remoteRoots).toEqual([
+			{
+				host: "10.0.0.5",
+				port: 2222,
+				user: "root",
+				path: "/",
+				label: "root-fs",
+			},
+		]);
 	});
 
 	it("rejects duplicate ids, empty roots, extra native paths and hostile arrays", () => {
@@ -122,6 +198,14 @@ describe("workspace local workflow codec", () => {
 			recentId,
 			label: "workspace",
 			rootLabels: ["workspace"],
+			remoteRoots: [],
+		};
+		const validRemoteRoot = {
+			host: "example.com",
+			port: 22,
+			user: "dev",
+			path: "/srv/project",
+			label: "project",
 		};
 		const sparse: unknown[] = [];
 		sparse.length = 1;
@@ -133,6 +217,9 @@ describe("workspace local workflow codec", () => {
 				restoreStatus: "none",
 				entries: [valid, { ...valid }],
 			},
+			// Both halves empty at once — an entry must name at least one root
+			// of *some* backend (mirrors `recent::service::validate_stored`'s
+			// Rust-side identical invariant).
 			{
 				revision: 1,
 				restoreStatus: "none",
@@ -142,6 +229,94 @@ describe("workspace local workflow codec", () => {
 				revision: 1,
 				restoreStatus: "none",
 				entries: [{ ...valid, path: "/Users/private" }],
+			},
+			// `remoteRoots` missing entirely — every field in this contract is
+			// mandatory, not `#[serde(default)]` on the wire the frontend sees.
+			{
+				revision: 1,
+				restoreStatus: "none",
+				entries: [{ recentId, label: "workspace", rootLabels: ["workspace"] }],
+			},
+			// A remote root missing a required field.
+			{
+				revision: 1,
+				restoreStatus: "none",
+				entries: [
+					{
+						...valid,
+						rootLabels: [],
+						remoteRoots: [
+							{
+								host: "example.com",
+								port: 22,
+								user: "dev",
+								path: "/srv/project",
+							},
+						],
+					},
+				],
+			},
+			// A remote root with an extra, unexpected field (host-key material
+			// or anything else — ADR 0007 §4 forbids it on the wire).
+			{
+				revision: 1,
+				restoreStatus: "none",
+				entries: [
+					{
+						...valid,
+						rootLabels: [],
+						remoteRoots: [
+							{ ...validRemoteRoot, hostKeyFingerprint: "SHA256:deadbeef" },
+						],
+					},
+				],
+			},
+			// A remote root path that is not POSIX-absolute.
+			{
+				revision: 1,
+				restoreStatus: "none",
+				entries: [
+					{
+						...valid,
+						rootLabels: [],
+						remoteRoots: [{ ...validRemoteRoot, path: "relative/path" }],
+					},
+				],
+			},
+			// A remote root port outside the valid 1..=65535 range.
+			{
+				revision: 1,
+				restoreStatus: "none",
+				entries: [
+					{
+						...valid,
+						rootLabels: [],
+						remoteRoots: [{ ...validRemoteRoot, port: 0 }],
+					},
+				],
+			},
+			{
+				revision: 1,
+				restoreStatus: "none",
+				entries: [
+					{
+						...valid,
+						rootLabels: [],
+						remoteRoots: [{ ...validRemoteRoot, port: 70_000 }],
+					},
+				],
+			},
+			// A remote root host that is an empty string.
+			{
+				revision: 1,
+				restoreStatus: "none",
+				entries: [
+					{
+						...valid,
+						rootLabels: [],
+						remoteRoots: [{ ...validRemoteRoot, host: "" }],
+					},
+				],
 			},
 			{ revision: 1, restoreStatus: "none", entries: sparse },
 		]) {

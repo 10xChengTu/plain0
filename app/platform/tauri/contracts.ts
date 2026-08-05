@@ -132,10 +132,32 @@ export interface WorkspacePickSaveTargetResult {
 
 export type WorkspaceRestoreStatus = "pending" | "none" | "restored" | "failed";
 
+/**
+ * `F220` S4 (ADR 0007 §4): one remote root a `WorkspaceRecentEntry` carries
+ * alongside its local half — enough to re-drive a full connect (via
+ * `resolveRemoteSessionConnect`) and re-authorize the same directory
+ * (`remoteWorkspaceAddRoot`), never anything credential-shaped. `path` is
+ * the remote canonical base path (POSIX-absolute), not a local ambient path.
+ */
+export interface WorkspaceRecentRemoteRoot {
+	readonly host: string;
+	readonly port: number;
+	readonly user: string;
+	readonly path: string;
+	readonly label: string;
+}
+
 export interface WorkspaceRecentEntry {
 	readonly recentId: string;
 	readonly label: string;
 	readonly rootLabels: readonly string[];
+	/**
+	 * `F220` S4 (ADR 0007 §4): this entry's remote roots — empty for a purely
+	 * local entry. Never auto-connected on cold start or `Open Recent`; the
+	 * frontend surfaces a "needs reconnect" affordance instead (see
+	 * `plain-remote-workspace-commands.ts`).
+	 */
+	readonly remoteRoots: readonly WorkspaceRecentRemoteRoot[];
 }
 
 export interface WorkspaceRecentListResult {
@@ -2655,6 +2677,20 @@ export interface PlainBridge {
 		path: string,
 		displayName?: string,
 	): Promise<WorkspaceSnapshot>;
+	/** `F220` S4 (ADR 0006 §5's own "显式重连是新的信任决策"): rebinds an
+	 * already-authorized remote root (named by `rootId`) onto a brand-new,
+	 * freshly-authenticated SSH session (`sessionId` — the result of a
+	 * `resolveRemoteSessionConnect` round the caller just completed).
+	 * `rootId` itself never changes. Fails with `REMOTE_ROOT_IDENTITY_CHANGED`
+	 * when the new session's live host-key fingerprint does not match this
+	 * root's original identity, or `REMOTE_ROOT_PATH_CHANGED` when the root's
+	 * original base path no longer re-`realpath`s to the same canonical path
+	 * over the new session — both leave the root untouched, still bound to
+	 * its previous (now-disconnected) session. */
+	remoteWorkspaceReconnectRoot(
+		rootId: string,
+		sessionId: string,
+	): Promise<WorkspaceSnapshot>;
 }
 
 // --- Remote SSH workspace filesystem (F220 S3) ------------------------------
@@ -2722,11 +2758,17 @@ export interface RemoteHostKeyListResult {
 }
 
 /** Why a session ended — see `src-tauri/src/remote/dto.rs`'s
- * `RemoteSessionDisconnectReason` doc comment for why `S1` only ever
- * produces these two (an unexpected/passive transport closure needs a live
- * channel or keepalive to observe, which this slice deliberately does not
- * open yet). */
-export type RemoteSessionDisconnectReason = "userRequested" | "windowClosed";
+ * `RemoteSessionDisconnectReason` doc comment for the full contract.
+ * `"userRequested"`/`"windowClosed"` are both driven from an explicit Rust
+ * action (an explicit `remoteSessionDisconnect` call, or the owning window
+ * closing — Rust does not emit an event for the latter, the window itself is
+ * going away). `"transportClosed"` is `F220` S4's own addition: raised
+ * reactively when the live SSH connection goes away on its own (the peer
+ * closed it, or the transport hit a network/protocol error) — every
+ * root/terminal/debug session bound to that session must fail closed (ADR
+ * 0006 §5) until an explicit reconnect succeeds. */
+export type RemoteSessionDisconnectReason =
+	"userRequested" | "windowClosed" | "transportClosed";
 
 /** `plain://remote-session-event`'s decoded payload — a discriminated union
  * tagged by `event`, matching `remote::dto::RemoteSessionEventPayload`'s

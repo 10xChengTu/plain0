@@ -254,6 +254,7 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		remoteSessionWatchEvent: notImplemented,
 		remoteWorkspacePickDirectory: notImplemented,
 		remoteWorkspaceAddRoot: notImplemented,
+		remoteWorkspaceReconnectRoot: notImplemented,
 		...overrides,
 	};
 	return { bridge, state };

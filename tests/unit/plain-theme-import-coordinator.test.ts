@@ -242,6 +242,7 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		remoteSessionWatchEvent: notImplemented,
 		remoteWorkspacePickDirectory: notImplemented,
 		remoteWorkspaceAddRoot: notImplemented,
+		remoteWorkspaceReconnectRoot: notImplemented,
 		...overrides,
 	};
 }

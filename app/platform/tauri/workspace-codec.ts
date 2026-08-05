@@ -25,6 +25,7 @@ import type {
 	WorkspacePrepareTrashRequest,
 	WorkspacePickResult,
 	WorkspaceRecentListResult,
+	WorkspaceRecentRemoteRoot,
 	WorkspaceReadDirectoryResult,
 	WorkspaceReadFileResult,
 	WorkspaceRoot,
@@ -49,6 +50,15 @@ const MAX_WORKSPACE_ROOTS = 256;
 const MAX_OPEN_FILE_SELECTIONS = 64;
 const MAX_RECENT_WORKSPACES = 20;
 const MAX_RECENT_LABEL_BYTES = 1_024;
+// `F220` S4 (ADR 0007 §4): a `WorkspaceRecentEntry`'s `remoteRoots` field —
+// mirrors `remote-codec.ts`'s own `MAX_REMOTE_HOST_CHARS`/
+// `MAX_REMOTE_USER_CHARS`/`MAX_REMOTE_PICK_PATH_CHARS` ceilings exactly (this
+// file does not import that one to avoid a cross-domain codec dependency;
+// every other shared bound in this file — e.g. `MAX_WORKSPACE_ROOTS` above —
+// is likewise a same-file local constant rather than an import).
+const MAX_REMOTE_HOST_CHARS = 255;
+const MAX_REMOTE_USER_CHARS = 256;
+const MAX_REMOTE_PICK_PATH_CHARS = 8_192;
 const MAX_WORKSPACE_WATCH_GENERATION = 0xffff_ffff;
 const MAX_DISPLAY_NAME_LENGTH = 255;
 const MAX_DIRECTORY_ENTRIES = 10_000;
@@ -370,6 +380,55 @@ function validRecentLabel(value: unknown): value is string {
 		isWellFormedUtf16(value) &&
 		utf8Encoder.encode(value).byteLength <= MAX_RECENT_LABEL_BYTES
 	);
+}
+
+/** `F220` S4 (ADR 0007 §4): a type-predicate twin of `remote-codec.ts`'s
+ * `isValidPort` for a `WorkspaceRecentRemoteRoot`'s own `port` field. */
+function isValidRecentRemotePort(value: unknown): value is number {
+	return (
+		Number.isSafeInteger(value) &&
+		(value as number) >= 1 &&
+		(value as number) <= 65_535
+	);
+}
+
+/** One `WorkspaceRecentEntry.remoteRoots` element — strict-decodes the same
+ * `(host, port, user, path, label)` shape `remote-codec.ts` validates on the
+ * *request* side (`frozenRemoteWorkspaceReconnectRootRequest` et al.), just
+ * mirrored here for the *response* side since this domain owns
+ * `WorkspaceRecentListResult`'s decode. `path` must be a POSIX-absolute
+ * remote path (SFTP paths are always `/`-rooted on the wire — mirrors
+ * `remote::remote_fs::join_remote_path`'s identical assumption, and
+ * `recent::service::validate_remote_root_fields`'s own `path.starts_with('/')`
+ * check). Never a credential — see `WorkspaceRecentRemoteRoot`'s own doc
+ * comment. */
+function decodeRecentRemoteRoot(entry: unknown): WorkspaceRecentRemoteRoot {
+	const remote = ownPlainDataSnapshot(entry);
+	if (
+		!hasExactKeys(remote, ["host", "port", "user", "path", "label"]) ||
+		typeof remote.host !== "string" ||
+		remote.host.length === 0 ||
+		remote.host.length > MAX_REMOTE_HOST_CHARS ||
+		!isValidRecentRemotePort(remote.port) ||
+		typeof remote.user !== "string" ||
+		remote.user.length === 0 ||
+		remote.user.length > MAX_REMOTE_USER_CHARS ||
+		typeof remote.path !== "string" ||
+		remote.path.length === 0 ||
+		!remote.path.startsWith("/") ||
+		remote.path.length > MAX_REMOTE_PICK_PATH_CHARS ||
+		!validRecentLabel(remote.label)
+	) {
+		return violation();
+	}
+	rejectProxyObject(entry as object);
+	return Object.freeze({
+		host: remote.host,
+		port: remote.port,
+		user: remote.user,
+		path: remote.path,
+		label: remote.label,
+	});
 }
 
 function isWindowsReservedSegment(value: string): boolean {
@@ -1725,29 +1784,54 @@ export function decodeWorkspaceRecentListResult(
 		const decodedEntries = entries.entries.map((entry) => {
 			const recent = ownPlainDataSnapshot(entry);
 			if (
-				!hasExactKeys(recent, ["recentId", "label", "rootLabels"]) ||
+				!hasExactKeys(recent, [
+					"recentId",
+					"label",
+					"rootLabels",
+					"remoteRoots",
+				]) ||
 				!isUuidV4(recent.recentId) ||
 				unique.has(recent.recentId) ||
 				!validRecentLabel(recent.label)
 			) {
 				return violation();
 			}
+			// `F220` S4 (ADR 0007 §4): a purely remote entry legitimately has zero
+			// *local* roots — `rootLabels`' own lower bound relaxes from 1 to 0
+			// accordingly (mirrors `recent::service::validate_stored`'s Rust-side
+			// per-field bounds, which likewise no longer require `canonical_roots`
+			// itself to be non-empty). The entry as a whole must still name at
+			// least one root of *some* backend — checked below, once both lists
+			// are decoded.
 			const rootLabels = ownArrayDataSnapshot(
 				recent.rootLabels,
-				1,
+				0,
 				MAX_WORKSPACE_ROOTS,
 			);
 			const labels = rootLabels.entries.map((label) => {
 				if (!validRecentLabel(label)) return violation();
 				return label;
 			});
+			const remoteRootsSnapshot = ownArrayDataSnapshot(
+				recent.remoteRoots,
+				0,
+				MAX_WORKSPACE_ROOTS,
+			);
+			const remoteRoots = remoteRootsSnapshot.entries.map(
+				decodeRecentRemoteRoot,
+			);
+			if (labels.length === 0 && remoteRoots.length === 0) {
+				return violation();
+			}
 			unique.add(recent.recentId);
 			rejectProxyObject(rootLabels.value);
+			rejectProxyObject(remoteRootsSnapshot.value);
 			rejectProxyObject(entry as object);
 			return Object.freeze({
 				recentId: recent.recentId,
 				label: recent.label,
 				rootLabels: Object.freeze(labels),
+				remoteRoots: Object.freeze(remoteRoots),
 			});
 		});
 		rejectProxyObject(entries.value);

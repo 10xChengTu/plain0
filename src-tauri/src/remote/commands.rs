@@ -3,6 +3,8 @@
 //! wrapper: convert the request DTO via its own `into_parts`, call the
 //! service, convert the result" shape.
 
+use std::sync::Arc;
+
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State, WebviewWindow};
 
 use crate::error::CommandError;
@@ -49,13 +51,13 @@ pub(crate) async fn remote_session_connect(
 ) -> Result<RemoteSessionConnectResult, CommandError> {
     let target = request.into_parts()?;
     let agent_socket_path = RemoteSessionService::resolve_agent_socket_path()?;
-    let sink = RemoteWindowEventSink {
+    let sink: Arc<dyn RemoteSessionEventSink> = Arc::new(RemoteWindowEventSink {
         app: window.app_handle().clone(),
         window_label: window.label().to_owned(),
-    };
+    });
     remote
         .inner()
-        .connect(window.label(), target, &agent_socket_path, &sink)
+        .connect(window.label(), target, &agent_socket_path, sink)
         .await
 }
 
@@ -71,13 +73,13 @@ pub(crate) async fn remote_host_key_confirm(
 ) -> Result<RemoteSessionConnectResult, CommandError> {
     let parts = request.into_parts()?;
     let agent_socket_path = RemoteSessionService::resolve_agent_socket_path()?;
-    let sink = RemoteWindowEventSink {
+    let sink: Arc<dyn RemoteSessionEventSink> = Arc::new(RemoteWindowEventSink {
         app: window.app_handle().clone(),
         window_label: window.label().to_owned(),
-    };
+    });
     remote
         .inner()
-        .confirm_host_key(window.label(), parts, &agent_socket_path, &sink)
+        .confirm_host_key(window.label(), parts, &agent_socket_path, sink)
         .await
 }
 
@@ -104,13 +106,13 @@ pub(crate) async fn remote_session_disconnect(
     request: RemoteSessionIdRequest,
 ) -> Result<(), CommandError> {
     let session_id = request.into_parts();
-    let sink = RemoteWindowEventSink {
+    let sink: Arc<dyn RemoteSessionEventSink> = Arc::new(RemoteWindowEventSink {
         app: window.app_handle().clone(),
         window_label: window.label().to_owned(),
-    };
+    });
     remote
         .inner()
-        .disconnect(window.label(), session_id, &sink)
+        .disconnect(window.label(), session_id, sink)
         .await
 }
 

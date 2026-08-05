@@ -1713,7 +1713,8 @@ export function validateWorkspaceProviderBootstrap(source) {
 				parent.expression.text === "applyPersistedProductIconThemeSelection" ||
 				parent.expression.text === "createAndConfigurePlainDebugRuntime" ||
 				parent.expression.text === "configurePlainRemoteSshBridge" ||
-				parent.expression.text === "configurePlainRemoteWorkspaceBridge")
+				parent.expression.text === "configurePlainRemoteWorkspaceBridge" ||
+				parent.expression.text === "reportColdStartRemoteRootsNeedReconnect")
 		);
 	}
 	function isAllowedUserDataProviderIdentifier(node) {
@@ -2572,7 +2573,7 @@ export function validateWindowWorkflowBoundary(rustSources, appSources) {
 			"ifcrate::window::should_restore_last_workspace(window.label())",
 		) ||
 		!compactWorkspaceCommands.includes(
-			"let(snapshot,changed)=service.close_folder(window.label())?;ifchanged{record_current_workspace(window.label(),service.inner(),history.inner()).await?;}Ok(snapshot)",
+			"let(snapshot,changed)=service.close_folder(window.label())?;ifchanged{record_current_workspace(window.label(),service.inner(),history.inner(),remote.inner(),).await?;}Ok(snapshot)",
 		)
 	) {
 		failures.push(

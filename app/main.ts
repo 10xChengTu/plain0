@@ -17,6 +17,7 @@ import { ILanguageFeaturesService } from "@codingame/monaco-vscode-api/vscode/vs
 import { IMultiDiffSourceResolverService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/multiDiffEditor/browser/multiDiffSourceResolverService.service";
 import { IFileService } from "@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service";
 import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
+import { IQuickInputService } from "@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service";
 import { LifecyclePhase } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle";
 import { IWorkbenchThemeService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service";
 import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service";
@@ -39,7 +40,9 @@ import {
 } from "./features/remote/plain-remote-ssh-commands";
 import {
 	configurePlainRemoteWorkspaceBridge,
+	connectAndMountRecentRemoteRoots,
 	registerPlainRemoteWorkspaceCommands,
+	reportColdStartRemoteRootsNeedReconnect,
 } from "./features/remote/plain-remote-workspace-commands";
 import {
 	createPlainUserDataFileSystemProvider,
@@ -108,6 +111,7 @@ import { configurePlainSearchBridge } from "./features/search/plain-search-servi
 import { createServiceOverrides } from "./services";
 import { configurePlainLifecycleBridge } from "./services/plain-lifecycle-service";
 import { configurePlainWorkingCopyBackupBridge } from "./services/plain-workspace-backup-service";
+import { flushPlainWorkingCopyBackupsForTopologyChange } from "./services/plain-workspace-backup-tracker";
 import "./styles.css";
 
 async function bootstrap(): Promise<void> {
@@ -304,6 +308,13 @@ async function bootstrap(): Promise<void> {
 	localWorkspaceCommands = registerLocalWorkspaceCommands(
 		bridge,
 		workspaceTopologyCoordinator,
+		flushPlainWorkingCopyBackupsForTopologyChange,
+		// `F220` S4 (ADR 0007 §4): "Open Recent" selecting an entry with
+		// remote roots drives the same connect-then-authorize flow
+		// `Plain: Reconnect Remote Session…`'s own `"pending"` branch uses —
+		// wired here rather than as a direct `features/workspace` →
+		// `features/remote` import, keeping the two features decoupled.
+		(remoteRoots) => connectAndMountRecentRemoteRoots(remoteRoots),
 	);
 	untitledWorkflowRegistration = registerPlainUntitledWorkflow(
 		bridge,
@@ -319,6 +330,18 @@ async function bootstrap(): Promise<void> {
 		},
 	);
 	await reportInitialWorkspaceRestoreStatus(
+		bridge,
+		await getService(INotificationService),
+	);
+	// `F220` S4 (ADR 0007 §4): cold start never auto-connects a remote root —
+	// `reportInitialWorkspaceRestoreStatus` above only ever restored the
+	// *local* half of the last workspace. A second, independent
+	// `workspace_recent_list` round trip (rather than threading the first
+	// call's own result through a changed signature, which would disturb
+	// `workspace-topology-contracts.mjs`'s pinned call-site shape for that
+	// exact statement) reads the same MRU entry's `remoteRoots` and surfaces
+	// one "needs reconnect" notification per remote root it names.
+	await reportColdStartRemoteRootsNeedReconnect(
 		bridge,
 		await getService(INotificationService),
 	);
@@ -367,6 +390,11 @@ async function bootstrap(): Promise<void> {
 		bridge,
 		workspaceTopologyCoordinator,
 		workspaceFileSystemProvider,
+		{
+			notificationService: await getService(INotificationService),
+			dialogService: await getService(IDialogService),
+			quickInputService: await getService(IQuickInputService),
+		},
 	);
 	remoteWorkspaceCommandsRegistration = registerPlainRemoteWorkspaceCommands();
 

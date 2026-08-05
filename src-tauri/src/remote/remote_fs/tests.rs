@@ -499,13 +499,56 @@ async fn operations_fail_closed_once_the_session_is_disconnected() {
         .disconnect(
             "window-a",
             session_id,
-            &crate::remote::session::NullRemoteSessionEventSink,
+            std::sync::Arc::new(crate::remote::session::NullRemoteSessionEventSink),
         )
         .await
         .expect("disconnect succeeds");
 
+    // `F220` S4: an FS operation reaching an authorized root whose session
+    // has ended gets the root-specific `REMOTE_SESSION_DISCONNECTED` code,
+    // not the raw session-table-miss `REMOTE_SESSION_NOT_FOUND` — see
+    // `remote_fs::open`'s own doc comment for why a root can only ever mean
+    // "disconnected", never "never existed".
     let error = stat(&service, "window-a", session_id, &base_path, "fp", &rel(""))
         .await
         .expect_err("a stat after disconnect must fail closed");
-    assert_eq!(error.code(), "REMOTE_SESSION_NOT_FOUND");
+    assert_eq!(error.code(), "REMOTE_SESSION_DISCONNECTED");
+}
+
+/// `F220` S4: the same fail-closed contract as
+/// `operations_fail_closed_once_the_session_is_disconnected` above, but
+/// reached via a genuine **reactive** disconnect (the server actively
+/// closing the connection — `SftpFixture::force_server_disconnect`) instead
+/// of an explicit `RemoteSessionService::disconnect()` call, proving the
+/// reactive-disconnect monitor task (`session`'s own module doc) really does
+/// remove the session record before the next FS operation is attempted, not
+/// merely that the *transport* happens to be dead.
+#[tokio::test]
+async fn a_reactively_disconnected_session_also_fails_closed_on_the_next_fs_operation() {
+    let identity: PrivateKey = generate_key();
+    let fixture = start_sftp_fixture(&identity).await;
+    let (_temp, service) = test_service();
+    let session_id = connect_test_session(&service, "window-a", &fixture, &identity).await;
+    let base_path = base_path_of(&fixture).await;
+
+    fixture.force_server_disconnect().await;
+
+    // Bounded wait for the reactive monitor task to remove the session
+    // record — see `session::tests`'s own identical wait for why this is
+    // polled rather than assumed instantaneous.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if service.session_count_for_test("window-a") == 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the session is reactively removed within the bounded wait");
+
+    let error = stat(&service, "window-a", session_id, &base_path, "fp", &rel(""))
+        .await
+        .expect_err("a stat after a reactive disconnect must fail closed");
+    assert_eq!(error.code(), "REMOTE_SESSION_DISCONNECTED");
 }

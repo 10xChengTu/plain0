@@ -43,6 +43,29 @@ impl RecordingSink {
     fn len(&self) -> usize {
         self.events.lock().unwrap().len()
     }
+
+    /// A trait-object clone of `self` — plain `Arc::clone(&sink)` does not
+    /// unsize-coerce at its call site (its `T` is already pinned to
+    /// `RecordingSink` by the argument before any coercion to `dyn
+    /// RemoteSessionEventSink` could apply), so every call site that needs
+    /// to hand a live `RecordingSink` to an `Arc<dyn RemoteSessionEventSink>`
+    /// parameter while *also* keeping a concrete `Arc<RecordingSink>` around
+    /// for its own later `sink.len()`/`sink.events` assertions goes through
+    /// this helper instead — the explicit return type below is what actually
+    /// triggers the coercion.
+    fn as_sink(self: &Arc<Self>) -> Arc<dyn RemoteSessionEventSink> {
+        // Cloned into an explicitly, concretely typed binding first: calling
+        // `Arc::clone(self)` directly in the return position lets type
+        // inference "solve" `Self` in `Clone::clone` against the function's
+        // own declared `dyn`-typed return instead of against `self`'s real
+        // concrete type, which fails to typecheck (`self` is genuinely
+        // `&Arc<RecordingSink>`, not `&Arc<dyn RemoteSessionEventSink>`).
+        // Binding to `Arc<Self>` first fixes the clone's type unambiguously;
+        // *then* the implicit return coerces that concrete `Arc` to the
+        // trait object, which is an ordinary, unambiguous unsizing coercion.
+        let concrete: Arc<Self> = Arc::clone(self);
+        concrete
+    }
 }
 
 fn test_service() -> (TempDir, RemoteSessionService) {
@@ -240,7 +263,7 @@ async fn expect_pending_confirmation(
             window_label,
             target,
             agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .expect("connect call itself succeeds for an unknown host");
@@ -273,7 +296,7 @@ async fn first_connect_to_an_unknown_host_returns_pending_confirmation_and_pins_
             "window-a",
             target(&fixture, "octocat"),
             &fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .expect("connect call itself succeeds");
@@ -302,7 +325,7 @@ async fn confirming_the_exact_reported_fingerprint_pins_it_and_connects() {
             "window-a",
             target(&fixture, "octocat"),
             &fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .unwrap();
@@ -315,7 +338,7 @@ async fn confirming_the_exact_reported_fingerprint_pins_it_and_connects() {
         other => panic!("expected pending confirmation, got {other:?}"),
     };
 
-    let sink = RecordingSink::default();
+    let sink = Arc::new(RecordingSink::default());
     let confirmed = service
         .confirm_host_key(
             "window-a",
@@ -325,7 +348,7 @@ async fn confirming_the_exact_reported_fingerprint_pins_it_and_connects() {
                 sha256_fingerprint: fingerprint,
             },
             &fixture.agent_socket_path,
-            &sink,
+            sink.as_sink(),
         )
         .await
         .expect("confirm succeeds");
@@ -352,7 +375,7 @@ async fn a_pinned_host_that_still_matches_connects_directly_with_no_pending_step
             "window-a",
             target(&fixture, "octocat"),
             &fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .unwrap();
@@ -373,7 +396,7 @@ async fn a_pinned_host_that_still_matches_connects_directly_with_no_pending_step
                 sha256_fingerprint: fingerprint,
             },
             &fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .unwrap();
@@ -385,7 +408,7 @@ async fn a_pinned_host_that_still_matches_connects_directly_with_no_pending_step
             "window-b",
             target(&fixture, "octocat"),
             &fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .expect("second connect succeeds");
@@ -414,7 +437,7 @@ async fn a_changed_host_key_hard_fails_with_both_fingerprints_and_pins_nothing_n
                 user: "octocat".to_owned(),
             },
             &first_fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .unwrap();
@@ -439,13 +462,22 @@ async fn a_changed_host_key_hard_fails_with_both_fingerprints_and_pins_nothing_n
                 sha256_fingerprint: fingerprint.clone(),
             },
             &first_fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .unwrap();
     // Must actually stop the listener (not merely drop the `JoinHandle`,
     // which only detaches it — see `SshFixture::shutdown`'s own doc
     // comment) before the replacement fixture below rebinds this exact port.
+    // `F220` S4 note: `RunningServer::run_on_socket`'s own graceful-shutdown
+    // broadcast (`shutdown_tx`) is dropped along with the aborted task, which
+    // closes every live per-connection task's `shutdown_rx` — each one reacts
+    // by sending session A a real SSH disconnect message before this task
+    // actually finishes tearing down. With `F220` S4's reactive disconnect
+    // detection now in place, session A is therefore *already* reactively
+    // removed by the time `shutdown()` returns below — this was always a
+    // side effect of this fixture's own "abort the accept-loop task to free
+    // the port" cleanup, just never previously observable client-side.
     first_fixture.shutdown().await;
 
     // Second fixture, deliberately bound to the *same* port with a
@@ -463,16 +495,17 @@ async fn a_changed_host_key_hard_fails_with_both_fingerprints_and_pins_nothing_n
                 user: "octocat".to_owned(),
             },
             &replacement_fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await;
     let error = hard_fail.expect_err("changed host key must hard fail");
     assert_eq!(error.code(), "REMOTE_HOST_KEY_CHANGED");
     assert!(error.message().contains(&fingerprint));
     // The hard-failed second attempt registers no *new* session — the count
-    // stays at exactly the one session the earlier, legitimate pin-and-connect
-    // already established, never incremented by the rejected reconnect.
-    assert_eq!(service.session_count_for_test("window-a"), 1);
+    // stays at zero, exactly where `first_fixture.shutdown()`'s own reactive
+    // disconnect (see the comment above) already left it, never incremented
+    // by the rejected reconnect.
+    assert_eq!(service.session_count_for_test("window-a"), 0);
 
     // And the store still names only the original fingerprint — a hard
     // failure must never silently overwrite what was pinned.
@@ -577,7 +610,7 @@ async fn a_server_that_rejects_every_identity_reports_auth_rejected() {
                 sha256_fingerprint,
             },
             &fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .expect_err("rejected auth is an error");
@@ -607,7 +640,7 @@ async fn an_agent_with_no_identities_reports_no_identities() {
                 sha256_fingerprint,
             },
             &fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .expect_err("no identities is an error");
@@ -644,7 +677,7 @@ async fn a_missing_agent_socket_reports_agent_unavailable() {
                 sha256_fingerprint,
             },
             &missing_socket,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .expect_err("missing agent socket is an error");
@@ -678,7 +711,7 @@ async fn connecting_to_a_closed_port_times_out_within_the_bounded_budget() {
                 user: "octocat".to_owned(),
             },
             &agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .expect_err("closed port refuses the connection");
@@ -708,7 +741,7 @@ async fn cancelling_an_in_flight_connect_reports_cancelled() {
                 "window-a",
                 connect_target,
                 &agent_socket_path,
-                &NullRemoteSessionEventSink,
+                Arc::new(NullRemoteSessionEventSink),
             )
             .await
     });
@@ -749,7 +782,7 @@ async fn a_connect_attempt_that_never_completes_times_out_at_the_injected_budget
             "window-a",
             target,
             &agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
             Duration::from_millis(200),
         ),
     )
@@ -770,7 +803,7 @@ async fn disconnect_removes_the_session_and_emits_a_user_requested_event() {
             "window-a",
             target(&fixture, "octocat"),
             &fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .unwrap();
@@ -791,7 +824,7 @@ async fn disconnect_removes_the_session_and_emits_a_user_requested_event() {
                 sha256_fingerprint: fingerprint,
             },
             &fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .unwrap();
@@ -800,9 +833,9 @@ async fn disconnect_removes_the_session_and_emits_a_user_requested_event() {
         _ => unreachable!(),
     };
 
-    let sink = RecordingSink::default();
+    let sink = Arc::new(RecordingSink::default());
     service
-        .disconnect("window-a", session_id, &sink)
+        .disconnect("window-a", session_id, sink.as_sink())
         .await
         .expect("disconnect succeeds");
     assert_eq!(service.session_count_for_test("window-a"), 0);
@@ -823,7 +856,7 @@ async fn disconnecting_an_unknown_session_id_reports_session_not_found() {
         .disconnect(
             "window-a",
             RemoteSessionId::new(),
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .expect_err("unknown session id is an error");
@@ -842,7 +875,7 @@ async fn closing_the_window_drops_every_live_session_for_it_and_no_others() {
                 window_label,
                 target(&fixture, "octocat"),
                 &fixture.agent_socket_path,
-                &NullRemoteSessionEventSink,
+                Arc::new(NullRemoteSessionEventSink),
             )
             .await
             .unwrap();
@@ -863,7 +896,7 @@ async fn closing_the_window_drops_every_live_session_for_it_and_no_others() {
                     sha256_fingerprint: fingerprint,
                 },
                 &fixture.agent_socket_path,
-                &NullRemoteSessionEventSink,
+                Arc::new(NullRemoteSessionEventSink),
             )
             .await
             .unwrap();
@@ -887,7 +920,7 @@ async fn forgetting_a_pinned_host_key_makes_the_next_connect_pending_again() {
             "window-a",
             target(&fixture, "octocat"),
             &fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .unwrap();
@@ -908,7 +941,7 @@ async fn forgetting_a_pinned_host_key_makes_the_next_connect_pending_again() {
                 sha256_fingerprint: fingerprint,
             },
             &fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .unwrap();
@@ -931,7 +964,7 @@ async fn forgetting_a_pinned_host_key_makes_the_next_connect_pending_again() {
             "window-b",
             target(&fixture, "octocat"),
             &fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .unwrap();
@@ -967,7 +1000,7 @@ async fn a_window_at_the_session_cap_rejects_one_more_connect() {
             "window-a",
             target(&seed_fixture, "octocat"),
             &seed_fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .unwrap();
@@ -988,7 +1021,7 @@ async fn a_window_at_the_session_cap_rejects_one_more_connect() {
                 sha256_fingerprint: fingerprint,
             },
             &seed_fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .unwrap();
@@ -1001,7 +1034,7 @@ async fn a_window_at_the_session_cap_rejects_one_more_connect() {
                 "window-a",
                 target(&fixture, "octocat"),
                 &fixture.agent_socket_path,
-                &NullRemoteSessionEventSink,
+                Arc::new(NullRemoteSessionEventSink),
             )
             .await
             .unwrap();
@@ -1023,7 +1056,7 @@ async fn a_window_at_the_session_cap_rejects_one_more_connect() {
                         sha256_fingerprint,
                     },
                     &fixture.agent_socket_path,
-                    &NullRemoteSessionEventSink,
+                    Arc::new(NullRemoteSessionEventSink),
                 )
                 .await
                 .unwrap();
@@ -1041,11 +1074,133 @@ async fn a_window_at_the_session_cap_rejects_one_more_connect() {
             "window-a",
             target(&overflow_fixture, "octocat"),
             &overflow_fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::new(NullRemoteSessionEventSink),
         )
         .await
         .expect_err("the ninth session is rejected");
     assert_eq!(error.code(), "REMOTE_SESSION_LIMIT_REACHED");
+}
+
+/// `F220` S4: the reactive-disconnect-detection test the module doc's own
+/// "Reactive disconnect detection" section describes — this uses the *real*
+/// SFTP-capable fixture (`super::super::test_support`, not this file's own
+/// minimal `start_fixture`) purely for its [`super::super::test_support::SftpFixture::force_server_disconnect`]
+/// hook, which makes the **server** side send a genuine SSH disconnect
+/// message. Nothing here ever calls `RemoteSessionService::disconnect()`
+/// itself — that path is already covered by
+/// `disconnect_removes_the_session_and_emits_a_user_requested_event` above;
+/// the whole point of this test is to prove the client-side
+/// `RemoteClientHandler::disconnected` callback fires on its own, without
+/// any Rust-initiated teardown.
+#[tokio::test]
+async fn a_server_initiated_disconnect_is_reactively_detected_and_reported() {
+    let identity = super::super::test_support::generate_key();
+    let fixture = super::super::test_support::start_sftp_fixture(&identity).await;
+    let (_temp, service) = super::super::test_support::test_service();
+    let sink = Arc::new(RecordingSink::default());
+    let session_id = super::super::test_support::connect_test_session_with_sink(
+        &service,
+        "window-a",
+        &fixture,
+        sink.as_sink(),
+    )
+    .await;
+    assert_eq!(service.session_count_for_test("window-a"), 1);
+
+    fixture.force_server_disconnect().await;
+
+    // Bounded wait — never a bare/unbounded loop — for the background
+    // monitor task to observe the disconnect and react.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if service.session_count_for_test("window-a") == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the session is reactively removed within the bounded wait");
+
+    // The same sink also recorded the earlier `Connected` event (see
+    // `connect_test_session_with_sink`'s own doc comment) — this test only
+    // cares about the `Disconnected` ones, of which there must be exactly
+    // one.
+    let events = sink.events.lock().unwrap();
+    let disconnected = events
+        .iter()
+        .filter(|event| matches!(event, RemoteSessionEventPayload::Disconnected { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        disconnected.len(),
+        1,
+        "expected exactly one disconnected event, got {events:?}"
+    );
+    match disconnected[0] {
+        RemoteSessionEventPayload::Disconnected {
+            reason,
+            session_id: event_session_id,
+            ..
+        } => {
+            assert_eq!(*reason, RemoteSessionDisconnectReason::TransportClosed);
+            assert_eq!(*event_session_id, session_id);
+        }
+        other => panic!("expected a disconnected event, got {other:?}"),
+    }
+}
+
+/// `F220` S4: proves the reactive monitor task does **not** emit a second,
+/// redundant `Disconnected` event for a session an explicit
+/// `RemoteSessionService::disconnect()` call already removed and reported —
+/// `disconnect()`'s own `shut_down` also makes the underlying transport
+/// close, which *would* otherwise fire `RemoteClientHandler::disconnected`
+/// too; this test proves the monitor task's own "is the session still in
+/// `windows`?" check is what suppresses that would-be duplicate.
+#[tokio::test]
+async fn an_explicit_disconnect_never_produces_a_second_reactive_event() {
+    let identity = super::super::test_support::generate_key();
+    let fixture = super::super::test_support::start_sftp_fixture(&identity).await;
+    let (_temp, service) = super::super::test_support::test_service();
+    let sink = Arc::new(RecordingSink::default());
+    let session_id = super::super::test_support::connect_test_session_with_sink(
+        &service,
+        "window-a",
+        &fixture,
+        sink.as_sink(),
+    )
+    .await;
+
+    service
+        .disconnect("window-a", session_id, sink.as_sink())
+        .await
+        .expect("explicit disconnect succeeds");
+    assert_eq!(service.session_count_for_test("window-a"), 0);
+
+    // Give the reactive monitor task — racing the very same transport
+    // teardown `disconnect()` itself just triggered — a generous window to
+    // (wrongly) fire a second event before asserting it did not.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Same rationale as the reactive-detection test above: the sink also
+    // recorded the earlier `Connected` event, so filter to `Disconnected`
+    // ones specifically before asserting there is exactly one.
+    let events = sink.events.lock().unwrap();
+    let disconnected = events
+        .iter()
+        .filter(|event| matches!(event, RemoteSessionEventPayload::Disconnected { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        disconnected.len(),
+        1,
+        "an explicit disconnect must produce exactly one disconnected event, not a second \
+         reactive one — got {events:?}"
+    );
+    match disconnected[0] {
+        RemoteSessionEventPayload::Disconnected { reason, .. } => {
+            assert_eq!(*reason, RemoteSessionDisconnectReason::UserRequested);
+        }
+        other => panic!("expected a disconnected event, got {other:?}"),
+    }
 }
 
 // Local type aliases purely so this file's own match arms above read

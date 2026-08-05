@@ -192,7 +192,14 @@ const excludedIdPatterns: ReadonlyArray<ExcludedIdPattern> = [
  * the remote *workspace filesystem* commands (SFTP-backed, over the same
  * from-scratch `remote::` session) for the identical reason: they open a
  * `plain-workspace://` root backed by `remote::remote_fs`, never any
- * upstream Remote Development extension-host path. */
+ * upstream Remote Development extension-host path.
+ *
+ * `F220` S4 adds `plain.remote.reconnect` — "Plain: Reconnect Remote
+ * Session…" rebinds an already-authorized remote root onto a freshly
+ * re-authenticated session of that identical from-scratch `remote::`
+ * implementation (`remote_workspace_reconnect_root`); it is not a new
+ * capability, only ADR 0006 §5's "显式重连是新的信任决策" applied to the same
+ * SSH/SFTP session this whole exception list already covers. */
 const allowedExcludedIdCollisions: Readonly<
 	Partial<Record<keyof WorkbenchSurfaceSnapshot, ReadonlySet<string>>>
 > = Object.freeze({
@@ -203,6 +210,7 @@ const allowedExcludedIdCollisions: Readonly<
 		"plain.remote.forgetHostKey",
 		"plain.remote.openFolder",
 		"plain.remote.refreshFolder",
+		"plain.remote.reconnect",
 	]),
 });
 

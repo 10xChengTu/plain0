@@ -163,6 +163,7 @@ pub fn run() {
             workspace::commands::workspace_begin_trash,
             workspace::commands::workspace_commit_trash_entry,
             workspace::commands::remote_workspace_add_root,
+            workspace::commands::remote_workspace_reconnect_root,
             git::commands::git_status,
             git::commands::git_diff_files,
             git::commands::git_show_blob,

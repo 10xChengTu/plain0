@@ -13,6 +13,7 @@ import {
 	frozenRemoteSessionIdRequest,
 	frozenRemoteWorkspaceAddRootRequest,
 	frozenRemoteWorkspacePickDirectoryRequest,
+	frozenRemoteWorkspaceReconnectRootRequest,
 } from "../../app/platform/tauri/remote-codec";
 
 const sessionId = "00000000-0000-4000-8000-000000000101";
@@ -420,7 +421,11 @@ describe("remote-codec", () => {
 		});
 
 		it("decodes a disconnected event with each audited reason", () => {
-			for (const reason of ["userRequested", "windowClosed"]) {
+			for (const reason of [
+				"userRequested",
+				"windowClosed",
+				"transportClosed",
+			]) {
 				const decoded = decodeRemoteSessionEventPayload({
 					event: "disconnected",
 					sessionId,
@@ -675,6 +680,38 @@ describe("remote-codec", () => {
 			expect(() =>
 				frozenRemoteWorkspaceAddRootRequest(sessionId, "/", "a".repeat(512)),
 			).not.toThrowError();
+		});
+	});
+
+	// `F220` S4
+	describe("frozenRemoteWorkspaceReconnectRootRequest", () => {
+		const rootId = "00000000-0000-4000-8000-000000000201";
+
+		it("builds a frozen own-data request from valid inputs", () => {
+			const request = frozenRemoteWorkspaceReconnectRootRequest(
+				rootId,
+				sessionId,
+			);
+			expect(request).toEqual({ rootId, sessionId });
+			expect(Object.isFrozen(request)).toBe(true);
+		});
+
+		it("rejects a non-UUID or non-v4 rootId", () => {
+			for (const badRootId of [
+				"nope",
+				"00000000-0000-1000-8000-000000000201",
+				"00000000000040008000000000000201",
+			]) {
+				expect(() =>
+					frozenRemoteWorkspaceReconnectRootRequest(badRootId, sessionId),
+				).toThrowError(expect.objectContaining(requestError));
+			}
+		});
+
+		it("rejects a non-UUID sessionId", () => {
+			expect(() =>
+				frozenRemoteWorkspaceReconnectRootRequest(rootId, "nope"),
+			).toThrowError(expect.objectContaining(requestError));
 		});
 	});
 });

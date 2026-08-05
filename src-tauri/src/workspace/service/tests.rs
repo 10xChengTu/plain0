@@ -220,6 +220,59 @@ fn initial_snapshot_restores_the_complete_ordered_root_set_once() {
     assert_eq!(ignored_second_attempt, restored);
 }
 
+/// `F220` S4 (ADR 0007 §4): a stored last-workspace entry that is *purely
+/// remote* — no local roots at all — legitimately reports `Ok(Some(vec![]))`
+/// from `WorkspaceHistoryService::last_roots` (a recorded entry always has
+/// at least one root of *some* backend, but its local half can be empty; see
+/// that method's own callers). This must restore to zero local roots and
+/// report `Restored`, not `Failed` — the workspace genuinely has no local
+/// roots to fail at opening; its remote roots are a separate, deliberately
+/// not-auto-connected concern the frontend surfaces from
+/// `workspace_recent_list`'s `remoteRoots` field instead. Distinct from
+/// `Ok(None)` (no history at all, covered by `initial_snapshot_restores_the_
+/// complete_ordered_root_set_once`'s second assertion), which must keep
+/// reporting `WorkspaceRestoreStatus::None`.
+#[test]
+fn initial_snapshot_restores_to_zero_local_roots_for_a_purely_remote_last_workspace() {
+    let service = WorkspaceService::new();
+    let restored = block_on(service.initial_snapshot_with_restore(
+        "main",
+        Ok(Some(Vec::new())),
+        Arc::new(|_| {}),
+    ))
+    .unwrap();
+    assert!(restored.roots().is_empty());
+    assert_eq!(
+        service.restore_status("main").unwrap(),
+        WorkspaceRestoreStatus::Restored
+    );
+}
+
+/// `F220` S4: the twin of the above for `workspace_open_recent`'s own
+/// underlying call — `replace_roots_with_watch_sink` with an empty path list
+/// (exactly what `WorkspaceHistoryService::roots_for` returns for a purely
+/// remote Recent entry) must succeed and clear down to zero local roots,
+/// never `WORKSPACE_ROOT_LIMIT_EXCEEDED` (empty is the opposite of "too
+/// many"). Also proves this clears any *existing* local roots first, exactly
+/// like passing an explicit empty replacement set always has.
+#[test]
+fn replace_roots_with_watch_sink_clears_to_zero_local_roots_given_an_empty_list() {
+    let temp = TempDir::new().unwrap();
+    let first = create_directory(&temp, "first");
+    let service = WorkspaceService::new();
+    let with_root =
+        block_on(service.replace_roots_with_watch_sink("main", vec![first], Arc::new(|_| {})))
+            .unwrap();
+    assert_eq!(with_root.roots().len(), 1);
+
+    let cleared =
+        block_on(service.replace_roots_with_watch_sink("main", Vec::new(), Arc::new(|_| {})))
+            .unwrap();
+    assert!(cleared.roots().is_empty());
+    assert_eq!(cleared.revision(), with_root.revision() + 1);
+    assert_eq!(service.snapshot("main").unwrap(), cleared);
+}
+
 #[test]
 fn close_folder_revokes_all_roots_once_and_keeps_other_windows_isolated() {
     let temp = TempDir::new().unwrap();
@@ -3722,8 +3775,12 @@ fn root_revocation_terminates_the_active_search() {
 /// `authorize_remote_root_for_test` mints a random, never-connected
 /// `RemoteSessionId`, and `remote_service_for_test()` starts with zero
 /// registered sessions), every dispatched operation still fails closed —
-/// now with `REMOTE_SESSION_NOT_FOUND`, the accurate reason, rather than a
-/// generic "this backend isn't supported yet" — exercising exactly the
+/// now with `REMOTE_SESSION_DISCONNECTED` (`F220` S4's own translation, see
+/// `remote::remote_fs::open`'s doc comment: a root can only exist if its
+/// session was real at authorization time, so a missing session can now only
+/// mean "disconnected", never "never existed"), rather than either the raw
+/// `REMOTE_SESSION_NOT_FOUND` this used to report pre-`F220`-S4 or a generic
+/// "this backend isn't supported yet" — exercising exactly the
 /// [`super::WorkspaceScope::remote_context`] chokepoint every remote-capable
 /// operation now funnels through.
 #[test]
@@ -3745,7 +3802,7 @@ fn stat_and_read_file_fail_closed_for_a_remote_backed_root() {
         &remote_service_for_test(),
     ))
     .expect_err("stat on a remote-backed root with no live session must fail closed");
-    assert_eq!(stat_error.code(), "REMOTE_SESSION_NOT_FOUND");
+    assert_eq!(stat_error.code(), "REMOTE_SESSION_DISCONNECTED");
 
     let read_error = block_on(service.read_file(
         "main",
@@ -3754,7 +3811,7 @@ fn stat_and_read_file_fail_closed_for_a_remote_backed_root() {
         &remote_service_for_test(),
     ))
     .expect_err("read_file on a remote-backed root with no live session must fail closed");
-    assert_eq!(read_error.code(), "REMOTE_SESSION_NOT_FOUND");
+    assert_eq!(read_error.code(), "REMOTE_SESSION_DISCONNECTED");
 }
 
 /// `F220` S2 representative test for the search domain: multi-root search

@@ -318,7 +318,14 @@ describe("native Plain bridge", () => {
 			.mockResolvedValueOnce({
 				revision: 2,
 				restoreStatus: "restored",
-				entries: [{ recentId, label: "workspace", rootLabels: ["workspace"] }],
+				entries: [
+					{
+						recentId,
+						label: "workspace",
+						rootLabels: ["workspace"],
+						remoteRoots: [],
+					},
+				],
 			})
 			.mockResolvedValueOnce(validSnapshot())
 			.mockResolvedValueOnce(null)

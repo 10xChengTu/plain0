@@ -385,13 +385,52 @@ impl WorkspaceService {
     /// [`WorkspaceRootLease`] — `Ok(None)` for local (every existing local
     /// call path is unchanged), `Ok(Some(context))` for remote, `Err` for a
     /// stale/unauthorized id. See [`super::WorkspaceScope::remote_context`]'s
-    /// own doc comment.
-    fn remote_context(
+    /// own doc comment. `pub(crate)` (rather than private, its pre-`F220`-S4
+    /// visibility) since `F220` S4's `workspace::commands::remote_workspace_reconnect_root`
+    /// needs this exact same "read the root's currently-recorded remote
+    /// identity without mutating anything" lookup to perform its own
+    /// fingerprint/path re-verification *before* calling
+    /// [`Self::reconnect_remote_root`].
+    pub(crate) fn remote_context(
         &self,
         window_label: &str,
         root_id: RootId,
     ) -> Result<Option<super::RemoteRootContext>, CommandError> {
         self.scope_for_window(window_label)?.remote_context(root_id)
+    }
+
+    /// `F220` S4 (ADR 0006 §5): rebinds `root_id` (already authorized, and
+    /// already re-verified by the caller — see [`super::WorkspaceScope::reconnect_remote_root`]'s
+    /// own doc comment for exactly what this method itself does *not* check)
+    /// onto `new_session_id`, returning a fresh snapshot so the caller can
+    /// hand the WebView something to refresh Explorer/re-check hot-exit
+    /// restoration against. Mirrors [`Self::authorize_remote_root`]'s own
+    /// two-layer `WorkspaceService` → `WindowWorkspace` shape.
+    pub(crate) fn reconnect_remote_root(
+        &self,
+        window_label: &str,
+        root_id: RootId,
+        new_session_id: crate::remote::dto::RemoteSessionId,
+    ) -> Result<WorkspaceSnapshot, CommandError> {
+        let workspace = self.scope_for_window(window_label)?;
+        workspace.reconnect_remote_root(root_id, new_session_id)
+    }
+
+    /// `F220` S4 (ADR 0007 §4): remote roots' `(session_id, canonical base
+    /// path, display name)`, in authorization order — Recent's own remote-
+    /// root data source, the direct remote-backend twin of
+    /// [`Self::history_roots`]'s local-only list. Returns the raw session id
+    /// rather than `host`/`port`/`user` because `workspace::mod` has no
+    /// dependency on `remote::session::RemoteSessionService`'s own session
+    /// table (which is the only place those three fields live) — the caller
+    /// (`workspace::commands::record_current_workspace`) resolves each
+    /// session id to its live `(host, port, user)` itself, via a
+    /// `RemoteSessionService::state` lookup it already has access to.
+    pub(crate) fn remote_history_roots(
+        &self,
+        window_label: &str,
+    ) -> Result<Vec<(crate::remote::dto::RemoteSessionId, String, String)>, CommandError> {
+        self.scope_for_window(window_label)?.remote_history_roots()
     }
 
     /// `F220` S3 (ADR 0007 §1): authorizes a remote directory (already
@@ -1367,6 +1406,14 @@ impl WindowWorkspace {
         Ok(state.scope.history_roots())
     }
 
+    fn remote_history_roots(
+        &self,
+    ) -> Result<Vec<(crate::remote::dto::RemoteSessionId, String, String)>, CommandError> {
+        let state = lock(&self.state)?;
+        ensure_open(&state)?;
+        Ok(state.scope.remote_history_roots())
+    }
+
     fn replace_roots(
         self: &Arc<Self>,
         paths: Vec<std::path::PathBuf>,
@@ -1479,6 +1526,23 @@ impl WindowWorkspace {
         invalidate_remote_delete_batch(&mut state);
         invalidate_text_search(&mut state);
         Ok((root_id, state.scope.snapshot()))
+    }
+
+    /// `F220` S4: see [`super::WorkspaceScope::reconnect_remote_root`]'s own
+    /// doc comment for exactly what is (and, deliberately, is not) checked
+    /// or invalidated here — a session-id swap on an already-member root
+    /// changes neither the root set's membership nor its order, so unlike
+    /// [`Self::authorize_remote_root`] this does not invalidate any pending
+    /// delete/Trash/search state.
+    fn reconnect_remote_root(
+        &self,
+        root_id: RootId,
+        new_session_id: crate::remote::dto::RemoteSessionId,
+    ) -> Result<WorkspaceSnapshot, CommandError> {
+        let mut state = lock(&self.state)?;
+        ensure_open(&state)?;
+        state.scope.reconnect_remote_root(root_id, new_session_id)?;
+        Ok(state.scope.snapshot())
     }
 
     fn root_storage_identities(

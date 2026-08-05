@@ -695,6 +695,12 @@ async function installNativeIpcMock(
 				roots: MockWorkspaceRoot[];
 			}
 			let currentSnapshot: MockWorkspaceSnapshot = emptySnapshot;
+			// `F220` S4: mirrors the real `WorkspaceRestoreStatus` — `"pending"`
+			// until the first `workspace_snapshot` call of this (fresh, post-
+			// `page.reload()`-or-not) closure consumes it, exactly once, via the
+			// cold-start restore-from-`recentState` check in that case below.
+			let initialRestoreStatus: "pending" | "none" | "restored" | "failed" =
+				"pending";
 			type MockFile = {
 				kind: "file";
 				bytes: Uint8Array;
@@ -724,15 +730,38 @@ async function installNativeIpcMock(
 			// this script, preserves across a same-tab reload) rather than living
 			// only in this closure's `Map`.
 			const BACKUP_STORAGE_KEY = "__plain_test_backup_store__";
-			const loadBackupEntries = (): Map<string, Uint8Array> => {
+			// `F220` S4: partitioned by `(rootId, key)` identity — mirrors
+			// `installMultiRootNativeIpcMock`'s own already-correct
+			// `backupMapKey`/entry-shape pattern (and the real Rust `backup`
+			// domain's own identity-digest partitioning) rather than this
+			// fixture's pre-`F220` single-fixed-root shortcut of keying by `key`
+			// alone. Required for a real remote root's hot-exit backups to
+			// round-trip through `backup_read_all` at all — the previous shape
+			// could only ever have replayed entries under the one fixed native
+			// `rootId`.
+			const backupMapKey = (entryRootId: string, key: string): string =>
+				`${entryRootId}\0${key}`;
+			const loadBackupEntries = (): Map<
+				string,
+				{ rootId: string; key: string; bytes: Uint8Array }
+			> => {
 				const raw = sessionStorage.getItem(BACKUP_STORAGE_KEY);
 				if (raw === null) {
 					return new Map();
 				}
 				try {
-					const parsed = JSON.parse(raw) as Array<[string, number[]]>;
+					const parsed = JSON.parse(raw) as Array<
+						[string, { rootId: string; key: string; bytes: number[] }]
+					>;
 					return new Map(
-						parsed.map(([key, bytes]) => [key, Uint8Array.from(bytes)]),
+						parsed.map(([mapKey, entry]) => [
+							mapKey,
+							{
+								rootId: entry.rootId,
+								key: entry.key,
+								bytes: Uint8Array.from(entry.bytes),
+							},
+						]),
 					);
 				} catch {
 					return new Map();
@@ -743,9 +772,13 @@ async function installNativeIpcMock(
 				sessionStorage.setItem(
 					BACKUP_STORAGE_KEY,
 					JSON.stringify(
-						[...backupEntries.entries()].map(([key, bytes]) => [
-							key,
-							Array.from(bytes),
+						[...backupEntries.entries()].map(([mapKey, entry]) => [
+							mapKey,
+							{
+								rootId: entry.rootId,
+								key: entry.key,
+								bytes: Array.from(entry.bytes),
+							},
 						]),
 					),
 				);
@@ -853,20 +886,29 @@ async function installNativeIpcMock(
 				return { rootId: frameRootId, key, content };
 			};
 			const encodeBackupReadAllFrame = (): Uint8Array => {
-				const entries = [...backupEntries.entries()];
+				// `F220` S4: only ever replays entries for a root this window
+				// currently has authorized (the fixed native `rootId` or a live
+				// `remoteRootTrees` entry) — mirrors the real Rust `backup_read_all`
+				// contract (and `installMultiRootNativeIpcMock`'s own identical
+				// `activeRoots.has(rootId)` filter) of never handing back a
+				// since-revoked root's backups.
+				const entries = [...backupEntries.values()].filter(
+					(entry) =>
+						entry.rootId === rootId || remoteRootTrees.has(entry.rootId),
+				);
 				let total = 8;
-				const encoded = entries.map(([key, bytes]) => {
-					const keyBytes = encoder.encode(key);
-					total += 36 + 5 + keyBytes.byteLength + bytes.byteLength;
-					return { keyBytes, bytes };
+				const encoded = entries.map((entry) => {
+					const keyBytes = encoder.encode(entry.key);
+					total += 36 + 5 + keyBytes.byteLength + entry.bytes.byteLength;
+					return { rootId: entry.rootId, keyBytes, bytes: entry.bytes };
 				});
 				const frame = new Uint8Array(total);
 				const view = new DataView(frame.buffer);
 				frame.set([0x50, 0x4c, 0x41, 0x32], 0); // "PLA2"
 				view.setUint32(4, entries.length, false);
 				let offset = 8;
-				for (const { keyBytes, bytes } of encoded) {
-					frame.set(encoder.encode(rootId), offset);
+				for (const { rootId: entryRootId, keyBytes, bytes } of encoded) {
+					frame.set(encoder.encode(entryRootId), offset);
 					offset += 36;
 					frame[offset] = keyBytes.byteLength;
 					offset += 1;
@@ -1998,6 +2040,23 @@ async function installNativeIpcMock(
 				 * `__PLAIN_TEST_DEBUG_SESSION_IDS__`'s identical "expose otherwise
 				 * server-generated ids back to the test" shape. */
 				__PLAIN_TEST_REMOTE_ROOT_IDS__(): readonly string[];
+				/** `F220` S4: simulates the live SSH connection going away on its
+				 * own (the peer closed it, or the transport hit a network/protocol
+				 * error) — no-op for a `sessionId` that is not or no longer live.
+				 * See `simulateRemoteTransportClosed`'s own doc comment. */
+				__PLAIN_TEST_SIMULATE_REMOTE_TRANSPORT_CLOSED__(
+					sessionId: string,
+				): void;
+				/** `F220` S4: flips a specific `(host, port)` target's live
+				 * fingerprint to the "changed" one *at runtime*, from whatever
+				 * point in the test this is called — unlike the static
+				 * `changedHostKeyTargetsForTest` fixture option (present from this
+				 * closure's very first `remote_session_connect` call), this lets a
+				 * test first connect and authorize a real root against the
+				 * *original* identity, then simulate the host being reinstalled
+				 * partway through (e.g. right before a reconnect attempt). See
+				 * `changedHostKeyTargetsRuntime`'s own doc comment. */
+				__PLAIN_TEST_MARK_HOST_KEY_CHANGED__(host: string, port: number): void;
 				__PLAIN_TEST_EMIT_DEBUG_EVENT__(
 					sessionId: string,
 					event: string,
@@ -2496,9 +2555,35 @@ async function installNativeIpcMock(
 					),
 				});
 			}
+			// `F220` S4: `changedHostKeyTargetsForTest` is a *static* fixture
+			// option, present for a target from the very first `remote_session_connect`
+			// call this closure ever handles — correct for modeling "this mock
+			// server has always been lying about its identity" (S1's own hard-fail
+			// test), but unable to model "a host was reinstalled *partway through*
+			// a test" (needed for a reconnect-time hard-fail after an already-
+			// successful earlier connect authorized a real root). This mutable set
+			// starts seeded from that static list and gains a runtime-only escape
+			// hatch (`__PLAIN_TEST_MARK_HOST_KEY_CHANGED__` below) a test can call
+			// mid-run, once a root is already authorized, to flip a specific
+			// target's live fingerprint out from under an *already-pinned* host —
+			// every read of "is this target's live fingerprint the changed one"
+			// goes through this set, never the static fixture field directly.
+			const changedHostKeyTargetsRuntime = new Set<string>(
+				remoteFixtureForTest.changedHostKeyTargetsForTest ?? [],
+			);
+			// `F220` S4: `hostKeyFingerprint` is captured once at connect time —
+			// the live fingerprint this exact session was authenticated under.
+			// `remote_workspace_reconnect_root` reads it off the *new* session to
+			// compare against a root's originally recorded identity (mirrors the
+			// real `RemoteSessionService::session_host_key_fingerprint`).
 			const remoteSessions = new Map<
 				string,
-				{ host: string; port: number; user: string }
+				{
+					host: string;
+					port: number;
+					user: string;
+					hostKeyFingerprint: string;
+				}
 			>();
 			// `F220` S3 — a second, independent "remote filesystem" the mock
 			// serves purely in-memory: `remoteWorkspaceTree` is what
@@ -2576,11 +2661,30 @@ async function installNativeIpcMock(
 				return segments.length === 0 ? "/" : `/${segments.join("/")}`;
 			}
 			const remoteRootTrees = new Map<string, MockDirectory>();
+			// `F220` S4: every currently-authorized remote root's own fixed
+			// identity (`hostKeyFingerprint`/`basePath`, captured once at
+			// authorization and never touched by a reconnect — mirrors
+			// `WorkspaceScope::reconnect_remote_root`'s own "only `sessionId`
+			// moves" contract) plus its *current* `sessionId` binding, which does
+			// move. Populated alongside `remoteRootTrees` in
+			// `remote_workspace_add_root`; both `treeForRootId` (session
+			// liveness) and `remote_workspace_reconnect_root` read it.
+			const remoteRootBindings = new Map<
+				string,
+				{ sessionId: string; hostKeyFingerprint: string; basePath: string }
+			>();
 			let remoteRootSerial = 601;
 			const nextRemoteRootId = (): string =>
 				`00000000-0000-4000-8000-${(remoteRootSerial++)
 					.toString()
 					.padStart(12, "0")}`;
+			function remoteSessionDisconnected() {
+				return {
+					code: "REMOTE_SESSION_DISCONNECTED",
+					message:
+						"The SSH session backing this workspace root is no longer connected.",
+				};
+			}
 			function treeForRootId(id: string | undefined): MockDirectory {
 				if (id === rootId) {
 					return root;
@@ -2588,6 +2692,18 @@ async function installNativeIpcMock(
 				const remoteTree =
 					id === undefined ? undefined : remoteRootTrees.get(id);
 				if (remoteTree !== undefined) {
+					// `F220` S4 (ADR 0006 §5): an FS operation against an
+					// already-authorized remote root whose bound session has since
+					// disconnected (`Disconnected{reason:"transportClosed"}`, or an
+					// explicit `remote_session_disconnect`) fails closed — distinct
+					// from `REMOTE_SESSION_NOT_FOUND` (a `sessionId` that never
+					// existed at all), mirroring `remote::remote_session_disconnected()`'s
+					// own doc comment for why the two are never conflated.
+					const binding =
+						id === undefined ? undefined : remoteRootBindings.get(id);
+					if (binding !== undefined && !remoteSessions.has(binding.sessionId)) {
+						throw remoteSessionDisconnected();
+					}
 					return remoteTree;
 				}
 				throw entryNotFound();
@@ -2607,6 +2723,138 @@ async function installNativeIpcMock(
 					code: "ENTRY_TYPE_MISMATCH",
 					message: "The remote entry has an incompatible type.",
 				};
+			}
+			// `F220` S4 (ADR 0007 §4): Recent-entry tracking for this fixture's
+			// own single fixed native root plus any authorized remote root(s) —
+			// mirrors `installMultiRootNativeIpcMock`'s own `recentEntries`/
+			// `recordRecent()` shape, extended with a `remoteRoots` field neither
+			// that mock nor this fixture's own pre-`F220`-S4 static
+			// `workspace_recent_list` ever modeled. Round-trips through
+			// `sessionStorage` (like `backupEntries` above) so a `page.reload()`
+			// genuinely simulates a cold start against a real "last workspace",
+			// not just re-running this closure from scratch with the same static
+			// fixtures.
+			const RECENT_STORAGE_KEY = "__plain_test_recent_store__";
+			interface StoredRecentRemoteRoot {
+				readonly host: string;
+				readonly port: number;
+				readonly user: string;
+				readonly path: string;
+				readonly label: string;
+			}
+			interface StoredRecentEntry {
+				readonly recentId: string;
+				readonly label: string;
+				readonly hasLocalRoot: boolean;
+				readonly remoteRoots: readonly StoredRecentRemoteRoot[];
+			}
+			interface StoredRecentState {
+				entries: StoredRecentEntry[];
+				revision: number;
+				lastRecentId: string | null;
+			}
+			const loadRecentState = (): StoredRecentState => {
+				const raw = sessionStorage.getItem(RECENT_STORAGE_KEY);
+				if (raw === null) {
+					return { entries: [], revision: 1, lastRecentId: null };
+				}
+				try {
+					const parsed = JSON.parse(raw) as StoredRecentState;
+					return {
+						entries: Array.isArray(parsed.entries) ? parsed.entries : [],
+						revision: typeof parsed.revision === "number" ? parsed.revision : 1,
+						lastRecentId:
+							typeof parsed.lastRecentId === "string"
+								? parsed.lastRecentId
+								: null,
+					};
+				} catch {
+					return { entries: [], revision: 1, lastRecentId: null };
+				}
+			};
+			const recentState = loadRecentState();
+			const persistRecentState = (): void => {
+				sessionStorage.setItem(RECENT_STORAGE_KEY, JSON.stringify(recentState));
+			};
+			let recentIdSerial = 701;
+			const nextRecentId = (): string =>
+				`00000000-0000-4000-8000-${(recentIdSerial++)
+					.toString(16)
+					.padStart(12, "0")}`;
+			const recentRemoteIdentityKey = (entry: StoredRecentRemoteRoot): string =>
+				`${entry.host}\0${entry.port}\0${entry.user}\0${entry.path}`;
+			// Called after every root-set-changing mutation
+			// (`workspace_pick_roots`, `remote_workspace_add_root`,
+			// `workspace_open_recent`) — mirrors
+			// `workspace::commands::record_current_workspace`'s own two-backend
+			// recording contract, including its "silently skip a remote root
+			// whose session has already disconnected" degrade path.
+			function recordRecent(): void {
+				const hasLocalRoot = currentSnapshot.roots.some(
+					(candidate) => candidate.rootId === rootId,
+				);
+				const remoteRootsNow: StoredRecentRemoteRoot[] = [];
+				for (const candidateRoot of currentSnapshot.roots) {
+					if (candidateRoot.rootId === rootId) {
+						continue;
+					}
+					const binding = remoteRootBindings.get(candidateRoot.rootId);
+					if (binding === undefined) {
+						continue;
+					}
+					const session = remoteSessions.get(binding.sessionId);
+					if (session === undefined) {
+						continue;
+					}
+					remoteRootsNow.push({
+						host: session.host,
+						port: session.port,
+						user: session.user,
+						path: binding.basePath,
+						label: candidateRoot.displayName,
+					});
+				}
+				recentState.revision += 1;
+				if (!hasLocalRoot && remoteRootsNow.length === 0) {
+					recentState.lastRecentId = null;
+					persistRecentState();
+					return;
+				}
+				const currentRemoteIdentities = remoteRootsNow.map(
+					recentRemoteIdentityKey,
+				);
+				const existingIndex = recentState.entries.findIndex(
+					(entry) =>
+						entry.hasLocalRoot === hasLocalRoot &&
+						entry.remoteRoots.length === remoteRootsNow.length &&
+						entry.remoteRoots.every(
+							(candidate, index) =>
+								recentRemoteIdentityKey(candidate) ===
+								currentRemoteIdentities[index],
+						),
+				);
+				const recentId =
+					existingIndex >= 0
+						? recentState.entries.splice(existingIndex, 1)[0]!.recentId
+						: nextRecentId();
+				const rootLabels = hasLocalRoot ? ["native-workspace"] : [];
+				const allLabels = [
+					...rootLabels,
+					...remoteRootsNow.map((entry) => entry.label),
+				];
+				const label =
+					allLabels.length <= 1
+						? (allLabels[0] ?? "Empty Workspace")
+						: `${allLabels[0]} + ${allLabels.length - 1} folders`;
+				recentState.entries.unshift({
+					recentId,
+					label,
+					hasLocalRoot,
+					remoteRoots: remoteRootsNow,
+				});
+				recentState.entries = recentState.entries.slice(0, 20);
+				recentState.lastRecentId = recentId;
+				persistRecentState();
 			}
 			testWindow.__PLAIN_TEST_EXTERNAL_WRITE_REMOTE__ = (
 				targetRootId,
@@ -2712,7 +2960,15 @@ async function installNativeIpcMock(
 					throw remoteConnectTimedOut();
 				}
 				const sessionId = nextRemoteSessionId();
-				remoteSessions.set(sessionId, { host, port, user });
+				const key = remoteMockTargetKey(host, port);
+				const changed = changedHostKeyTargetsRuntime.has(key);
+				const hostKeyFingerprint = remoteMockFingerprint(host, port, changed);
+				remoteSessions.set(sessionId, {
+					host,
+					port,
+					user,
+					hostKeyFingerprint,
+				});
 				emitRemoteSessionEvent({
 					event: "connected",
 					sessionId,
@@ -2722,6 +2978,46 @@ async function installNativeIpcMock(
 				});
 				return { status: "connected", sessionId };
 			}
+			// `F220` S4 — a *reactive* disconnect: unlike `remote_session_disconnect`
+			// (an explicit `Plain: Disconnect SSH Session…`-driven, always
+			// `"userRequested"` teardown a test drives through the ordinary
+			// command surface), this is a test-only escape hatch with no wire
+			// command equivalent — there is no command for "the peer hung up on
+			// us"; Rust's own reactive counterpart
+			// (`session::RemoteClientHandler::disconnected`) is a
+			// `russh::client::Handler` callback with nothing for the frontend to
+			// call. Mirrors `__PLAIN_TEST_EMIT_DEBUG_EVENT__`'s own "test-only
+			// escape hatch exposed on `testWindow`" shape for a different domain.
+			// A no-op for a `sessionId` that is not (or no longer) live.
+			function simulateRemoteTransportClosed(sessionId: string): void {
+				const session = remoteSessions.get(sessionId);
+				if (session === undefined) {
+					return;
+				}
+				remoteSessions.delete(sessionId);
+				emitRemoteSessionEvent({
+					event: "disconnected",
+					sessionId,
+					host: session.host,
+					port: session.port,
+					user: session.user,
+					reason: "transportClosed",
+				});
+			}
+			testWindow.__PLAIN_TEST_SIMULATE_REMOTE_TRANSPORT_CLOSED__ = (
+				sessionId: string,
+			) => {
+				if (typeof sessionId !== "string") {
+					throw new Error("Invalid remote transport-closed test injection.");
+				}
+				simulateRemoteTransportClosed(sessionId);
+			};
+			testWindow.__PLAIN_TEST_MARK_HOST_KEY_CHANGED__ = (host, port) => {
+				if (typeof host !== "string" || typeof port !== "number") {
+					throw new Error("Invalid host-key-changed test injection.");
+				}
+				changedHostKeyTargetsRuntime.add(remoteMockTargetKey(host, port));
+			};
 			// Expands this file's own deliberately-terse `TestGitStatusEntry`
 			// (`type`/`indexStatus`/`worktreeStatus`/`path`/`origPath` only) into
 			// the full `GitStatusEntryWire` shape `git-codec.ts`'s
@@ -3600,36 +3896,22 @@ async function installNativeIpcMock(
 							throw new Error("Expected one raw PLB2 browser test frame.");
 						}
 						const frame = plb2Frame(args);
-						if (frame.rootId !== rootId) {
-							// `F220` S3B: a real dirty edit against a
-							// `remote_workspace_add_root`-authorized root now reaches
-							// this fixture's `backup_write` handler exactly like any
-							// other authorized root would in production (Rust's own
-							// `backup_write` validates against the currently
-							// authorized root set without a backend restriction —
-							// see `F160` S0's progress notes). This single-root
-							// fixture's own `backupEntries`/`PLA2` read-all encoding
-							// predates multi-root support, and hot-exit restoration
-							// parity for remote roots is an open `F220` S4 question,
-							// not this slice's — so a known remote root's backup is
-							// accepted and dropped here (not persisted, not
-							// replayed by `backup_read_all`) rather than thrown as a
-							// "foreign root", which would otherwise fail every real
-							// Ctrl+S against a remote root. Anything outside both the
-							// fixed native root and every authorized remote root
-							// still fails closed exactly as before.
-							if (!remoteRootTrees.has(frame.rootId)) {
-								throw new Error("Backup targeted a foreign browser-test root.");
-							}
-							calls.push({
-								command,
-								args: {
-									rootId: frame.rootId,
-									key: frame.key,
-									contentHex: hexFromBytes(frame.content),
-								},
-							});
-							return null;
+						// `F220` S4: a real dirty edit against a
+						// `remote_workspace_add_root`-authorized root reaches this
+						// fixture's `backup_write` handler exactly like any other
+						// authorized root would in production (Rust's own
+						// `backup_write` validates against the currently authorized
+						// root set without a backend restriction — see `F160` S0's
+						// progress notes). Unlike the pre-`F220`-S4 shortcut this
+						// replaces, a known remote root's backup is now genuinely
+						// persisted (partitioned by `(rootId, key)` identity, exactly
+						// like the fixed native root's own) and replayed by
+						// `backup_read_all` — real hot-exit parity for remote roots,
+						// not an accept-and-drop placeholder. Anything outside both
+						// the fixed native root and every currently authorized remote
+						// root still fails closed as a foreign root.
+						if (frame.rootId !== rootId && !remoteRootTrees.has(frame.rootId)) {
+							throw new Error("Backup targeted a foreign browser-test root.");
 						}
 						calls.push({
 							command,
@@ -3639,7 +3921,11 @@ async function installNativeIpcMock(
 								contentHex: hexFromBytes(frame.content),
 							},
 						});
-						backupEntries.set(frame.key, frame.content.slice());
+						backupEntries.set(backupMapKey(frame.rootId, frame.key), {
+							rootId: frame.rootId,
+							key: frame.key,
+							bytes: frame.content.slice(),
+						});
 						persistBackupEntries();
 						return null;
 					}
@@ -3740,8 +4026,31 @@ async function installNativeIpcMock(
 								trash: mode === "supported",
 								versionedWrite: true,
 							};
-						case "workspace_snapshot":
+						case "workspace_snapshot": {
+							// `F220` S4 (ADR 0007 §4): cold-start restore-from-history
+							// — consumed exactly once per fresh closure (a `page.reload()`
+							// re-runs `addInitScript` from scratch, so this naturally
+							// re-arms). Only ever restores the *local* half of the MRU
+							// Recent entry; a purely remote one restores to zero local
+							// roots and still reports `"restored"` (not `"failed"` — see
+							// the `F220` S4 Rust patch's own identical `Restored`
+							// outcome for this exact case), never auto-connecting the
+							// remote half.
+							if (initialRestoreStatus === "pending") {
+								const lastEntry = recentState.entries.find(
+									(entry) => entry.recentId === recentState.lastRecentId,
+								);
+								if (lastEntry === undefined) {
+									initialRestoreStatus = "none";
+								} else {
+									if (lastEntry.hasLocalRoot) {
+										currentSnapshot = selectedSnapshot;
+									}
+									initialRestoreStatus = "restored";
+								}
+							}
 							return currentSnapshot;
+						}
 						case "workspace_pick_save_target": {
 							const saveRequest = args.request as
 								{ suggestedName?: unknown } | undefined;
@@ -3787,11 +4096,74 @@ async function installNativeIpcMock(
 							};
 						}
 						case "workspace_recent_list":
-							return { revision: 1, restoreStatus: "none", entries: [] };
+							return {
+								revision: recentState.revision,
+								restoreStatus:
+									initialRestoreStatus === "pending"
+										? "none"
+										: initialRestoreStatus,
+								entries: recentState.entries.map((entry) => ({
+									recentId: entry.recentId,
+									label: entry.label,
+									rootLabels: entry.hasLocalRoot ? ["native-workspace"] : [],
+									remoteRoots: entry.remoteRoots,
+								})),
+							};
+						case "workspace_open_recent": {
+							const openRecentId = (
+								args.request as { recentId?: unknown } | undefined
+							)?.recentId;
+							const entry = recentState.entries.find(
+								(candidate) => candidate.recentId === openRecentId,
+							);
+							if (entry === undefined) {
+								throw {
+									code: "WORKSPACE_RECENT_NOT_FOUND",
+									message:
+										"The selected recent workspace is no longer available.",
+								};
+							}
+							currentSnapshot = {
+								workspaceId: currentSnapshot.workspaceId,
+								revision: currentSnapshot.revision + 1,
+								roots: entry.hasLocalRoot ? [...selectedSnapshot.roots] : [],
+							};
+							recordRecent();
+							return currentSnapshot;
+						}
+						case "workspace_remove_recent": {
+							const removeRecentId = (
+								args.request as { recentId?: unknown } | undefined
+							)?.recentId;
+							const beforeCount = recentState.entries.length;
+							recentState.entries = recentState.entries.filter(
+								(candidate) => candidate.recentId !== removeRecentId,
+							);
+							if (recentState.entries.length === beforeCount) {
+								throw {
+									code: "WORKSPACE_RECENT_NOT_FOUND",
+									message:
+										"The selected recent workspace is no longer available.",
+								};
+							}
+							if (recentState.lastRecentId === removeRecentId) {
+								recentState.lastRecentId = null;
+							}
+							recentState.revision += 1;
+							persistRecentState();
+							return null;
+						}
+						case "workspace_clear_recent":
+							recentState.entries = [];
+							recentState.lastRecentId = null;
+							recentState.revision += 1;
+							persistRecentState();
+							return null;
 						case "workspace_pick_roots":
 							currentSnapshot = selectedSnapshot;
+							recordRecent();
 							return { status: "selected", snapshot: selectedSnapshot };
-						case "workspace_close_folder":
+						case "workspace_close_folder": {
 							if (
 								args.request === null ||
 								typeof args.request !== "object" ||
@@ -3801,8 +4173,23 @@ async function installNativeIpcMock(
 									"Malformed workspace_close_folder test request.",
 								);
 							}
+							// `F220` S4: mirrors the real
+							// `workspace::commands::workspace_close_folder`'s own
+							// `record_current_workspace(...)` call whenever the close
+							// actually changed anything (`changed` is Rust's own guard
+							// for "there was something to close") — this is what makes
+							// this window's next cold-start `workspace_snapshot` see an
+							// empty `recentState.lastRecentId` (via `recordRecent()`'s
+							// own "no current roots" branch) and correctly *not*
+							// resurrect the just-closed workspace on the next
+							// `page.reload()`, exactly like the real backend.
+							const hadRootsToClose = currentSnapshot.roots.length > 0;
 							currentSnapshot = closedSnapshot;
+							if (hadRootsToClose) {
+								recordRecent();
+							}
 							return closedSnapshot;
+						}
 						case "workspace_watch_sync": {
 							const watchRequest = args.request as
 								| {
@@ -4308,28 +4695,30 @@ async function installNativeIpcMock(
 							const discard = args.request as
 								{ rootId?: string; key?: string } | undefined;
 							const key = discard?.key;
-							if (typeof key !== "string") {
+							if (
+								typeof discard?.rootId !== "string" ||
+								typeof key !== "string" ||
+								(discard.rootId !== rootId &&
+									!remoteRootTrees.has(discard.rootId))
+							) {
 								throw new Error("Malformed backup_discard test request.");
 							}
-							if (discard?.rootId !== rootId) {
-								// `F220` S3B: mirrors `backup_write`'s own remote-root
-								// branch just above — a real save against a remote
-								// root discards its (never actually persisted by this
-								// fixture) backup too, so this must not throw.
-								if (
-									typeof discard?.rootId !== "string" ||
-									!remoteRootTrees.has(discard.rootId)
-								) {
-									throw new Error("Malformed backup_discard test request.");
-								}
-								return null;
-							}
-							backupEntries.delete(key);
+							backupEntries.delete(backupMapKey(discard.rootId, key));
 							persistBackupEntries();
 							return null;
 						}
 						case "backup_discard_all": {
-							backupEntries.clear();
+							// `F220` S4: mirrors `installMultiRootNativeIpcMock`'s own
+							// identical "only ever discards a currently authorized
+							// root's entries" filter.
+							for (const [mapKey, entry] of backupEntries) {
+								if (
+									entry.rootId === rootId ||
+									remoteRootTrees.has(entry.rootId)
+								) {
+									backupEntries.delete(mapKey);
+								}
+							}
 							persistBackupEntries();
 							return null;
 						}
@@ -4779,10 +5168,7 @@ async function installNativeIpcMock(
 									knownHostsHit: false,
 								};
 							}
-							const changed =
-								remoteFixtureForTest.changedHostKeyTargetsForTest?.includes(
-									key,
-								) ?? false;
+							const changed = changedHostKeyTargetsRuntime.has(key);
 							const liveFingerprint = remoteMockFingerprint(
 								host,
 								port,
@@ -4816,10 +5202,7 @@ async function installNativeIpcMock(
 							const sha256Fingerprint = confirmRequest?.sha256Fingerprint ?? "";
 							const key = remoteMockTargetKey(host, port);
 							remoteKnownHosts.set(key, { algorithm, sha256Fingerprint });
-							const changed =
-								remoteFixtureForTest.changedHostKeyTargetsForTest?.includes(
-									key,
-								) ?? false;
+							const changed = changedHostKeyTargetsRuntime.has(key);
 							const liveFingerprint = remoteMockFingerprint(
 								host,
 								port,
@@ -4977,6 +5360,18 @@ async function installNativeIpcMock(
 							}
 							const newRootId = nextRemoteRootId();
 							remoteRootTrees.set(newRootId, authorizedNode);
+							// `F220` S4: this root's fixed identity — untouched by any
+							// later `remote_workspace_reconnect_root` call, which only
+							// ever moves `sessionId`. See `remoteRootBindings`'s own
+							// doc comment.
+							const addRootSession = remoteSessions.get(
+								addRootRequest.sessionId!,
+							)!;
+							remoteRootBindings.set(newRootId, {
+								sessionId: addRootRequest.sessionId!,
+								hostKeyFingerprint: addRootSession.hostKeyFingerprint,
+								basePath: canonicalPath,
+							});
 							currentSnapshot = {
 								workspaceId: currentSnapshot.workspaceId,
 								revision: currentSnapshot.revision + 1,
@@ -4991,6 +5386,74 @@ async function installNativeIpcMock(
 									},
 								],
 							};
+							// `F220` S4: mirrors `remote_workspace_add_root`'s own real
+							// Rust addition — records into Recent exactly like
+							// `workspace_pick_roots` already does, so a window whose
+							// only root-set-changing action was adding a remote root
+							// still produces a Recent entry.
+							recordRecent();
+							return currentSnapshot;
+						}
+						// `F220` S4 (ADR 0006 §5's own "显式重连是新的信任决策"):
+						// rebinds an already-authorized remote root onto a brand-new
+						// SSH session — mirrors the real Rust
+						// `remote_workspace_reconnect_root`'s own exact check order:
+						// root existence → live new session → host-key identity match
+						// → re-resolved base path match. Deliberately does not bump
+						// `currentSnapshot.revision` (only `sessionId` moves — see
+						// `remoteRootBindings`'s own doc comment), so a caller polling
+						// `workspace_snapshot`'s `revision` alone cannot observe a
+						// reconnect at all, exactly like the real backend.
+						case "remote_workspace_reconnect_root": {
+							const reconnectRequest = args.request as
+								{ rootId?: string; sessionId?: string } | undefined;
+							const targetRootId = reconnectRequest?.rootId;
+							const newSessionId = reconnectRequest?.sessionId;
+							if (
+								typeof targetRootId !== "string" ||
+								typeof newSessionId !== "string"
+							) {
+								throw remoteRequestInvalid();
+							}
+							const binding = remoteRootBindings.get(targetRootId);
+							if (binding === undefined) {
+								if (targetRootId === rootId) {
+									// A `Local` root has no session to rebind — mirrors the
+									// real `ROOT_BACKEND_UNSUPPORTED`.
+									throw {
+										code: "ROOT_BACKEND_UNSUPPORTED",
+										message:
+											"This workspace root's backend does not support the requested operation.",
+									};
+								}
+								throw {
+									code: "ROOT_NOT_AUTHORIZED",
+									message:
+										"The requested workspace root is not authorized for this window.",
+								};
+							}
+							const newSession = remoteSessions.get(newSessionId);
+							if (newSession === undefined) {
+								throw remoteSessionNotFound();
+							}
+							if (
+								newSession.hostKeyFingerprint !== binding.hostKeyFingerprint
+							) {
+								throw {
+									code: "REMOTE_ROOT_IDENTITY_CHANGED",
+									message:
+										"The reconnected SSH session's host identity does not match this workspace root's original identity.",
+								};
+							}
+							// Re-`realpath`s the root's original base path over the new
+							// session — this mock's browse tree has no per-session
+							// state, so re-resolving the exact same literal path either
+							// still exists (unchanged — the common case) or no longer
+							// exists (`remoteWorkspaceDirectoryAt` throws
+							// `ENTRY_NOT_FOUND`, propagated verbatim exactly like the
+							// real `canonicalize_for_root`'s own unmodified error).
+							remoteWorkspaceDirectoryAt(binding.basePath);
+							binding.sessionId = newSessionId;
 							return currentSnapshot;
 						}
 						case "terminal_profiles": {
@@ -6733,6 +7196,13 @@ async function installMultiRootNativeIpcMock(
 					recentId: string;
 					label: string;
 					rootLabels: readonly string[];
+					// `F220` S4: this mock has no remote-root support at all — every
+					// entry it ever records is local-only — but the real wire
+					// contract's `decodeWorkspaceRecentListResult` now requires the
+					// key unconditionally (`hasExactKeys(..., ["recentId", "label",
+					// "rootLabels", "remoteRoots"])`), so it must still be present,
+					// always empty, here.
+					remoteRoots: readonly [];
 				}>;
 				roots: readonly MockWorkspaceRoot[];
 			}[] = [];
@@ -6840,6 +7310,7 @@ async function installMultiRootNativeIpcMock(
 								? rootLabels[0]!
 								: `${rootLabels[0]} + ${rootLabels.length - 1} folders`,
 						rootLabels,
+						remoteRoots: [],
 					},
 					roots: [...currentRoots],
 				});
@@ -8700,6 +9171,41 @@ async function installTrashNativeIpcMock(
 	);
 }
 
+/** `F220` S4 — `NotificationsToasts.MAX_NOTIFICATIONS` (the vendored
+ * `notificationsToasts.js`'s own real constant) caps simultaneously visible
+ * toasts at 3; a 4th queues invisibly (still reachable from the Notification
+ * Center, but absent from `.notifications-toasts .notification-toast`) until
+ * an existing one is cleared. Several remote-lifecycle scenarios legitimately
+ * accumulate 3 lingering toasts (connect/disconnect/actionable-lost-
+ * connection) before the specific one a test cares about next would arrive —
+ * this clears every currently-visible toast first so that one is guaranteed
+ * a slot.
+ *
+ * Deliberately the real "Notifications: Clear All Notifications" command
+ * (`notifications.clearAll`, vendored `notificationsCommands.js`,
+ * `center.clearAll()`) rather than clicking each toast's own "Clear
+ * Notification" button in a loop: the per-toast close button lives inside a
+ * `monaco-list` row that gets torn down and recreated the moment an earlier
+ * toast in the stack closes (the next queued notification is promoted into
+ * its place), and closing them one at a time raced that recreation — the
+ * freshly-promoted row's close button intermittently measured a `0x0`
+ * bounding box for the entire duration of a click's actionability wait,
+ * hanging until timeout (`force: true` doesn't help either — a target with
+ * no box has no point to click). `notifications.clearAll` clears the model
+ * directly, sidestepping that per-row DOM race entirely. */
+async function clearAllToasts(page: Page): Promise<void> {
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	if ((await toasts.count()) === 0) {
+		return;
+	}
+	await executePaletteCommand(
+		page,
+		"Clear All Notifications",
+		"Notifications: Clear All Notifications",
+	);
+	await expect(toasts).toHaveCount(0);
+}
+
 async function nativeInvocations(
 	page: Page,
 	command: string,
@@ -8793,8 +9299,24 @@ async function openNativeWorkspaceExplorer(page: Page): Promise<Locator> {
 		{ timeout: 60_000 },
 	);
 	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
-	await page.getByRole("tab", { name: /^Explorer / }).click();
 	const explorer = page.getByRole("tree", { name: "Files Explorer" });
+	// `F220` S4: a caller that invokes this helper more than once within the
+	// same test (e.g. `launchDebugSessionThroughBothDialogs`, itself called
+	// repeatedly by some tests) can now legitimately land here with the
+	// workbench's own real cold-start-restore already having reopened the
+	// same workspace before this very `page.goto()` call's own "File: Open
+	// Folder..." above ever ran — the prior call's own "Open Folder"
+	// recorded a Recent entry into this fixture's `sessionStorage`, and a
+	// fresh `addInitScript` closure's `workspace_snapshot` restores from it
+	// on its very first call, exactly like the real backend's own
+	// `should_restore_last_workspace` always attempts. Explorer is then
+	// already the open, active view by the time this line runs, and
+	// clicking its already-active activity-bar tab again would only toggle
+	// the sidebar shut — mirrors the existing reload-and-reauthorize test's
+	// own identical `if ((await explorer.count()) === 0) { … }` guard.
+	if ((await explorer.count()) === 0) {
+		await page.getByRole("tab", { name: /^Explorer / }).click();
+	}
 	await expect(explorer).toBeVisible();
 	return explorer;
 }
@@ -26438,6 +26960,795 @@ test("Plain: Open Remote Folder… with no live session prompts to connect first
 	expect(await nativeInvocations(page, "remote_workspace_add_root")).toEqual(
 		[],
 	);
+
+	expect(pageErrors).toEqual([]);
+});
+
+// --- `F220` S4: remote session lifecycle (disconnect/reconnect/Recent) -----
+
+test("a reactively disconnected remote root fails FS operations closed, keeps dirty content, and Plain: Reconnect Remote Session… restores it", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"supported",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		{},
+		[],
+		0,
+		0,
+		null,
+		{},
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await connectMockSshSession(page, "example.com", "octocat");
+	await openRemoteFolderViaQuickPick(page, ["home", "octocat", "project"]);
+
+	const remoteRootIds = await page.evaluate(() =>
+		(
+			window as unknown as {
+				__PLAIN_TEST_REMOTE_ROOT_IDS__(): readonly string[];
+			}
+		).__PLAIN_TEST_REMOTE_ROOT_IDS__(),
+	);
+	expect(remoteRootIds).toHaveLength(1);
+	const remoteRootId = remoteRootIds[0]!;
+
+	const sessionState = (await directTauriInvoke(
+		page,
+		"remote_session_state",
+		{},
+	)) as { sessions: readonly { sessionId: string }[] };
+	expect(sessionState.sessions).toHaveLength(1);
+	const sessionId = sessionState.sessions[0]!.sessionId;
+
+	await page.getByRole("tab", { name: /^Explorer / }).click();
+	const explorer = page.getByRole("tree", { name: "Files Explorer" });
+	const mainFile = explorer.getByRole("treeitem", {
+		name: "main.ts",
+		exact: true,
+	});
+	await expect(mainFile).toBeVisible();
+	await mainFile.dblclick();
+	const editor = page
+		.getByRole("code")
+		.filter({ hasText: "export const remoteMain = true;" });
+	await expect(editor).toBeVisible();
+
+	// A real dirty edit, left unsaved — must survive both the disconnect and
+	// the later failed save attempt untouched.
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "export const remoteMain = true;" })
+		.click();
+	await page.keyboard.press("End");
+	await page.keyboard.type(" // still-dirty-after-disconnect");
+	const activeTab = page.locator(".tabs-container .tab.active");
+	await expect(activeTab).toHaveClass(/dirty/);
+
+	// Simulates the peer hanging up on its own — the reactive counterpart to
+	// an explicit "Plain: Disconnect SSH Session…", with no wire command a
+	// test could otherwise call to reach it.
+	await page.evaluate((sessionIdValue: string) => {
+		(
+			window as unknown as {
+				__PLAIN_TEST_SIMULATE_REMOTE_TRANSPORT_CLOSED__(
+					sessionId: string,
+				): void;
+			}
+		).__PLAIN_TEST_SIMULATE_REMOTE_TRANSPORT_CLOSED__(sessionIdValue);
+	}, sessionId);
+
+	// An actionable, root-naming notification — distinct from the generic
+	// "disconnected from user@host:port" toast `plain-remote-ssh-commands.ts`
+	// already renders for every session event (both remain visible; they are
+	// not deduplicated).
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	const lostConnectionToast = toasts.filter({
+		hasText: "lost the SSH connection",
+	});
+	await expect(lostConnectionToast).toHaveCount(1);
+	await expect(lostConnectionToast).toContainText("project");
+	await expect(lostConnectionToast).toContainText("octocat@example.com:22");
+	await expect(lostConnectionToast).toContainText(
+		"Plain: Reconnect Remote Session…",
+	);
+
+	// `NotificationsToasts.MAX_NOTIFICATIONS` caps simultaneously visible
+	// toasts at 3 — already reached above (connected/disconnected/lost-
+	// connection) — so the save-error notification below needs a slot
+	// cleared for it first, or it queues invisibly.
+	await clearAllToasts(page);
+
+	// A real FS operation against the now-disconnected root fails closed —
+	// the dirty content is neither cleared nor silently discarded. The
+	// message itself is Plain's own shared "plain-workspace://" save-error
+	// text (identical wording for every save failure on this scheme,
+	// including an ordinary version conflict elsewhere in this file) —
+	// `REMOTE_SESSION_DISCONNECTED`'s own accurate detail is what a real
+	// user already saw in the actionable notification above; what matters
+	// here is that the failure is surfaced at all and nothing is silently
+	// dropped.
+	await page.keyboard.press("ControlOrMeta+S");
+	const saveFailedToast = page
+		.locator('[role="alert"], .notifications-toasts .notification-toast')
+		.filter({ hasText: "Failed to save 'main.ts'" });
+	await expect(saveFailedToast.first()).toBeVisible();
+	await expect(activeTab).toHaveClass(/dirty/);
+	await expect(
+		page
+			.getByRole("code")
+			.filter({ hasText: "// still-dirty-after-disconnect" }),
+	).toBeVisible();
+	// Save on the `plain-workspace://` scheme is optimistic-concurrency: the
+	// vendored, patched `FileService.writeFile()` always stats the resource
+	// first (to verify its cached version against the live one) *before*
+	// ever calling the provider's `plainWriteFile` — see
+	// `validateWriteFile` in `patches/@codingame__monaco-vscode-files-service-override@35.0.1.patch`.
+	// That pre-flight `workspace_stat` is what actually fails closed here
+	// (`treeForRootId`'s session-liveness check, same as every other FS op
+	// against this disconnected root); the real `workspace_write_file`
+	// command is never reached at all — confirmed by instrumenting both the
+	// provider and the vendored file service directly rather than assumed.
+	// The dirty tab/unchanged content assertions above are what prove the
+	// save did not actually succeed.
+	expect(await nativeInvocations(page, "workspace_write_file")).toEqual([]);
+	expect(
+		(await nativeInvocations(page, "workspace_stat")).some(
+			(call) =>
+				(call.args as { request?: { relativePath?: string } }).request
+					?.relativePath === "main.ts",
+		),
+	).toBe(true);
+
+	// Bypasses IPC entirely (mirrors the existing "Refresh Remote Folder"
+	// test's own technique) — proves the reconnect below really does drive a
+	// fresh Explorer read, not a stale cache.
+	await page.evaluate((targetRootId: string) => {
+		(
+			window as unknown as {
+				__PLAIN_TEST_EXTERNAL_CREATE_REMOTE__(
+					targetRootId: string,
+					relativePath: string,
+					kind: "file" | "directory",
+				): void;
+			}
+		).__PLAIN_TEST_EXTERNAL_CREATE_REMOTE__(targetRootId, "extra.rs", "file");
+	}, remoteRootId);
+
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Reconnect Remote Session",
+		"Plain: Reconnect Remote Session…",
+	);
+	const reconnectPicker = page.locator(".quick-input-widget");
+	await expect(reconnectPicker).toBeVisible();
+	await expect(reconnectPicker.locator("input")).toHaveAttribute(
+		"placeholder",
+		"Select a remote folder to reconnect",
+	);
+	const candidateRow = reconnectPicker
+		.locator(".quick-input-list .monaco-list-row")
+		.filter({ hasText: "project" });
+	await expect(candidateRow).toHaveCount(1);
+	await expect(candidateRow).toContainText("octocat@example.com:22");
+	await candidateRow.click();
+	await expect(reconnectPicker).toBeHidden();
+
+	// The host key was already pinned by the first connect above, and its
+	// live fingerprint has not changed — `remote_session_connect` resolves
+	// straight to `"connected"` this time, no confirmation dialog.
+	await expect(page.locator(".monaco-dialog-box")).toHaveCount(0);
+
+	const successToast = toasts.filter({ hasText: "reconnected" });
+	await expect(successToast).toHaveCount(1);
+	await expect(successToast).toContainText("project");
+	await expect(successToast).toContainText("octocat@example.com:22");
+
+	const reconnectCalls = await nativeInvocations(
+		page,
+		"remote_workspace_reconnect_root",
+	);
+	expect(reconnectCalls).toHaveLength(1);
+	expect(reconnectCalls[0]!.args.request).toMatchObject({
+		rootId: remoteRootId,
+	});
+
+	// Explorer really did refresh (not a stale cache) — the entry created
+	// directly against the mock's tree while disconnected is now visible.
+	await expect(
+		explorer.getByRole("treeitem", { name: "extra.rs", exact: true }),
+	).toBeVisible();
+
+	// A bare Ctrl+S retry does *not* magically start succeeding the moment
+	// the root reconnects: this app's own vendored, patched
+	// `StoredFileWorkingCopy.save()`/`doSave()` (`storedFileWorkingCopy.js`)
+	// sets `plainSaveRequiresReload = true` on *any* `plain-workspace://`
+	// save failure and then refuses every further save attempt outright —
+	// no stat, no write, nothing dispatched at all — until the model is
+	// either reloaded (which discards the dirty buffer, exactly like this
+	// file's own pre-existing "a remote file's stale-version write is
+	// rejected…" test demonstrates via its "Reload" button) or written via
+	// "Save As…". This is the *same* toast/mechanism that test already
+	// exercises, not something reconnecting changes or should change —
+	// confirmed by instrumenting the provider and the vendored file service
+	// directly rather than assumed. A retry here is therefore expected to
+	// remain a complete no-op, and the dirty local edit is still visible,
+	// proving nothing was silently discarded either.
+	await page.keyboard.press("ControlOrMeta+S");
+	await page.waitForTimeout(300);
+	expect(await nativeInvocations(page, "workspace_write_file")).toEqual([]);
+	await expect(activeTab).toHaveClass(/dirty/);
+	await expect(
+		page
+			.getByRole("code")
+			.filter({ hasText: "// still-dirty-after-disconnect" }),
+	).toBeVisible();
+
+	// What reconnecting *does* restore is the FS capability itself, exactly
+	// like every other operation against this root above (Explorer refresh,
+	// etc.) — proven the same way the pre-existing stale-version-conflict
+	// test proves its own equivalent recovery: a direct wire-level write
+	// carrying the dirty editor's own unsaved content now succeeds, where
+	// the same call against the still-disconnected session earlier in this
+	// test would have failed with `REMOTE_SESSION_DISCONNECTED`.
+	const liveStat = (await directTauriInvoke(page, "workspace_stat", {
+		rootId: remoteRootId,
+		relativePath: "main.ts",
+	})) as { version: string };
+	const recovered = (await directWorkspaceWriteFile(
+		page,
+		remoteRootId,
+		"main.ts",
+		liveStat.version,
+		"export const remoteMain = true; // still-dirty-after-disconnect\n",
+	)) as { status: string };
+	expect(recovered.status).toBe("written");
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toHaveLength(2);
+	expect(consoleErrors[0]).toContain("resulted in a save error");
+	expect(consoleErrors[1]).toBe(
+		"Failed to save 'main.ts'. Reload the file before saving again, or use Save As to preserve your edits.",
+	);
+});
+
+test("cold start restores the local root automatically and surfaces a remote root as needing reconnect, whose backup is restored once reconnected", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	// Pre-pinned: represents a host this window already trusted in an
+	// earlier session — Plain's own known-hosts pin store genuinely persists
+	// across restarts in production (ADR 0006 §3), unlike this mock's own
+	// in-memory `remoteKnownHosts`, which does not survive a `page.reload()`
+	// (a fresh `addInitScript` run). Isolates this scenario's own new
+	// behavior (cold-start Recent/backup restoration) from the host-key
+	// confirmation dialog flow itself, already covered by this file's own
+	// S1 tests and this file's own "selecting a Recent entry…" test below.
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"supported",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		{},
+		[],
+		0,
+		0,
+		null,
+		{ pinnedHostsForTest: [{ host: "example.com", port: 22 }] },
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	await page.getByRole("tab", { name: /^Explorer / }).click();
+	const explorer = page.getByRole("tree", { name: "Files Explorer" });
+	await expect(
+		explorer.getByRole("treeitem", { name: "README.md", exact: true }),
+	).toBeVisible();
+
+	// Not `connectMockSshSession`: that helper unconditionally expects a
+	// host-key confirmation dialog, but this host is pre-pinned above
+	// (representing an already-trusted identity from an earlier session), so
+	// `remote_session_connect` resolves straight to `"connected"` — no
+	// dialog to confirm.
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Connect to SSH Host",
+		"Plain: Connect to SSH Host…",
+	);
+	await fillConnectToSshHostPrompts(page, "example.com", "octocat");
+	await expect(page.locator(".monaco-dialog-box")).toHaveCount(0);
+	await expect
+		.poll(
+			async () =>
+				(await nativeInvocations(page, "remote_session_connect")).length,
+		)
+		.toBe(1);
+
+	await openRemoteFolderViaQuickPick(page, ["home", "octocat", "project"]);
+	const firstRemoteRootIds = await page.evaluate(() =>
+		(
+			window as unknown as {
+				__PLAIN_TEST_REMOTE_ROOT_IDS__(): readonly string[];
+			}
+		).__PLAIN_TEST_REMOTE_ROOT_IDS__(),
+	);
+	expect(firstRemoteRootIds).toHaveLength(1);
+	const originalRemoteRootId = firstRemoteRootIds[0]!;
+
+	const mainFile = explorer.getByRole("treeitem", {
+		name: "main.ts",
+		exact: true,
+	});
+	await expect(mainFile).toBeVisible();
+	await mainFile.dblclick();
+	const editor = page
+		.getByRole("code")
+		.filter({ hasText: "export const remoteMain = true;" });
+	await expect(editor).toBeVisible();
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "export const remoteMain = true;" })
+		.click();
+	await page.keyboard.press("End");
+	await page.keyboard.type(" // unsaved-before-cold-start");
+	const activeTab = page.locator(".tabs-container .tab.active");
+	await expect(activeTab).toHaveClass(/dirty/);
+
+	// Waits for the real hot-exit backup to actually land on the
+	// (sessionStorage-backed) mock store, mirroring the existing local-root
+	// hot-exit test's own identical wait for the same 1000ms default backup
+	// schedule delay.
+	await expect
+		.poll(async () => (await nativeInvocations(page, "backup_write")).length, {
+			timeout: 5_000,
+		})
+		.toBe(1);
+	const backupWriteCall = (await nativeInvocations(page, "backup_write"))[0]!;
+	expect((backupWriteCall.args as { rootId?: string }).rootId).toBe(
+		originalRemoteRootId,
+	);
+
+	// Simulate the next cold start: reload re-runs this fixture's
+	// `addInitScript` from scratch — the live SSH session and the authorized
+	// remote root are both genuinely gone — but the Recent store and the
+	// backup store both round-trip through `sessionStorage`, which the
+	// reload itself preserves.
+	await page.reload();
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	// The local root restores on its own — no "File: Open Folder..." here.
+	// Also deliberately no `.click()` on the Explorer tab: the workbench's
+	// own layout state (sidebar visibility + last-active viewlet) survives
+	// a `page.reload()` independently of this fixture's own `sessionStorage`
+	// round-tripping (VS Code persists it separately), so Explorer is
+	// already the open, selected view by the time `data-plain-ready` flips
+	// — clicking its already-active activity-bar tab again would only
+	// toggle the sidebar shut, exactly like this file's own pre-existing
+	// reload-and-check-restored-state tests never re-click it either.
+	await expect(explorer).toBeVisible();
+	await expect(
+		explorer.getByRole("treeitem", { name: "README.md", exact: true }),
+	).toBeVisible();
+
+	// An accurate, actionable notice naming the exact root/host — never a
+	// bare "disconnected" — and zero remote IPC of any kind until the user
+	// explicitly reconnects.
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	const needsReconnectToast = toasts.filter({ hasText: "needs to reconnect" });
+	await expect(needsReconnectToast).toHaveCount(1);
+	await expect(needsReconnectToast).toContainText("project");
+	await expect(needsReconnectToast).toContainText("octocat@example.com:22");
+	await expect(needsReconnectToast).toContainText(
+		"Plain: Reconnect Remote Session…",
+	);
+	expect(await nativeInvocations(page, "remote_session_connect")).toEqual([]);
+	expect(await nativeInvocations(page, "remote_workspace_add_root")).toEqual(
+		[],
+	);
+
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Reconnect Remote Session",
+		"Plain: Reconnect Remote Session…",
+	);
+	const reconnectPicker = page.locator(".quick-input-widget");
+	await expect(reconnectPicker).toBeVisible();
+	const candidateRow = reconnectPicker
+		.locator(".quick-input-list .monaco-list-row")
+		.filter({ hasText: "project" });
+	await expect(candidateRow).toHaveCount(1);
+	await candidateRow.click();
+	await expect(reconnectPicker).toBeHidden();
+
+	// Pre-pinned "from an earlier session", unchanged fingerprint — connects
+	// straight through, no dialog.
+	await expect(page.locator(".monaco-dialog-box")).toHaveCount(0);
+
+	await expect
+		.poll(
+			async () =>
+				(await nativeInvocations(page, "remote_workspace_add_root")).length,
+		)
+		.toBe(1);
+
+	const secondRemoteRootIds = await page.evaluate(() =>
+		(
+			window as unknown as {
+				__PLAIN_TEST_REMOTE_ROOT_IDS__(): readonly string[];
+			}
+		).__PLAIN_TEST_REMOTE_ROOT_IDS__(),
+	);
+	expect(secondRemoteRootIds).toHaveLength(1);
+	// This fixture's remote-root id counter restarts at the same initial
+	// value on every fresh `addInitScript` run, and this test authorizes
+	// exactly one remote root per session, so the freshly re-authorized root
+	// really does land under the exact same identity the backup above was
+	// originally written against — verified explicitly here rather than
+	// silently assumed.
+	expect(secondRemoteRootIds[0]).toBe(originalRemoteRootId);
+
+	// The dirty content from before the cold start is restored.
+	const restoredTab = page.locator(".tabs-container .tab", {
+		hasText: "main.ts",
+	});
+	await expect(restoredTab).toBeVisible();
+	await expect(restoredTab).toHaveClass(/dirty/);
+	await expect(
+		page.getByRole("code").filter({
+			hasText: "export const remoteMain = true; // unsaved-before-cold-start",
+		}),
+	).toBeVisible();
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("selecting a Recent entry with a remote root drives a real connect (through host-key confirmation) then authorization", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"supported",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		{},
+		[],
+		0,
+		0,
+		null,
+		{},
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	// `F220` S4's own addition to `remote_workspace_add_root` (records into
+	// Recent) is what produces this entry — no separate seeding mechanism.
+	await connectMockSshSession(page, "example.com", "octocat");
+	await openRemoteFolderViaQuickPick(page, ["home", "octocat", "project"]);
+	const firstRemoteRootIds = await page.evaluate(() =>
+		(
+			window as unknown as {
+				__PLAIN_TEST_REMOTE_ROOT_IDS__(): readonly string[];
+			}
+		).__PLAIN_TEST_REMOTE_ROOT_IDS__(),
+	);
+	expect(firstRemoteRootIds).toHaveLength(1);
+
+	// Unpins the host — simulating a genuinely fresh trust decision still
+	// being required by the time this Recent entry is reopened, so the
+	// Recent-driven connect below exercises the real "unknown host"
+	// confirmation dialog end to end, not a shortcut.
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Forget SSH Host Key",
+		"Plain: Forget SSH Host Key…",
+	);
+	const forgetPicker = page.locator(".quick-input-widget");
+	await expect(forgetPicker).toBeVisible();
+	await forgetPicker
+		.locator(".quick-input-list .monaco-list-row")
+		.filter({ hasText: "example.com:22" })
+		.click();
+	const forgetConfirmDialog = page.locator(".monaco-dialog-box");
+	await expect(forgetConfirmDialog).toBeVisible();
+	await forgetConfirmDialog
+		.getByRole("button", { name: "Forget Host Key", exact: true })
+		.click();
+	await expect(forgetConfirmDialog).toHaveCount(0);
+	expect(await nativeInvocations(page, "remote_host_key_forget")).toHaveLength(
+		1,
+	);
+
+	// Not the strict `executePaletteCommand`: selecting a Recent entry that
+	// carries a remote root immediately reopens a fresh quick input (the
+	// host-key confirmation flow below), so the palette's own quick input
+	// never durably hides the way that stricter helper expects.
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Open Recent",
+		"File: Open Recent...",
+	);
+	const recentPicker = page.locator(".quick-input-widget");
+	await expect(recentPicker.locator("input")).toHaveAttribute(
+		"placeholder",
+		"Select a recent workspace to open",
+	);
+	const recentRow = recentPicker
+		.locator(".quick-input-list .monaco-list-row")
+		.filter({ hasText: "project" });
+	await expect(recentRow).toHaveCount(1);
+	await expect(recentPicker).not.toContainText("/home/octocat");
+	await recentRow.click();
+
+	// A real host-key confirmation dialog — the host was just forgotten
+	// above, so this is genuinely unknown again, not silently skipped or
+	// failed outright. `.monaco-dialog-box` (not a bare `role=dialog`): a
+	// "Plain: connected to…" toast from the very first connect above is
+	// still visible and itself carries `role="dialog"` too — an established
+	// gotcha elsewhere in this file.
+	const confirmDialog = page.locator(".monaco-dialog-box");
+	await expect(confirmDialog).toBeVisible();
+	await expect(confirmDialog).toContainText("example.com:22");
+	await expect(confirmDialog).toContainText("has not been seen before");
+	await confirmDialog
+		.getByRole("button", { name: "Connect", exact: true })
+		.click();
+	await expect(confirmDialog).toHaveCount(0);
+
+	await expect
+		.poll(
+			async () =>
+				(await nativeInvocations(page, "remote_session_connect")).length,
+		)
+		.toBe(2);
+	// Cumulative for the whole test, not just this second connect: the very
+	// first `connectMockSshSession` above also confirmed an unknown host once
+	// (unpinned in this test's `installNativeIpcMock` call), and forgetting
+	// the key made it unknown again for this Recent-driven reconnect — two
+	// genuinely separate "unknown host" confirmations in total, one per
+	// connect.
+	expect(await nativeInvocations(page, "remote_host_key_confirm")).toHaveLength(
+		2,
+	);
+	await expect
+		.poll(
+			async () =>
+				(await nativeInvocations(page, "remote_workspace_add_root")).length,
+		)
+		.toBe(2);
+
+	const secondRemoteRootIds = await page.evaluate(() =>
+		(
+			window as unknown as {
+				__PLAIN_TEST_REMOTE_ROOT_IDS__(): readonly string[];
+			}
+		).__PLAIN_TEST_REMOTE_ROOT_IDS__(),
+	);
+	// A genuinely new SSH session (the first one was never disconnected) and
+	// a genuinely new `remote_workspace_add_root` call together mint a
+	// second, distinct root id — the same directory is now authorized twice
+	// under two different live sessions, not silently reused.
+	expect(secondRemoteRootIds).toHaveLength(2);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("a host key that changed since the original connect hard-fails Plain: Reconnect Remote Session… with no bypass, leaving the root disconnected", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"supported",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		{},
+		[],
+		0,
+		0,
+		null,
+		{},
+	);
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+
+	await connectMockSshSession(page, "example.com", "octocat");
+	await openRemoteFolderViaQuickPick(page, ["home", "octocat", "project"]);
+
+	const sessionState = (await directTauriInvoke(
+		page,
+		"remote_session_state",
+		{},
+	)) as { sessions: readonly { sessionId: string }[] };
+	expect(sessionState.sessions).toHaveLength(1);
+	const sessionId = sessionState.sessions[0]!.sessionId;
+	await page.evaluate((sessionIdValue: string) => {
+		(
+			window as unknown as {
+				__PLAIN_TEST_SIMULATE_REMOTE_TRANSPORT_CLOSED__(
+					sessionId: string,
+				): void;
+			}
+		).__PLAIN_TEST_SIMULATE_REMOTE_TRANSPORT_CLOSED__(sessionIdValue);
+	}, sessionId);
+
+	// Simulates the host being reinstalled while this root sat disconnected
+	// — mirrors this file's own existing S1 "a changed SSH host key
+	// hard-fails…" test's construction (`pinnedHostsForTest` +
+	// `changedHostKeyTargetsForTest`), except triggered at runtime instead
+	// of from the very first connect, since a real root must already be
+	// authorized before this scenario even applies.
+	await page.evaluate(() => {
+		(
+			window as unknown as {
+				__PLAIN_TEST_MARK_HOST_KEY_CHANGED__(host: string, port: number): void;
+			}
+		).__PLAIN_TEST_MARK_HOST_KEY_CHANGED__("example.com", 22);
+	});
+
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Reconnect Remote Session",
+		"Plain: Reconnect Remote Session…",
+	);
+	const picker = page.locator(".quick-input-widget");
+	await expect(picker).toBeVisible();
+	const candidateRow = picker
+		.locator(".quick-input-list .monaco-list-row")
+		.filter({ hasText: "project" });
+	await expect(candidateRow).toHaveCount(1);
+	await candidateRow.click();
+	await expect(picker).toBeHidden();
+
+	// A changed pinned key hard-fails immediately — never a confirmation
+	// dialog with a "connect anyway" escape hatch. `.monaco-dialog-box`
+	// (not a bare `role=dialog`): the real error notification toast this
+	// hard failure does legitimately show is itself `role="dialog"` too.
+	await expect(page.locator(".monaco-dialog-box")).toHaveCount(0);
+
+	// Read the failure back from the Notification *Center* (`.notify()`'s
+	// own `NotificationsModel`), not the transient toast stack: the connect
+	// toast plus the two disconnect notifications already on screen
+	// (the generic one from `plain-remote-ssh-commands.ts` and the
+	// actionable one from `handleRemoteSessionEventForWorkspaceLifecycle`)
+	// fill VS Code's real `NotificationsToasts.MAX_NOTIFICATIONS = 3`, so
+	// this hard-failure notification legitimately queues without ever
+	// rendering as a 4th toast — confirmed directly by instrumenting
+	// `NotificationsModel.addNotification` (it *is* added to the model;
+	// the toast area's own cap is what hides it). The Center lists every
+	// notification in the model regardless of that cap, so it is the
+	// correct place to assert this failure was actually surfaced rather
+	// than silently dropped.
+	await page.getByRole("button", { name: "Notifications" }).click();
+	const notificationsCenter = page.locator(".notifications-center");
+	await expect(notificationsCenter).toBeVisible();
+	const errorItem = notificationsCenter
+		.locator(".notification-list-item")
+		.filter({ hasText: "has changed" });
+	await expect(errorItem).toHaveCount(1);
+	const errorText = await errorItem.first().innerText();
+	expect(errorText).toContain("example.com:22");
+	expect(errorText).toContain("Previously pinned");
+	expect(errorText).toContain("Now offered");
+	const fingerprintMatches = [...errorText.matchAll(/SHA256:[A-Za-z0-9]+/g)];
+	expect(fingerprintMatches.length).toBe(2);
+	expect(fingerprintMatches[0]?.[0]).not.toBe(fingerprintMatches[1]?.[0]);
+	await page.keyboard.press("Escape");
+	await expect(notificationsCenter).toBeHidden();
+
+	// The connect phase failed before ever reaching the root-level reconnect
+	// — no silent success, and the root is left exactly as disconnected as
+	// it was.
+	expect(
+		await nativeInvocations(page, "remote_workspace_reconnect_root"),
+	).toEqual([]);
+
+	// Re-running the command still offers the same root as needing
+	// reconnection — it was never marked reconnected.
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Reconnect Remote Session",
+		"Plain: Reconnect Remote Session…",
+	);
+	await expect(picker).toBeVisible();
+	await expect(
+		picker
+			.locator(".quick-input-list .monaco-list-row")
+			.filter({ hasText: "project" }),
+	).toHaveCount(1);
+	await page.keyboard.press("Escape");
+	await expect(picker).toBeHidden();
 
 	expect(pageErrors).toEqual([]);
 });

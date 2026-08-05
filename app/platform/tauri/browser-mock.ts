@@ -73,6 +73,7 @@ import type {
 	WorkspaceMoveResult,
 	WorkspacePickSaveTargetResult,
 	WorkspaceRecentEntry,
+	WorkspaceRecentRemoteRoot,
 	WorkspaceRoot,
 	WorkspaceSearchExpandReplacementItem,
 	WorkspaceSearchFilesResult,
@@ -1075,6 +1076,37 @@ export interface BrowserMockRemoteFixtureForTest {
 	readonly realpathOverridesForTest?: Readonly<Record<string, string>>;
 }
 
+/**
+ * Per-session control surface for a live SSH session the browser mock's
+ * `remoteSessionConnect`/`remoteHostKeyConfirm` established — handed to
+ * `onRemoteSessionForTest` the instant the session becomes live. `F220` S4's
+ * own addition, mirroring `BrowserMockDebugSessionController`'s identical
+ * "creation-time controller handoff" shape.
+ */
+export interface BrowserMockRemoteSessionController {
+	readonly sessionId: string;
+	readonly host: string;
+	readonly port: number;
+	readonly user: string;
+	/**
+	 * Simulates the live SSH connection going away on its own — the peer
+	 * closed it, or the transport hit a network/protocol error — rather than
+	 * an explicit `remoteSessionDisconnect` call. Removes `sessionId` from
+	 * this mock's live-session table (so a further remote command against it
+	 * now rejects with `REMOTE_SESSION_NOT_FOUND`, and any FS operation on a
+	 * remote root still bound to it now rejects with
+	 * `REMOTE_SESSION_DISCONNECTED`) and broadcasts
+	 * `RemoteSessionEventPayload::Disconnected{reason:"transportClosed"}` to
+	 * every current `remoteSessionWatchEvent` listener — mirrors Rust's own
+	 * `session::RemoteClientHandler::disconnected` reactive path, which has
+	 * no `PlainBridge` command equivalent for a test to call directly (there
+	 * is nothing for the frontend to invoke when the *peer* hangs up).
+	 * Idempotent — a no-op once the session is already gone, whether from a
+	 * prior call to this or a real `remoteSessionDisconnect`.
+	 */
+	simulateTransportClosedForTest(): void;
+}
+
 export interface BrowserMockBridgeOptions {
 	/** Captures a fixed same-application new-window request without letting
 	 * tests inject a URL, label, capability scope, or browser feature string. */
@@ -1236,6 +1268,15 @@ export interface BrowserMockBridgeOptions {
 	 * and scripts post-host-key-check connect outcomes — see
 	 * `BrowserMockRemoteFixtureForTest`. */
 	readonly remoteFixtureForTest?: BrowserMockRemoteFixtureForTest;
+	/** `F220` S4: runs once per successfully established SSH session
+	 * (`remoteSessionConnect`/`remoteHostKeyConfirm`, whichever completes
+	 * it), handing the caller a controller scoped to *that* session so a
+	 * test can simulate the transport closing on its own — mirrors
+	 * `onDebugSessionForTest`'s identical per-session controller shape for a
+	 * different domain. See `BrowserMockRemoteSessionController`. */
+	readonly onRemoteSessionForTest?: (
+		controller: BrowserMockRemoteSessionController,
+	) => void;
 }
 
 /**
@@ -1835,6 +1876,45 @@ function rootNotAuthorized(): CommandError {
 	return commandError(
 		"ROOT_NOT_AUTHORIZED",
 		"The workspace root is not authorized.",
+	);
+}
+
+/** `F220` S4 — mirrors `remote::remote_session_disconnected()`'s own
+ * doc comment: distinct from `REMOTE_SESSION_NOT_FOUND` (a `sessionId` that
+ * never existed, or belongs elsewhere) because a workspace root's bound
+ * session can never have been bogus — only a live disconnect explains an FS
+ * operation on an already-authorized root no longer finding its session. */
+function remoteSessionDisconnected(): CommandError {
+	return commandError(
+		"REMOTE_SESSION_DISCONNECTED",
+		"The SSH session backing this workspace root is no longer connected.",
+	);
+}
+
+/** `F220` S4 — mirrors `remote::remote_root_identity_changed()`. */
+function remoteRootIdentityChanged(): CommandError {
+	return commandError(
+		"REMOTE_ROOT_IDENTITY_CHANGED",
+		"The reconnected SSH session's host identity does not match this workspace root's " +
+			"original identity.",
+	);
+}
+
+/** `F220` S4 — mirrors `remote::remote_root_path_changed()`. */
+function remoteRootPathChanged(): CommandError {
+	return commandError(
+		"REMOTE_ROOT_PATH_CHANGED",
+		"The workspace root's directory no longer resolves to the same remote path.",
+	);
+}
+
+/** `F220` S2/S4 — mirrors `workspace::root_backend_unsupported()`: a `Local`
+ * root has no session to rebind, so `remoteWorkspaceReconnectRoot` against
+ * one fails closed with this rather than any remote-specific code. */
+function rootBackendUnsupported(): CommandError {
+	return commandError(
+		"ROOT_BACKEND_UNSUPPORTED",
+		"This workspace root's backend does not support the requested operation.",
 	);
 }
 
@@ -3161,15 +3241,61 @@ export function createBrowserMockBridge(
 
 	const snapshot = () =>
 		frozenWorkspaceSnapshot(MOCK_WORKSPACE_ID, revision, [...roots.values()]);
+	/** `(host, port, user, path)` — deliberately excludes `label`, mirroring
+	 * `recent::service::remote_root_identity_keys`'s identical exclusion (a
+	 * display-name-only rename is not a different workspace). */
+	const recentRemoteRootIdentityKey = (
+		remoteRoot: WorkspaceRecentRemoteRoot,
+	): string =>
+		`${remoteRoot.host}\0${remoteRoot.port}\0${remoteRoot.user}\0${remoteRoot.path}`;
 	const recordRecent = (): void => {
-		const currentRoots = [...roots.values()];
+		const currentLocalRoots = [...roots.values()].filter(
+			(root) => !remoteRootBindings.has(root.rootId),
+		);
+		// `F220` S4 (ADR 0007 §4): the remote-backend twin of `currentLocalRoots`
+		// — resolved from each currently-authorized remote root's *live*
+		// session. Mirrors `record_current_workspace`'s own degrade path: a
+		// remote root whose session has already disconnected is silently
+		// skipped (nothing to resolve `host`/`port`/`user` from) rather than
+		// failing the whole recording.
+		const currentRemoteRoots: WorkspaceRecentRemoteRoot[] = [];
+		for (const [rootId, root] of roots) {
+			const binding = remoteRootBindings.get(rootId);
+			if (binding === undefined) {
+				continue;
+			}
+			const session = remoteSessions.get(binding.sessionId);
+			if (session === undefined) {
+				continue;
+			}
+			currentRemoteRoots.push(
+				Object.freeze({
+					host: session.host,
+					port: session.port,
+					user: session.user,
+					path: binding.basePath,
+					label: root.displayName,
+				}),
+			);
+		}
 		recentRevision += 1;
-		if (currentRoots.length === 0) return;
+		if (currentLocalRoots.length === 0 && currentRemoteRoots.length === 0) {
+			return;
+		}
+		const currentRemoteIdentities = currentRemoteRoots.map(
+			recentRemoteRootIdentityKey,
+		);
 		const existingIndex = recentEntries.findIndex(
 			(candidate) =>
-				candidate.roots.length === currentRoots.length &&
+				candidate.roots.length === currentLocalRoots.length &&
 				candidate.roots.every(
-					(root, index) => root.rootId === currentRoots[index]?.rootId,
+					(root, index) => root.rootId === currentLocalRoots[index]?.rootId,
+				) &&
+				candidate.entry.remoteRoots.length === currentRemoteRoots.length &&
+				candidate.entry.remoteRoots.every(
+					(remoteRoot, index) =>
+						recentRemoteRootIdentityKey(remoteRoot) ===
+						currentRemoteIdentities[index],
 				),
 		);
 		const recentId =
@@ -3177,27 +3303,30 @@ export function createBrowserMockBridge(
 				? recentEntries.splice(existingIndex, 1)[0]!.entry.recentId
 				: `00000000-0000-4000-8000-${(nextRecentId++).toString(16).padStart(12, "0")}`;
 		const rootLabels = Object.freeze(
-			currentRoots.map(({ displayName }) => displayName),
+			currentLocalRoots.map(({ displayName }) => displayName),
 		);
-		const first = rootLabels[0]!;
+		const allLabels = [
+			...rootLabels,
+			...currentRemoteRoots.map(({ label }) => label),
+		];
+		const first = allLabels[0]!;
 		const entry = Object.freeze({
 			recentId,
 			label:
-				rootLabels.length === 1
+				allLabels.length === 1
 					? first
-					: `${first} + ${rootLabels.length - 1} folders`,
+					: `${first} + ${allLabels.length - 1} folders`,
 			rootLabels,
+			remoteRoots: Object.freeze(currentRemoteRoots),
 		}) satisfies WorkspaceRecentEntry;
 		recentEntries.unshift(
-			Object.freeze({ entry, roots: Object.freeze([...currentRoots]) }),
+			Object.freeze({ entry, roots: Object.freeze([...currentLocalRoots]) }),
 		);
 		recentEntries = recentEntries.slice(0, 20);
 	};
 	const resolveNode = (rootId: string, relativePath: string): MockNode => {
 		const request = frozenWorkspaceEntryRequest(rootId, relativePath);
-		if (!roots.has(request.rootId)) {
-			throw rootNotAuthorized();
-		}
+		requireLiveRoot(request.rootId);
 		const root = trees.get(request.rootId);
 		if (root === undefined) {
 			throw rootNotAuthorized();
@@ -3293,9 +3422,7 @@ export function createBrowserMockBridge(
 		relativePath: string,
 	): Readonly<{ parent: MockDirectoryNode; name: string }> => {
 		const request = frozenWorkspaceCreateEntryRequest(rootId, relativePath);
-		if (!roots.has(request.rootId)) {
-			throw rootNotAuthorized();
-		}
+		requireLiveRoot(request.rootId);
 		const root = trees.get(request.rootId);
 		if (root === undefined) {
 			throw rootNotAuthorized();
@@ -3443,9 +3570,7 @@ export function createBrowserMockBridge(
 			throw workspaceWriteConflict();
 		}
 		const request = frozenWorkspaceCreateEntryRequest(rootId, relativePath);
-		if (!roots.has(request.rootId)) {
-			throw rootNotAuthorized();
-		}
+		requireLiveRoot(request.rootId);
 
 		const frame = encodeWorkspaceWriteFileRequest(
 			request.rootId,
@@ -4286,7 +4411,8 @@ export function createBrowserMockBridge(
 			sourcePath,
 			targetPath,
 		);
-		if (!roots.has(request.rootId) || !trees.has(request.rootId)) {
+		requireLiveRoot(request.rootId);
+		if (!trees.has(request.rootId)) {
 			throw rootNotAuthorized();
 		}
 
@@ -4328,12 +4454,9 @@ export function createBrowserMockBridge(
 		readonly directoryManifest?: BrowserMockDirectoryCopyManifestSummary;
 	}
 	const prepareCopyEntry = (request: MockCopyRequest): PreparedMockCopy => {
-		if (
-			!roots.has(request.sourceRootId) ||
-			!trees.has(request.sourceRootId) ||
-			!roots.has(request.targetRootId) ||
-			!trees.has(request.targetRootId)
-		) {
+		requireLiveRoot(request.sourceRootId);
+		requireLiveRoot(request.targetRootId);
+		if (!trees.has(request.sourceRootId) || !trees.has(request.targetRootId)) {
 			throw rootNotAuthorized();
 		}
 		if (request.sourcePath.length === 0 || request.targetPath.length === 0) {
@@ -7720,9 +7843,19 @@ export function createBrowserMockBridge(
 			}),
 		);
 	}
+	// `hostKeyFingerprint` is `F220` S4's own addition — the live fingerprint
+	// this exact session was authenticated under, captured once at connect
+	// time. `remoteWorkspaceReconnectRoot` reads it off the *new* session to
+	// compare against a root's originally recorded identity (mirrors the
+	// real `RemoteSessionService::session_host_key_fingerprint`).
 	const remoteSessions = new Map<
 		string,
-		Readonly<{ host: string; port: number; user: string }>
+		Readonly<{
+			host: string;
+			port: number;
+			user: string;
+			hostKeyFingerprint: string;
+		}>
 	>();
 	const remoteSessionListeners = new Set<
 		(payload: RemoteSessionEventPayload) => void
@@ -7732,6 +7865,40 @@ export function createBrowserMockBridge(
 	// contract: re-authorizing the same directory reuses its existing rootId
 	// rather than minting a duplicate.
 	const remoteRootIdentities = new Map<string, string>();
+	// `F220` S4 — every currently-authorized *remote* root's own fixed
+	// identity (`hostKeyFingerprint`/`basePath`, captured once at
+	// authorization and never touched by a reconnect — mirrors
+	// `WorkspaceScope::reconnect_remote_root`'s own "only `session_id`
+	// moves" contract) plus its *current* `sessionId` binding, which does
+	// move. A `rootId` present in `roots` but absent from this map is a
+	// local root. The single source of truth `requireLiveRoot` and
+	// `remoteWorkspaceReconnectRoot` both read.
+	const remoteRootBindings = new Map<
+		string,
+		{
+			sessionId: string;
+			readonly hostKeyFingerprint: string;
+			readonly basePath: string;
+		}
+	>();
+	/** `F220` S4 — the shared FS-domain chokepoint every stat/read/write/
+	 * create/rename/copy/move/delete/trash entry point below funnels through
+	 * (via `resolveNode`/`resolveCreateTarget`, or its own direct call for
+	 * the handful of write paths that check root authorization before ever
+	 * reaching either of those). Mirrors `remote::remote_session_disconnected()`'s
+	 * own "root exists, but its bound session does not" semantics — kept
+	 * distinct from `REMOTE_SESSION_NOT_FOUND` for the exact same reason the
+	 * real Rust error does (see that function's own doc comment). A purely
+	 * local root (absent from `remoteRootBindings`) is entirely unaffected. */
+	const requireLiveRoot = (rootId: string): void => {
+		if (!roots.has(rootId)) {
+			throw rootNotAuthorized();
+		}
+		const binding = remoteRootBindings.get(rootId);
+		if (binding !== undefined && !remoteSessions.has(binding.sessionId)) {
+			throw remoteSessionDisconnected();
+		}
+	};
 
 	function remoteSessionNotFound(): CommandError {
 		return commandError(
@@ -7898,11 +8065,61 @@ export function createBrowserMockBridge(
 			throw remoteConnectTimedOut();
 		}
 		const sessionId = nextDebugSessionId();
-		remoteSessions.set(sessionId, Object.freeze({ host, port, user }));
+		const key = remoteMockTargetKey(host, port);
+		const changed =
+			remoteFixture.changedHostKeyTargetsForTest?.includes(key) ?? false;
+		const hostKeyFingerprint = remoteMockFingerprint(host, port, changed);
+		remoteSessions.set(
+			sessionId,
+			Object.freeze({ host, port, user, hostKeyFingerprint }),
+		);
 		remoteEmit(
 			Object.freeze({ event: "connected", sessionId, host, port, user }),
 		);
+		options.onRemoteSessionForTest?.(
+			Object.freeze({
+				sessionId,
+				host,
+				port,
+				user,
+				simulateTransportClosedForTest: () =>
+					remoteSimulateTransportClosedForTest(sessionId),
+			}),
+		);
 		return Object.freeze({ status: "connected", sessionId });
+	}
+
+	/** `F220` S4 — a *reactive* disconnect: unlike `remoteSessionDisconnect`
+	 * (an explicit `Plain: Disconnect SSH Session…`-driven, always
+	 * `"userRequested"` teardown a test drives through the ordinary
+	 * `PlainBridge` surface), this backs `BrowserMockRemoteSessionController.
+	 * simulateTransportClosedForTest` — there is no wire command for "the
+	 * peer hung up on us"; Rust's own reactive counterpart
+	 * (`session::RemoteClientHandler::disconnected`) is a
+	 * `russh::client::Handler` callback with nothing for the frontend to
+	 * call, so this is exposed as a per-session test-only controller method
+	 * (via `onRemoteSessionForTest`) rather than a `PlainBridge` method.
+	 * A no-op for a `sessionId` that is not (or no longer) live, exactly
+	 * like `remoteSessionDisconnect`'s own idempotence is *not* (that one
+	 * throws `REMOTE_SESSION_NOT_FOUND` — deliberately different: a reactive
+	 * close racing a second reactive close for the same session is an
+	 * internal test-harness detail, not a caller-visible command). */
+	function remoteSimulateTransportClosedForTest(sessionId: string): void {
+		const session = remoteSessions.get(sessionId);
+		if (session === undefined) {
+			return;
+		}
+		remoteSessions.delete(sessionId);
+		remoteEmit(
+			Object.freeze({
+				event: "disconnected",
+				sessionId,
+				host: session.host,
+				port: session.port,
+				user: session.user,
+				reason: "transportClosed",
+			}),
+		);
 	}
 
 	return {
@@ -8304,9 +8521,7 @@ export function createBrowserMockBridge(
 				throw workspaceWriteConflict();
 			}
 			const request = frozenWorkspaceCreateEntryRequest(rootId, relativePath);
-			if (!roots.has(request.rootId)) {
-				throw rootNotAuthorized();
-			}
+			requireLiveRoot(request.rootId);
 			const frame = encodeWorkspacePublishFileRequest(
 				request.rootId,
 				request.relativePath,
@@ -10115,7 +10330,8 @@ export function createBrowserMockBridge(
 			}) satisfies RemoteWorkspaceDirectoryPage;
 		},
 		async remoteWorkspaceAddRoot(sessionId, path, displayName) {
-			if (!remoteSessions.has(sessionId)) {
+			const session = remoteSessions.get(sessionId);
+			if (session === undefined) {
 				throw remoteSessionNotFound();
 			}
 			const canonicalPath = remoteMockCanonicalize(path);
@@ -10135,13 +10351,53 @@ export function createBrowserMockBridge(
 				}) satisfies WorkspaceRoot;
 				roots.set(rootId, root);
 				trees.set(rootId, buildRemoteMockTree(tree, canonicalPath));
+				// `F220` S4: this root's fixed identity — untouched by any later
+				// `remoteWorkspaceReconnectRoot` call, which only ever moves
+				// `sessionId`. See `remoteRootBindings`'s own doc comment.
+				remoteRootBindings.set(rootId, {
+					sessionId,
+					hostKeyFingerprint: session.hostKeyFingerprint,
+					basePath: canonicalPath,
+				});
 				revision += 1;
 			}
-			// ADR 0007 §4: Recent recording for a remote root is `F220` S4 scope
-			// (cold-start "needs reconnect" state this slice does not yet
-			// build) — deliberately no `recordRecent()` call here, mirroring
-			// `WorkspaceService::authorize_remote_root`'s own identical
-			// omission.
+			// `F220` S4: mirrors `remote_workspace_add_root`'s own addition — now
+			// records into Recent exactly like local `workspacePickRoots` already
+			// does (regardless of whether this call minted a new root or reused
+			// an existing one by identity), so a window whose only root-set-
+			// changing action was adding a remote root still produces a Recent
+			// entry, including one made entirely of remote roots.
+			recordRecent();
+			return snapshot();
+		},
+		async remoteWorkspaceReconnectRoot(rootId, sessionId) {
+			if (!roots.has(rootId)) {
+				throw rootNotAuthorized();
+			}
+			const binding = remoteRootBindings.get(rootId);
+			if (binding === undefined) {
+				// A `Local` root has no session to rebind — mirrors the real
+				// `service.remote_context(...)?.ok_or_else(root_backend_unsupported)`.
+				throw rootBackendUnsupported();
+			}
+			const session = remoteSessions.get(sessionId);
+			if (session === undefined) {
+				throw remoteSessionNotFound();
+			}
+			if (session.hostKeyFingerprint !== binding.hostKeyFingerprint) {
+				throw remoteRootIdentityChanged();
+			}
+			const recanonicalized = remoteMockCanonicalize(binding.basePath);
+			if (recanonicalized !== binding.basePath) {
+				throw remoteRootPathChanged();
+			}
+			// Deliberately the *only* mutation — mirrors
+			// `WorkspaceScope::reconnect_remote_root`'s own "only `session_id`
+			// moves" contract: no revision bump (the root *set* is unchanged),
+			// no Recent recording (the real command does not call
+			// `record_current_workspace` either — only `remote_workspace_add_root`
+			// does).
+			binding.sessionId = sessionId;
 			return snapshot();
 		},
 	};

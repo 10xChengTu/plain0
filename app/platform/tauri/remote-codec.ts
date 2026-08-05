@@ -466,6 +466,7 @@ export function decodeRemoteHostKeyListResult(
 const DISCONNECT_REASONS: readonly RemoteSessionDisconnectReason[] = [
 	"userRequested",
 	"windowClosed",
+	"transportClosed",
 ];
 
 function isRemoteSessionDisconnectReason(
@@ -670,4 +671,21 @@ export function frozenRemoteWorkspaceAddRootRequest(
 		return Object.freeze({ sessionId, path, displayName });
 	}
 	return Object.freeze({ sessionId, path });
+}
+
+/** Encodes `remote_workspace_reconnect_root`'s request (`F220` S4) — the
+ * response is a plain `WorkspaceSnapshot`, decoded by
+ * `workspace-codec.ts`'s own `decodeWorkspaceSnapshot` exactly like
+ * `remoteWorkspaceAddRoot`'s, so this module only owns the request side. */
+export function frozenRemoteWorkspaceReconnectRootRequest(
+	rootId: string,
+	sessionId: string,
+): Readonly<Record<string, unknown>> {
+	if (!isUuidV4(rootId)) {
+		return remoteRequestInvalid();
+	}
+	if (!isUuidV4(sessionId)) {
+		return remoteRequestInvalid();
+	}
+	return Object.freeze({ rootId, sessionId });
 }

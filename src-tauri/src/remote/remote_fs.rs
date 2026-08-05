@@ -154,12 +154,35 @@ pub(crate) struct RemoteDirectoryPage {
 /// Root of every remote filesystem operation: opens exactly one SFTP
 /// channel, performs one logical operation, then lets the channel close
 /// (see `RemoteSessionService::open_sftp`'s own doc comment).
+///
+/// `F220` S4: this is also the single chokepoint that turns "no such live
+/// session" into the fail-closed story every filesystem operation on an
+/// authorized remote root must tell. `RemoteSessionService::open_sftp`
+/// itself reports a raw session-table miss as `REMOTE_SESSION_NOT_FOUND` (the
+/// generic "this session id does not currently exist" fact); every one of
+/// this module's public functions reaches a live session only through this
+/// one function, so translating that specific code here — and only here —
+/// into `super::remote_session_disconnected()` automatically covers
+/// `stat`/`read_directory`/`read_file`/`write_file`/`publish_file`/
+/// `create_file`/`create_directory`/`rename_entry`/`delete_entry`/
+/// `pick_directory`/`canonicalize_for_root` without touching any of them
+/// individually. Any other error `open_sftp` might raise (channel-open
+/// rejected, SFTP handshake failed, …) is passed through unchanged.
 async fn open(
     remote: &RemoteSessionService,
     window_label: &str,
     session_id: RemoteSessionId,
 ) -> Result<SftpSession, CommandError> {
-    remote.open_sftp(window_label, session_id).await
+    remote
+        .open_sftp(window_label, session_id)
+        .await
+        .map_err(|error| {
+            if error.code() == "REMOTE_SESSION_NOT_FOUND" {
+                super::remote_session_disconnected()
+            } else {
+                error
+            }
+        })
 }
 
 fn map_sftp_error(error: SftpError) -> CommandError {

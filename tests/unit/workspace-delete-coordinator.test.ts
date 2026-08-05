@@ -584,6 +584,9 @@ function testBridge(
 		async remoteWorkspaceAddRoot() {
 			throw new Error("unused");
 		},
+		async remoteWorkspaceReconnectRoot() {
+			throw new Error("unused");
+		},
 		...overrides,
 	};
 }

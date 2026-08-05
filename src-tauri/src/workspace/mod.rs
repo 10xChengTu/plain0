@@ -471,6 +471,23 @@ impl WorkspaceScope {
     /// live capability. Duplicate directory identities collapse to their first
     /// occurrence; roots already held by this scope retain their ids and
     /// capabilities, while every omitted root is revoked in the same commit.
+    ///
+    /// `F220` S4 (ADR 0007 §4): an empty `ambient_paths` is deliberately
+    /// **not** folded into `workspace_root_limit_exceeded` here, even though
+    /// the two conditions used to share one check. This method's only two
+    /// callers (`WorkspaceService::replace_roots`, reached from
+    /// `workspace_open_recent`, and `WorkspaceService::initial_snapshot`,
+    /// reached from cold start) are both restoring a *stored* local root
+    /// list, and a purely-remote Recent/last-workspace entry legitimately
+    /// stores zero local roots — all of that workspace's roots are
+    /// `RemoteSsh`, recorded separately (see `remote_history_roots`) and
+    /// deliberately not auto-reconnected here (ADR 0007 §4's "冷启动恢复远程
+    /// workspace 不自动连接"). Zero is the opposite of "too many", so this
+    /// takes the same "clear down to zero roots" path `close_folder` already
+    /// uses via [`Self::clear_roots`] instead of erroring — the caller sees
+    /// a successful restore-to-nothing-local, not a failure, and any local
+    /// roots already open are dropped exactly as they would be by an
+    /// explicit replace with an empty set.
     pub(crate) fn replace_roots_atomically_with<F>(
         &mut self,
         ambient_paths: &[PathBuf],
@@ -479,7 +496,11 @@ impl WorkspaceScope {
     where
         F: FnMut(RootId, &Path, WorkspaceRootLease) -> Result<(), CommandError>,
     {
-        if ambient_paths.is_empty() || ambient_paths.len() > MAX_WORKSPACE_ROOTS {
+        if ambient_paths.is_empty() {
+            self.clear_roots()?;
+            return Ok(Vec::new());
+        }
+        if ambient_paths.len() > MAX_WORKSPACE_ROOTS {
             return Err(workspace_root_limit_exceeded());
         }
 
@@ -669,6 +690,33 @@ impl WorkspaceScope {
                 let root = self.roots.get(root_id)?;
                 let canonical_path = root.backend.local_canonical_path().ok()?.to_path_buf();
                 Some((canonical_path, root.display_name.clone()))
+            })
+            .collect()
+    }
+
+    /// `F220` S4 (ADR 0007 §4): the remote-backend twin of
+    /// [`Self::history_roots`] — every currently authorized `RemoteSsh`
+    /// root's `(session_id, canonical base path, display name)`, in
+    /// authorization order. Local roots are excluded (just as remote roots
+    /// are excluded from `history_roots`), so a mixed-backend workspace's
+    /// two root lists partition its full root set with no overlap. Returns
+    /// the raw `session_id` rather than `host`/`port`/`user` — see
+    /// [`service::WorkspaceService::remote_history_roots`]'s own doc comment
+    /// for why those three fields are deliberately not this module's to
+    /// resolve.
+    pub(crate) fn remote_history_roots(&self) -> Vec<(RemoteSessionId, String, String)> {
+        self.order
+            .iter()
+            .filter_map(|root_id| {
+                let root = self.roots.get(root_id)?;
+                match &root.backend {
+                    RootBackend::RemoteSsh {
+                        session_id,
+                        base_path,
+                        ..
+                    } => Some((*session_id, base_path.clone(), root.display_name.clone())),
+                    RootBackend::Local { .. } => None,
+                }
             })
             .collect()
     }
@@ -903,6 +951,60 @@ impl WorkspaceScope {
                 host_key_fingerprint: host_key_fingerprint.clone(),
             }),
         })
+    }
+
+    /// `F220` S4 (ADR 0006 §5's own "显式重连是新的信任决策"): rebinds an
+    /// **already-authorized** remote root onto `new_session_id` — the
+    /// `session_id` field is the only thing that changes; `base_path`,
+    /// `host_key_fingerprint`, `display_name`, and `root_id` itself all stay
+    /// exactly as they were, so every existing reference to this root
+    /// (Explorer tree state, open editors, pending backups keyed by this
+    /// root's identity) survives a reconnect untouched. Fails with
+    /// [`root_not_authorized`] for a stale `root_id` and
+    /// [`root_backend_unsupported`] for a `Local` one — a local root has no
+    /// session to rebind.
+    ///
+    /// Mirrors [`Self::authorize_remote_root`]'s own discipline: **this
+    /// method itself performs no filesystem I/O, and no host-key or path
+    /// re-verification, of any kind.** It trusts the caller
+    /// (`workspace::commands::remote_workspace_reconnect_root`) to have
+    /// already re-checked both — the freshly reconnected session's live
+    /// host-key fingerprint against this root's original one, and a fresh
+    /// SFTP `realpath` of `base_path` against what it resolved to originally
+    /// — *before* ever calling this.
+    ///
+    /// Deliberately does **not** bump [`Self::revision`]: that counter's
+    /// every other writer ([`Self::authorize_roots_atomically_with`],
+    /// [`Self::replace_roots_atomically_with`], [`Self::remove`],
+    /// [`Self::clear_roots`], [`Self::authorize_remote_root_impl`]) bumps it
+    /// exactly when the *set* of authorized roots — membership, order, or
+    /// count — changes; every downstream consumer that compares a captured
+    /// `revision()` against the live one (delete/Trash batch staleness,
+    /// multi-root search lease revalidation) is asking "did the root set
+    /// change under me", not "did some root's internal field change". A
+    /// reconnect changes neither membership nor order (the `root_id` this
+    /// method receives must already be a member), so leaving `revision`
+    /// untouched keeps that consumer contract exact rather than forcing an
+    /// unrelated cache invalidation on every one of them. The `session_id`
+    /// swap alone is what makes the new session immediately reachable: every
+    /// remote filesystem operation resolves it fresh via [`Self::remote_context`]
+    /// on each call, never from a value cached at some earlier revision.
+    pub(crate) fn reconnect_remote_root(
+        &mut self,
+        root_id: RootId,
+        new_session_id: RemoteSessionId,
+    ) -> Result<(), CommandError> {
+        let root = self
+            .roots
+            .get_mut(&root_id)
+            .ok_or_else(root_not_authorized)?;
+        match &mut root.backend {
+            RootBackend::Local { .. } => Err(root_backend_unsupported()),
+            RootBackend::RemoteSsh { session_id, .. } => {
+                *session_id = new_session_id;
+                Ok(())
+            }
+        }
     }
 }
 

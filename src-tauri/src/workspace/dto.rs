@@ -343,12 +343,65 @@ pub enum WorkspaceRestoreStatus {
     Failed,
 }
 
+/// One remote root belonging to a [`WorkspaceRecentEntry`] — `F220` S4, ADR
+/// 0007 §4's own "只存展示名 + opaque id + 重连所需的 (host, port, user, 远程路径)"
+/// shape: enough to render the entry and to drive an explicit
+/// `remote_session_connect`/`remote_host_key_confirm`/`remote_workspace_reconnect_root`
+/// round if the user chooses to reconnect it — never a host-key fingerprint
+/// or anything credential-shaped, per that same ADR clause. Cold-start and
+/// "Open Recent" both deliberately never read this to auto-connect anything
+/// (see `recent::service::WorkspaceHistoryService::roots_for`'s own doc
+/// comment) — this data exists purely so the frontend can *render* a "needs
+/// reconnect" affordance for it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRecentRemoteRoot {
+    host: String,
+    port: u16,
+    user: String,
+    path: String,
+    label: String,
+}
+
+impl WorkspaceRecentRemoteRoot {
+    pub(crate) fn new(host: String, port: u16, user: String, path: String, label: String) -> Self {
+        Self {
+            host,
+            port,
+            user,
+            path,
+            label,
+        }
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub const fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn user(&self) -> &str {
+        &self.user
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceRecentEntry {
     recent_id: WorkspaceRecentId,
     label: String,
     root_labels: Vec<String>,
+    remote_roots: Vec<WorkspaceRecentRemoteRoot>,
 }
 
 impl WorkspaceRecentEntry {
@@ -356,11 +409,13 @@ impl WorkspaceRecentEntry {
         recent_id: WorkspaceRecentId,
         label: String,
         root_labels: Vec<String>,
+        remote_roots: Vec<WorkspaceRecentRemoteRoot>,
     ) -> Self {
         Self {
             recent_id,
             label,
             root_labels,
+            remote_roots,
         }
     }
 
@@ -374,6 +429,14 @@ impl WorkspaceRecentEntry {
 
     pub fn root_labels(&self) -> &[String] {
         &self.root_labels
+    }
+
+    /// `F220` S4: this entry's remote roots — `[]` for a purely-local
+    /// workspace, non-empty for a mixed or purely-remote one. See
+    /// [`WorkspaceRecentRemoteRoot`]'s own doc comment for exactly what
+    /// each one carries and why.
+    pub fn remote_roots(&self) -> &[WorkspaceRecentRemoteRoot] {
+        &self.remote_roots
     }
 }
 

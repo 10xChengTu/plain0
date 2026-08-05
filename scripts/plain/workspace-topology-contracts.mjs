@@ -272,7 +272,7 @@ const DIRECT_COMMAND_REGISTRATION_MANIFEST = Object.freeze([
 	}),
 	Object.freeze({
 		relativePath: "app/features/remote/plain-remote-workspace-commands.ts",
-		count: 2,
+		count: 3,
 	}),
 ]);
 
@@ -602,6 +602,7 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/services/resolverService.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/multiDiffEditor/browser/multiDiffSourceResolverService.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle",
@@ -743,6 +744,7 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/remote/plain-remote-ssh-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput",
 	"app/features/remote/plain-remote-workspace-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/actions/common/actions",
 	"app/features/remote/plain-remote-workspace-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands",
+	"app/features/remote/plain-remote-workspace-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service",
 	"app/features/remote/plain-remote-workspace-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/notification/common/notification.service",
 	"app/features/remote/plain-remote-workspace-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service",
 	"app/features/remote/plain-remote-workspace-commands.ts:@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput",
@@ -5886,9 +5888,14 @@ export function validateLocalWorkspaceWorkflowCommands(source) {
 	const bridgeParameter = registerParameters[0];
 	const topologyParameter = registerParameters[1];
 	const flushParameter = registerParameters[2];
+	// `F220` S4 (ADR 0007 §4): the fourth parameter — invoked with a picked
+	// Recent entry's own remote roots so `main.ts` can wire the real connect-
+	// then-authorize implementation (`connectAndMountRecentRemoteRoots`)
+	// without this file importing anything from `features/remote/` directly.
+	const remoteRootsParameter = registerParameters[3];
 	const registerShapeIsExact =
 		registerDeclarations.length === 1 &&
-		registerParameters.length === 3 &&
+		registerParameters.length === 4 &&
 		isExactTypedParameter(bridgeParameter, "bridge", "PlainBridge") &&
 		isExactTypedParameter(
 			topologyParameter,
@@ -5903,6 +5910,10 @@ export function validateLocalWorkspaceWorkflowCommands(source) {
 			sourceFile,
 			"../../services/plain-workspace-backup-tracker",
 			"flushPlainWorkingCopyBackupsForTopologyChange",
+		) &&
+		hasExactSyntaxTokens(
+			remoteRootsParameter,
+			"onRecentRemoteRootsSelected: (remoteRoots: readonly WorkspaceRecentRemoteRoot[],) => void | Promise<void> = () => {}",
 		);
 	const functionInitializer = (name) => {
 		const declarations = variableDeclarations(sourceFile, name);
@@ -6080,8 +6091,11 @@ export function validateLocalWorkspaceWorkflowCommands(source) {
 		"history.entries.map(recentQuickPickItem)",
 		"await bridge.workspaceRemoveRecent(context.item.recentId);",
 		"await bridge.workspaceOpenRecent(picked.recentId)",
+		"await onRecentRemoteRootsSelected(picked.remoteRoots);",
+		"picked.remoteRoots.length > 0",
 		'entry.rootLabels.join(" · ")',
 		"entry.recentId",
+		"remoteRoots: entry.remoteRoots",
 		'history.restoreStatus === "failed"',
 		'"This only clears Plain\'s local history. It does not delete any files or folders."',
 		"await bridge.windowCreate();",

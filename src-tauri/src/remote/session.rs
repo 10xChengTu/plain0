@@ -47,6 +47,40 @@
 //! need `russh::client::connect_stream` reimplemented against a socket this
 //! module owns and can forcibly close, which is left to a later slice if it
 //! proves necessary in practice.
+//!
+//! # Reactive disconnect detection (`F220` S4, ADR 0006 §5)
+//!
+//! Once a session is live, this module also needs to notice — without any
+//! caller polling for it — the connection going away on its own: the peer
+//! sending a real SSH disconnect message, or the read/write loop hitting an
+//! I/O or protocol error (network partition, an abruptly reset TCP
+//! connection, anything that makes the transport simply unusable).
+//! `russh::client::Handler::disconnected` is the one hook that fires for
+//! every one of those cases — and, because `Handle::disconnect` (this
+//! module's own [`shut_down`], used for an explicit `remote_session_disconnect`)
+//! and dropping the last `Arc<Handle>` clone (`close_window`'s own cleanup)
+//! both make the background `session.run` task's read/write loop return too,
+//! the *same* hook also fires for those two Rust-initiated paths — one
+//! callback genuinely covers every way a session can end. [`RemoteClientHandler`]
+//! therefore carries an `ended: Arc<tokio::sync::Notify>` alongside its
+//! existing `outcome` slot; [`connect_with_expected_inner`] clones that
+//! `Notify` into a fire-and-forget [`tauri::async_runtime::spawn`]ed task
+//! once the session is registered, which `await`s a single notification, then
+//! checks whether `session_id` is *still* present in `windows`. If it is,
+//! nothing else removed it — this is a genuine reactive disconnect, so the
+//! task removes the record itself and emits `Disconnected { reason:
+//! TransportClosed, .. }`. If it is not (an explicit `disconnect()` or
+//! `close_window()` already raced ahead and removed it first, and — for
+//! `disconnect()` — already emitted its own `UserRequested`/event), the task
+//! does nothing further, which is what keeps a Rust-initiated teardown from
+//! ever emitting a second, redundant disconnect event for the same session.
+//! This is also why `RemoteSessionEventSink` crossed from a call-scoped
+//! `&dyn` reference to an `Arc<dyn RemoteSessionEventSink>` in this slice:
+//! the monitor task must be able to keep emitting on it long after the
+//! `connect`/`confirm_host_key` call that spawned it has already returned —
+//! the identical "command layer builds a sink once, hands owned `Arc`s to a
+//! long-lived background task/thread" shape `terminal::service`'s PTY waiter
+//! thread and `debug::session`'s reader thread already use.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -56,7 +90,7 @@ use std::time::Duration;
 
 use cap_std::ambient_authority;
 use cap_std::fs::Dir;
-use russh::client::{Handle, Handler};
+use russh::client::{DisconnectReason, Handle, Handler};
 use russh::keys::ssh_key::{HashAlg, PublicKey};
 
 use crate::error::CommandError;
@@ -85,6 +119,12 @@ const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Sink for `plain://remote-session-event` deliveries — mirrors
 /// `debug::session::DebugEventSink`'s identical "small trait so a test can
 /// inject a recording fake instead of needing a live Tauri window" shape.
+/// Every producing method on [`RemoteSessionService`] takes this behind an
+/// `Arc` rather than a call-scoped `&dyn` reference (`F220` S4) — see the
+/// module doc's "Reactive disconnect detection" section for why: the
+/// background monitor task [`RemoteSessionService::connect`]/
+/// [`RemoteSessionService::confirm_host_key`] spawn must be able to keep
+/// emitting on it long after the call that spawned it has already returned.
 pub(crate) trait RemoteSessionEventSink: Send + Sync {
     fn emit(&self, payload: RemoteSessionEventPayload);
 }
@@ -114,16 +154,22 @@ enum HostKeyOutcome {
     },
 }
 
-/// `russh::client::Handler` whose only real job is host-key enforcement — see
-/// the module doc's "Two-phase connect" section. Every other `Handler` method
-/// keeps its default (harmless) implementation: this domain never opens a
-/// channel or exchanges data during connect, so no other callback ever fires
-/// in practice during S1's own connect flow.
+/// `russh::client::Handler` whose two real jobs are host-key enforcement (see
+/// the module doc's "Two-phase connect" section) and, as of `F220` S4,
+/// reactive disconnect detection (see that section of the module doc). Every
+/// other `Handler` method keeps its default (harmless) implementation: this
+/// domain never opens a channel or exchanges data of its own during connect
+/// (S3's SFTP channels are opened and owned by `remote::remote_fs`, not by
+/// this handler), so no other callback ever fires in practice.
 struct RemoteClientHandler {
     host: String,
     port: u16,
     expected: Option<KnownHostEntry>,
     outcome: Arc<Mutex<Option<HostKeyOutcome>>>,
+    /// Notified exactly once, from [`Self::disconnected`], whenever the live
+    /// SSH connection this handler was constructed for ends for *any* reason
+    /// — see the module doc's "Reactive disconnect detection" section.
+    ended: Arc<tokio::sync::Notify>,
 }
 
 impl Handler for RemoteClientHandler {
@@ -162,6 +208,39 @@ impl Handler for RemoteClientHandler {
             known_hosts_hit,
         });
         Ok(false)
+    }
+
+    /// `F220` S4: fires exactly once per live connection, for every way that
+    /// connection can end — see the module doc's "Reactive disconnect
+    /// detection" section. `notify_one` first (so the monitor task this
+    /// handler's `ended` was cloned into can react regardless of which branch
+    /// below is taken), then reproduces `russh`'s own default `disconnected`
+    /// body verbatim (a received disconnect is not itself an error this
+    /// handler's `Error` type should carry; a transport error must still be
+    /// returned so `russh::client::connect`/the background `session.run`
+    /// task's own `Result` reflects it).
+    ///
+    /// Deliberately `notify_one`, not `notify_waiters`: exactly one monitor
+    /// task ever awaits this `Notify` (this session's own, spawned once by
+    /// `connect_with_expected_inner`), and `disconnected` can only ever fire
+    /// once per connection — but nothing guarantees that monitor task has
+    /// already reached its `.await` on `ended.notified()` by the time this
+    /// runs (the two happen concurrently on independent tasks). `notify_one`
+    /// stores a permit when there is no waiter yet, so a monitor task that
+    /// starts waiting *after* this already ran still observes it immediately
+    /// instead of missing it forever; `notify_waiters` has no such permit and
+    /// would silently drop the notification in that ordering, which is a
+    /// real, observed race (not merely a theoretical one) with a single
+    /// fixed consumer like this.
+    async fn disconnected(
+        &mut self,
+        reason: DisconnectReason<Self::Error>,
+    ) -> Result<(), Self::Error> {
+        self.ended.notify_one();
+        match reason {
+            DisconnectReason::ReceivedDisconnect(_) => Ok(()),
+            DisconnectReason::Error(error) => Err(error),
+        }
     }
 }
 
@@ -266,7 +345,7 @@ impl RemoteSessionService {
         window_label: &str,
         target: RemoteConnectTarget,
         agent_socket_path: &Path,
-        sink: &dyn RemoteSessionEventSink,
+        sink: Arc<dyn RemoteSessionEventSink>,
     ) -> Result<RemoteSessionConnectResult, CommandError> {
         self.session_capacity_gate(window_label)?;
         let pinned = self.lookup_host_key(&target.host, target.port).await?;
@@ -295,7 +374,7 @@ impl RemoteSessionService {
         window_label: &str,
         target: RemoteConnectTarget,
         agent_socket_path: &Path,
-        sink: &dyn RemoteSessionEventSink,
+        sink: Arc<dyn RemoteSessionEventSink>,
         connect_timeout: Duration,
     ) -> Result<RemoteSessionConnectResult, CommandError> {
         self.session_capacity_gate(window_label)?;
@@ -325,7 +404,7 @@ impl RemoteSessionService {
         window_label: &str,
         parts: RemoteHostKeyConfirmParts,
         agent_socket_path: &Path,
-        sink: &dyn RemoteSessionEventSink,
+        sink: Arc<dyn RemoteSessionEventSink>,
     ) -> Result<RemoteSessionConnectResult, CommandError> {
         self.session_capacity_gate(window_label)?;
         self.pin_host_key(
@@ -365,7 +444,7 @@ impl RemoteSessionService {
         target: RemoteConnectTarget,
         expected: Option<KnownHostEntry>,
         agent_socket_path: &Path,
-        sink: &dyn RemoteSessionEventSink,
+        sink: Arc<dyn RemoteSessionEventSink>,
         connect_timeout: Duration,
     ) -> Result<RemoteSessionConnectResult, CommandError> {
         let key = InFlightKey {
@@ -400,7 +479,7 @@ impl RemoteSessionService {
         expected: Option<KnownHostEntry>,
         agent_socket_path: &Path,
         cancel: &AtomicBool,
-        sink: &dyn RemoteSessionEventSink,
+        sink: Arc<dyn RemoteSessionEventSink>,
         connect_timeout: Duration,
     ) -> Result<RemoteSessionConnectResult, CommandError> {
         let outcome: Arc<Mutex<Option<HostKeyOutcome>>> = Arc::new(Mutex::new(None));
@@ -411,11 +490,13 @@ impl RemoteSessionService {
         let expected_fingerprint = expected
             .as_ref()
             .map(|pinned| pinned.sha256_fingerprint.clone());
+        let ended = Arc::new(tokio::sync::Notify::new());
         let handler = RemoteClientHandler {
             host: target.host.clone(),
             port: target.port,
             expected,
             outcome: Arc::clone(&outcome),
+            ended: Arc::clone(&ended),
         };
         let config = Arc::new(russh::client::Config::default());
         let address = (target.host.as_str(), target.port);
@@ -499,6 +580,41 @@ impl RemoteSessionService {
             .or_default()
             .insert(session_id, record);
 
+        // `F220` S4: fire-and-forget reactive-disconnect monitor — see the
+        // module doc's own section. Not joined anywhere (mirrors this file's
+        // existing `spawn_blocking` background-work-that-cleans-up-after-
+        // itself spirit): it outlives this `connect`/`confirm_host_key` call
+        // by design, and resolves on its own the moment the session ends,
+        // whichever of the four ways (network/peer/explicit disconnect/
+        // window close) that turns out to be.
+        {
+            let state = Arc::clone(&self.state);
+            let window_label = window_label.to_owned();
+            let sink = Arc::clone(&sink);
+            tauri::async_runtime::spawn(async move {
+                ended.notified().await;
+                let removed = {
+                    let mut windows = lock(&state.windows);
+                    windows
+                        .get_mut(&window_label)
+                        .and_then(|sessions| sessions.remove(&session_id))
+                };
+                // `None` means an explicit `disconnect()`/`close_window()`
+                // already removed (and, for `disconnect()`, already reported)
+                // this exact session — nothing left for this task to do, and
+                // in particular no second `Disconnected` event to emit.
+                if let Some(record) = removed {
+                    sink.emit(RemoteSessionEventPayload::Disconnected {
+                        session_id,
+                        host: record.host,
+                        port: record.port,
+                        user: record.user,
+                        reason: RemoteSessionDisconnectReason::TransportClosed,
+                    });
+                }
+            });
+        }
+
         sink.emit(RemoteSessionEventPayload::Connected {
             session_id,
             host: target.host,
@@ -513,7 +629,7 @@ impl RemoteSessionService {
         &self,
         window_label: &str,
         session_id: RemoteSessionId,
-        sink: &dyn RemoteSessionEventSink,
+        sink: Arc<dyn RemoteSessionEventSink>,
     ) -> Result<(), CommandError> {
         let record = {
             let mut windows = lock(&self.state.windows);

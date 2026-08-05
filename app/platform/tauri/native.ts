@@ -122,6 +122,7 @@ import {
 	frozenRemoteSessionIdRequest,
 	frozenRemoteWorkspaceAddRootRequest,
 	frozenRemoteWorkspacePickDirectoryRequest,
+	frozenRemoteWorkspaceReconnectRootRequest,
 } from "./remote-codec";
 import {
 	decodeWorkspaceSearchExpandReplacementsResult,
@@ -1639,6 +1640,15 @@ export function createNativeBridge(): PlainBridge {
 			);
 			return decodeWorkspaceSnapshot(
 				await invoke<unknown>("remote_workspace_add_root", { request }),
+			);
+		},
+		remoteWorkspaceReconnectRoot: async (rootId, sessionId) => {
+			const request = frozenRemoteWorkspaceReconnectRootRequest(
+				rootId,
+				sessionId,
+			);
+			return decodeWorkspaceSnapshot(
+				await invoke<unknown>("remote_workspace_reconnect_root", { request }),
 			);
 		},
 	};

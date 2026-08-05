@@ -303,6 +303,61 @@ fn reopening_the_same_root_in_a_fresh_service_reproduces_the_same_identity_and_b
     );
 }
 
+/// `F220` S4: the remote-root twin of
+/// `reopening_the_same_root_in_a_fresh_service_reproduces_the_same_identity_and_backup_directory`
+/// above — proves the `RootBackend::RemoteSsh` identity digest
+/// (`workspace::stable_remote_root_identity`, wired into
+/// `WorkspaceScope::root_storage_identities` back in `F220` S2) still
+/// resolves to the exact same on-disk storage partition across a **full
+/// service restart** (a brand-new `WorkspaceService` *and* a brand-new
+/// `BackupService`, both pointed at the same `base_path` — not just a fresh
+/// `WorkspaceService` reusing the original `BackupService` like the local
+/// test above does), which is the closer analogue of a real cold start.
+/// Uses `authorize_remote_root_for_test` (no live SSH session needed — this
+/// test is purely about the identity/storage-digest contract, not the
+/// network transport) to construct the remote root, exactly like `F220` S2's
+/// own remote-identity tests already do.
+#[test]
+fn a_remote_roots_backup_identity_survives_a_full_service_restart() {
+    let base = TempDir::new().unwrap();
+    let fingerprint = "SHA256:remote-identity-restart-test-fingerprint";
+    let remote_path = "/srv/remote-project";
+
+    let first_workspace = WorkspaceService::new();
+    let first_backup = BackupService::new(base.path().to_path_buf());
+    let first_root_id = first_workspace
+        .authorize_remote_root_for_test("main", fingerprint, remote_path, "Remote Project")
+        .unwrap();
+    block_on(first_backup.write(
+        &first_workspace,
+        "main",
+        first_root_id,
+        key("alpha"),
+        b"remote kept".to_vec(),
+    ))
+    .unwrap();
+    first_backup.close_window("main");
+    first_workspace.close_window("main");
+
+    // A wholly new `WorkspaceService`/`BackupService` pair pointed at the
+    // same `base_path` — simulating a full process restart, not merely a
+    // new window within the same still-running process. Re-authorizing the
+    // *same* remote identity (same fingerprint, same canonical path) mints a
+    // fresh, unrelated `RootId` (proven below), but must still resolve to
+    // the exact same on-disk storage partition.
+    let second_workspace = WorkspaceService::new();
+    let second_backup = BackupService::new(base.path().to_path_buf());
+    let second_root_id = second_workspace
+        .authorize_remote_root_for_test("main", fingerprint, remote_path, "Remote Project")
+        .unwrap();
+    assert_ne!(first_root_id, second_root_id);
+
+    assert_eq!(
+        block_on(second_backup.read_all(&second_workspace, "main")).unwrap(),
+        vec![(second_root_id, "alpha".to_owned(), b"remote kept".to_vec())],
+    );
+}
+
 #[test]
 fn legacy_single_root_entries_are_mapped_exactly_and_removed_by_root_bound_discard() {
     let base = TempDir::new().unwrap();

@@ -27,6 +27,7 @@ import {
 	type PlainBridge,
 	type WorkspaceOpenFilesResult,
 	type WorkspaceRecentEntry,
+	type WorkspaceRecentRemoteRoot,
 } from "../../platform/tauri";
 import type { WorkspaceTopologyCoordinator } from "./workspace-projection";
 import { flushPlainWorkingCopyBackupsForTopologyChange } from "../../services/plain-workspace-backup-tracker";
@@ -48,6 +49,7 @@ const REMOVE_RECENT_BUTTON = Object.freeze({
 
 interface RecentWorkspaceQuickPickItem extends IQuickPickItem {
 	readonly recentId: string;
+	readonly remoteRoots: readonly WorkspaceRecentRemoteRoot[];
 	readonly buttons: readonly [typeof REMOVE_RECENT_BUTTON];
 }
 
@@ -109,6 +111,7 @@ function recentQuickPickItem(
 		description:
 			entry.rootLabels.length > 1 ? entry.rootLabels.join(" · ") : undefined,
 		recentId: entry.recentId,
+		remoteRoots: entry.remoteRoots,
 		buttons: Object.freeze([REMOVE_RECENT_BUTTON] as const),
 	});
 }
@@ -117,6 +120,18 @@ export function registerLocalWorkspaceCommands(
 	bridge: PlainBridge,
 	topologyCoordinator: WorkspaceTopologyCoordinator,
 	flushWorkingCopyBackups: () => Promise<void> = flushPlainWorkingCopyBackupsForTopologyChange,
+	// `F220` S4 (ADR 0007 §4): invoked with a picked Recent entry's own
+	// `remoteRoots` right after `workspaceOpenRecent` has opened its *local*
+	// half — this module deliberately never drives the remote "connect, then
+	// authorize" flow itself (that would require a direct `features/workspace`
+	// → `features/remote` import; `main.ts` wires the real implementation,
+	// `connectAndMountRecentRemoteRoots`, instead, keeping the two features
+	// decoupled). Defaults to a no-op so every existing 2/3-argument call
+	// site (this file's own tests included) keeps working unchanged for a
+	// Recent entry that happens to name no remote roots at all.
+	onRecentRemoteRootsSelected: (
+		remoteRoots: readonly WorkspaceRecentRemoteRoot[],
+	) => void | Promise<void> = () => {},
 ): LocalWorkspaceCommandRegistration {
 	const newWindow = async (notificationService: INotificationService) => {
 		try {
@@ -187,6 +202,9 @@ export function registerLocalWorkspaceCommands(
 					snapshot: await bridge.workspaceOpenRecent(picked.recentId),
 				}),
 			);
+			if (picked.remoteRoots.length > 0) {
+				await onRecentRemoteRootsSelected(picked.remoteRoots);
+			}
 		} catch (error) {
 			reportWorkspaceWorkflowError(notificationService, error);
 		}

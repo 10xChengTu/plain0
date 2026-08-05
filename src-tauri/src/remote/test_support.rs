@@ -21,6 +21,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use russh::keys::agent::client::AgentClient;
 use russh::keys::agent::server as agent_server;
@@ -28,7 +29,8 @@ use russh::keys::ssh_key::private::Ed25519Keypair;
 use russh::keys::ssh_key::PrivateKey;
 use russh::server::Msg;
 use russh::server::{
-    Auth, ChannelOpenHandle, Handler as ServerHandler, Server as ServerTrait, Session,
+    Auth, ChannelOpenHandle, Handle as ServerHandle, Handler as ServerHandler,
+    Server as ServerTrait, Session,
 };
 use russh::{Channel, ChannelId};
 use russh_sftp::protocol::{FileAttributes, Handle, Name, OpenFlags, Status, StatusCode};
@@ -39,7 +41,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use super::dto::{
     RemoteConnectTarget, RemoteHostKeyConfirmParts, RemoteSessionConnectResult, RemoteSessionId,
 };
-use super::session::{NullRemoteSessionEventSink, RemoteSessionService};
+use super::session::{NullRemoteSessionEventSink, RemoteSessionEventSink, RemoteSessionService};
 
 static KEY_SEED_COUNTER: AtomicU64 = AtomicU64::new(1_000_000);
 
@@ -392,6 +394,13 @@ fn ok_status(id: u32) -> Status {
 struct SftpTestSshHandler {
     accepted_key: Option<russh::keys::ssh_key::PublicKey>,
     open_channels: Arc<AsyncMutex<HashMap<ChannelId, Channel<Msg>>>>,
+    /// `F220` S4: captures the server-side [`ServerHandle`] the instant this
+    /// connection authenticates — see [`SftpFixture::force_server_disconnect`]'s
+    /// own doc comment for why this, and not `channel_open_session`, is the
+    /// right capture point (a reactive-disconnect test needs to force a
+    /// disconnect on a connection that has not necessarily opened any
+    /// channel yet).
+    kill_switch: Arc<AsyncMutex<Option<ServerHandle>>>,
 }
 
 impl ServerHandler for SftpTestSshHandler {
@@ -411,6 +420,11 @@ impl ServerHandler for SftpTestSshHandler {
         } else {
             Auth::reject()
         })
+    }
+
+    async fn auth_succeeded(&mut self, session: &mut Session) -> Result<(), Self::Error> {
+        *self.kill_switch.lock().await = Some(session.handle());
+        Ok(())
     }
 
     async fn channel_open_session(
@@ -449,6 +463,11 @@ impl ServerHandler for SftpTestSshHandler {
 
 struct SftpTestSshServer {
     accepted_key: Option<russh::keys::ssh_key::PublicKey>,
+    /// Shared across every connection this server accepts — every test using
+    /// this fixture only ever opens the one connection `force_server_disconnect`
+    /// needs to reach, so a single shared slot (rather than one per
+    /// connection) keeps the plumbing simple.
+    kill_switch: Arc<AsyncMutex<Option<ServerHandle>>>,
 }
 
 impl ServerTrait for SftpTestSshServer {
@@ -458,6 +477,7 @@ impl ServerTrait for SftpTestSshServer {
         SftpTestSshHandler {
             accepted_key: self.accepted_key.clone(),
             open_channels: Arc::new(AsyncMutex::new(HashMap::new())),
+            kill_switch: Arc::clone(&self.kill_switch),
         }
     }
 }
@@ -469,9 +489,50 @@ pub(crate) struct SftpFixture {
     /// serve — the test's own "remote root" content. Kept alive for the
     /// fixture's lifetime.
     pub(crate) served_dir: TempDir,
+    /// `F220` S4: the server-side handle to this fixture's one live
+    /// connection, captured the moment it authenticates — see
+    /// [`Self::force_server_disconnect`].
+    kill_switch: Arc<AsyncMutex<Option<ServerHandle>>>,
     _agent_temp: TempDir,
     _server_task: tokio::task::JoinHandle<()>,
     _agent_task: tokio::task::JoinHandle<()>,
+}
+
+impl SftpFixture {
+    /// `F220` S4: forces the **server** side of this fixture's live
+    /// connection to send a real SSH disconnect message — the "the peer
+    /// actively disconnects" scenario the reactive-disconnect detection test
+    /// needs, deliberately distinct from a test ever calling the client's
+    /// own `RemoteSessionService::disconnect()` (which only exercises the
+    /// already-covered explicit-disconnect path). Polls briefly for the
+    /// server-side handle to become available — it is only captured once a
+    /// connection actually authenticates (`SftpTestSshHandler::auth_succeeded`)
+    /// — bounded so a test that calls this before any connection ever
+    /// authenticated fails fast with a clear panic instead of hanging.
+    pub(crate) async fn force_server_disconnect(&self) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let handle = self.kill_switch.lock().await.clone();
+            if let Some(handle) = handle {
+                handle
+                    .disconnect(
+                        russh::Disconnect::ByApplication,
+                        "forced test disconnect".to_owned(),
+                        "en-US".to_owned(),
+                    )
+                    .await
+                    .expect("server-side disconnect message sends");
+                return;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!(
+                    "server-side session handle never became available — did the client \
+                     actually authenticate before this was called?"
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
 
 fn connect_target(fixture: &SftpFixture, user: &str) -> RemoteConnectTarget {
@@ -493,13 +554,36 @@ pub(crate) async fn connect_test_session(
     fixture: &SftpFixture,
     identity: &PrivateKey,
 ) -> RemoteSessionId {
+    let _ = identity;
+    connect_test_session_with_sink(
+        service,
+        window_label,
+        fixture,
+        Arc::new(NullRemoteSessionEventSink),
+    )
+    .await
+}
+
+/// `F220` S4: the sink-observable twin of [`connect_test_session`] — every
+/// detail is identical except the caller supplies the exact
+/// `Arc<dyn RemoteSessionEventSink>` both connect phases use, so a test can
+/// observe the `Connected` event (and, later, whatever `Disconnected` event
+/// the session's own reactive-disconnect monitor task eventually emits on
+/// that same sink — see `session`'s own module doc). [`connect_test_session`]
+/// itself is just this with a throwaway [`NullRemoteSessionEventSink`].
+pub(crate) async fn connect_test_session_with_sink(
+    service: &RemoteSessionService,
+    window_label: &str,
+    fixture: &SftpFixture,
+    sink: Arc<dyn RemoteSessionEventSink>,
+) -> RemoteSessionId {
     let target = connect_target(fixture, "octocat");
     let pending = service
         .connect(
             window_label,
             target.clone(),
             &fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            Arc::clone(&sink),
         )
         .await
         .expect("connect call itself succeeds for an unknown host");
@@ -511,7 +595,6 @@ pub(crate) async fn connect_test_session(
         } => (algorithm, sha256_fingerprint),
         other => panic!("expected pending confirmation, got {other:?}"),
     };
-    let _ = identity;
     let confirmed = service
         .confirm_host_key(
             window_label,
@@ -521,7 +604,7 @@ pub(crate) async fn connect_test_session(
                 sha256_fingerprint,
             },
             &fixture.agent_socket_path,
-            &NullRemoteSessionEventSink,
+            sink,
         )
         .await
         .expect("confirm_host_key succeeds");
@@ -529,6 +612,92 @@ pub(crate) async fn connect_test_session(
         RemoteSessionConnectResult::Connected { session_id } => session_id,
         other => panic!("expected connected, got {other:?}"),
     }
+}
+
+/// `F220` S4: the "reconnect" twin of [`connect_test_session`] — used once
+/// `fixture`'s host key is *already* pinned for `window_label` (a prior
+/// [`connect_test_session`] call already ran, or an earlier session against
+/// this same fixture was disconnected). Unlike a never-before-seen host,
+/// `RemoteClientHandler::check_server_key` matches the live key against the
+/// existing pin directly (see `session::tests::a_pinned_host_that_still_matches_connects_directly_with_no_pending_step`),
+/// so `RemoteSessionService::connect` alone goes straight to `Connected` —
+/// no `confirm_host_key` round needed, and calling [`connect_test_session`]
+/// again here would itself panic (it only ever expects the first-time
+/// pending-confirmation response).
+pub(crate) async fn reconnect_test_session(
+    service: &RemoteSessionService,
+    window_label: &str,
+    fixture: &SftpFixture,
+) -> RemoteSessionId {
+    let sink: Arc<dyn RemoteSessionEventSink> = Arc::new(NullRemoteSessionEventSink);
+    let result = service
+        .connect(
+            window_label,
+            connect_target(fixture, "octocat"),
+            &fixture.agent_socket_path,
+            sink,
+        )
+        .await
+        .expect("reconnect to an already-pinned host succeeds");
+    match result {
+        RemoteSessionConnectResult::Connected { session_id } => session_id,
+        other => panic!("expected connected (host already pinned), got {other:?}"),
+    }
+}
+
+/// `F220` S4: bundles one fixture sshd with the client identity its agent
+/// offers, so a caller *outside* the `remote` domain — whose own
+/// `validateRemoteSshLibraryOwnershipBoundary` architecture guard forbids
+/// naming `russh`/`russh::keys::ssh_key::PrivateKey` directly, even in a
+/// `tests.rs`-pattern file (that guard, unlike the others in
+/// `boundary-contracts.mjs`, exempts by *domain* — anything under
+/// `src-tauri/src/remote/` — not by filename, so it does not recognize
+/// `workspace/commands/tests.rs` as a test file the way
+/// `WORKSPACE_TEST_SOURCE_PATTERN` does) — can drive a full remote-root
+/// connect/reconnect cycle (`workspace::commands::tests`'s own `F220` S4
+/// reconnect tests) without ever spelling out the SSH library's own types.
+/// `identity` is deliberately not `pub(crate)`: every operation a caller
+/// outside this module needs is exposed as one of the three functions below
+/// instead, so `PrivateKey` itself never has to leave `remote::test_support`.
+pub(crate) struct RemoteRootFixture {
+    pub(crate) fixture: SftpFixture,
+    identity: PrivateKey,
+}
+
+/// Starts a fresh fixture sshd plus the client identity its agent offers,
+/// bundled together — see [`RemoteRootFixture`]'s own doc comment.
+pub(crate) async fn start_remote_root_fixture() -> RemoteRootFixture {
+    let identity = generate_key();
+    let fixture = start_sftp_fixture(&identity).await;
+    RemoteRootFixture { fixture, identity }
+}
+
+/// [`connect_test_session`] against `remote_root_fixture`'s own fixture —
+/// see [`RemoteRootFixture`]'s own doc comment for why this indirection
+/// exists.
+pub(crate) async fn connect_remote_root_fixture(
+    service: &RemoteSessionService,
+    window_label: &str,
+    remote_root_fixture: &RemoteRootFixture,
+) -> RemoteSessionId {
+    connect_test_session(
+        service,
+        window_label,
+        &remote_root_fixture.fixture,
+        &remote_root_fixture.identity,
+    )
+    .await
+}
+
+/// [`reconnect_test_session`] against `remote_root_fixture`'s own fixture —
+/// see [`RemoteRootFixture`]'s own doc comment for why this indirection
+/// exists.
+pub(crate) async fn reconnect_remote_root_fixture(
+    service: &RemoteSessionService,
+    window_label: &str,
+    remote_root_fixture: &RemoteRootFixture,
+) -> RemoteSessionId {
+    reconnect_test_session(service, window_label, &remote_root_fixture.fixture).await
 }
 
 /// Starts a loopback sshd (real SFTP subsystem) plus a real agent server
@@ -548,8 +717,10 @@ pub(crate) async fn start_sftp_fixture(identity: &PrivateKey) -> SftpFixture {
         .expect("bind loopback");
     let address = listener.local_addr().expect("local addr");
 
+    let kill_switch: Arc<AsyncMutex<Option<ServerHandle>>> = Arc::new(AsyncMutex::new(None));
     let mut server = SftpTestSshServer {
         accepted_key: Some(identity.public_key().clone()),
+        kill_switch: Arc::clone(&kill_switch),
     };
     let server_task = tokio::spawn(async move {
         let running = server.run_on_socket(config, &listener);
@@ -574,6 +745,7 @@ pub(crate) async fn start_sftp_fixture(identity: &PrivateKey) -> SftpFixture {
         address,
         agent_socket_path,
         served_dir,
+        kill_switch,
         _agent_temp: agent_temp,
         _server_task: server_task,
         _agent_task: agent_task,

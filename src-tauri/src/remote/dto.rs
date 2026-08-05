@@ -346,17 +346,26 @@ pub enum RemoteSessionEventPayload {
 
 /// Why a session ended — carried on every `"disconnected"` event so the
 /// frontend can render an accurate notification instead of a bare "session
-/// ended". `S1` only ever produces the first two (an explicit
-/// `remote_session_disconnect` call, or the owning window closing); detecting
-/// a passive/unexpected transport closure needs a live channel or keepalive
-/// to observe, which this slice deliberately does not open yet (no FS/PTY/Git
-/// traffic exists until S2+) — a disclosed narrowing, not an oversight; see
-/// the module doc.
+/// ended". `UserRequested`/`WindowClosed` are both driven from Rust's own
+/// side (an explicit `remote_session_disconnect` call, or the owning window
+/// closing). `TransportClosed` is `F220` S4's own addition: the reactive
+/// counterpart, raised when `session::RemoteClientHandler::disconnected` (a
+/// `russh::client::Handler` callback) observes the *live* SSH connection go
+/// away on its own — either the server sent a real SSH disconnect message, or
+/// the read/write loop hit an I/O or protocol error (network partition, the
+/// peer resetting the TCP connection, or anything else that makes the
+/// transport simply unusable). Both of those sub-causes collapse to this one
+/// wire value: the distinction between "the network died" and "the peer
+/// closed on us" makes no difference to how the frontend (or any other Rust
+/// domain) reacts — either way the session is gone and every root/terminal/
+/// debug session bound to it must fail closed (ADR 0006 §5) until an
+/// explicit reconnect succeeds.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RemoteSessionDisconnectReason {
     UserRequested,
     WindowClosed,
+    TransportClosed,
 }
 
 /// `F220` S3: the remote directory picker's own bounds — a page cannot be
@@ -451,6 +460,40 @@ impl RemoteWorkspaceAddRootRequest {
             path: self.path,
             display_name: self.display_name,
         })
+    }
+}
+
+/// `remote_workspace_reconnect_root`'s request (`F220` S4, ADR 0006 §5's own
+/// "显式重连是新的信任决策") — `root_id` names the already-authorized root to
+/// rebind, `session_id` the brand-new, freshly-authenticated SSH session (the
+/// result of a `remote_session_connect`/`remote_host_key_confirm` round the
+/// caller just completed) to rebind it onto. Carries no host/port/user of its
+/// own — those live on the live session `session_id` already names, exactly
+/// like every other request in this module that takes a `RemoteSessionId`.
+/// Reuses `workspace::RootId`'s own wire codec directly rather than
+/// duplicating it: this is the one DTO in this module that addresses an
+/// *existing* workspace root, so it is the one place `remote::dto` reaches
+/// across into `workspace` for an identifier type (mirrors
+/// `workspace::RemoteRootContext` doing the identical reverse reference back
+/// into `remote::dto::RemoteSessionId`).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteWorkspaceReconnectRootRequest {
+    root_id: crate::workspace::RootId,
+    session_id: RemoteSessionId,
+}
+
+pub(crate) struct RemoteWorkspaceReconnectRootParts {
+    pub(crate) root_id: crate::workspace::RootId,
+    pub(crate) session_id: RemoteSessionId,
+}
+
+impl RemoteWorkspaceReconnectRootRequest {
+    pub(crate) fn into_parts(self) -> RemoteWorkspaceReconnectRootParts {
+        RemoteWorkspaceReconnectRootParts {
+            root_id: self.root_id,
+            session_id: self.session_id,
+        }
     }
 }
 

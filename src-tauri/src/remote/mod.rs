@@ -286,13 +286,70 @@ pub(crate) fn remote_path_request_invalid() -> CommandError {
     )
 }
 
+/// `F220` S4 (ADR 0006 §5): returned whenever a filesystem operation reaches
+/// an already-authorized `RemoteSsh` root whose bound SSH session is no
+/// longer live. This is deliberately a distinct code from
+/// [`remote_session_not_found`], even though `remote_fs::open`'s own
+/// translation (see that function's doc comment) is the *only* place that
+/// ever turns one into the other: `remote_session_not_found` is the right
+/// code for a "session management" command (`remote_session_disconnect`/
+/// `remote_session_state`/…) where the caller passed in a `sessionId` that
+/// might simply never have existed, or might belong to a different window.
+/// A workspace root's bound session id, by contrast, can never have been
+/// bogus — a root only ever gets created by binding it to a session that was
+/// real and live at that exact moment (`WorkspaceScope::authorize_remote_root`/
+/// `reconnect_remote_root`) — so when a filesystem operation on that root
+/// can no longer find its session, the only honest explanation is that the
+/// session disconnected out from under it, not that it never existed.
+/// Deliberately path-free.
+pub(crate) fn remote_session_disconnected() -> CommandError {
+    CommandError::new(
+        "REMOTE_SESSION_DISCONNECTED",
+        "The SSH session backing this workspace root is no longer connected.",
+    )
+}
+
+/// `F220` S4 (ADR 0006 §5's own "显式重连是新的信任决策"): returned by
+/// `remote_workspace_reconnect_root` when the just-authenticated session's
+/// live host-key fingerprint does not match the fingerprint the target root
+/// was originally authorized under — a different host identity, not a
+/// reconnect of the same one. The caller must treat this as a brand-new
+/// host (forget the stale pin, if any, and let the user decide whether to
+/// trust the new identity) rather than silently rebinding an existing root
+/// onto it. Deliberately fingerprint/path-free.
+pub(crate) fn remote_root_identity_changed() -> CommandError {
+    CommandError::new(
+        "REMOTE_ROOT_IDENTITY_CHANGED",
+        "The reconnected SSH session's host identity does not match this workspace root's \
+         original identity.",
+    )
+}
+
+/// `F220` S4: returned by `remote_workspace_reconnect_root` when the root's
+/// original canonical base path no longer `realpath`s to the exact same
+/// path over the freshly reconnected session (the directory was moved,
+/// renamed, or replaced by something else since the root was first
+/// authorized, or since it was last successfully reconnected). Deliberately
+/// path-free; distinct from whatever error `remote::remote_fs::canonicalize_for_root`
+/// itself raises when the path cannot be resolved at all (e.g. it no longer
+/// exists) — that error is propagated as-is rather than folded into this
+/// one, since "resolves, but to somewhere else" and "does not resolve at
+/// all" are different, independently actionable outcomes.
+pub(crate) fn remote_root_path_changed() -> CommandError {
+    CommandError::new(
+        "REMOTE_ROOT_PATH_CHANGED",
+        "The workspace root's directory no longer resolves to the same remote path.",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         remote_agent_auth_rejected, remote_agent_no_identities, remote_agent_timed_out,
         remote_agent_unavailable, remote_connect_cancelled, remote_connect_failed,
         remote_connect_timed_out, remote_host_key_changed, remote_host_key_store_unavailable,
-        remote_request_invalid, remote_session_limit_reached, remote_session_not_found,
+        remote_request_invalid, remote_root_identity_changed, remote_root_path_changed,
+        remote_session_disconnected, remote_session_limit_reached, remote_session_not_found,
     };
 
     #[test]
@@ -331,6 +388,18 @@ mod tests {
         assert_eq!(
             remote_session_limit_reached().code(),
             "REMOTE_SESSION_LIMIT_REACHED"
+        );
+        assert_eq!(
+            remote_session_disconnected().code(),
+            "REMOTE_SESSION_DISCONNECTED"
+        );
+        assert_eq!(
+            remote_root_identity_changed().code(),
+            "REMOTE_ROOT_IDENTITY_CHANGED"
+        );
+        assert_eq!(
+            remote_root_path_changed().code(),
+            "REMOTE_ROOT_PATH_CHANGED"
         );
     }
 

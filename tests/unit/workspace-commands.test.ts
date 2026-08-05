@@ -238,6 +238,7 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		remoteSessionWatchEvent: vi.fn(),
 		remoteWorkspacePickDirectory: vi.fn(),
 		remoteWorkspaceAddRoot: vi.fn(),
+		remoteWorkspaceReconnectRoot: vi.fn(),
 		...overrides,
 	};
 }
@@ -448,6 +449,7 @@ describe("workspace Workbench command overrides", () => {
 			remoteSessionWatchEvent: vi.fn(),
 			remoteWorkspacePickDirectory: vi.fn(),
 			remoteWorkspaceAddRoot: vi.fn(),
+			remoteWorkspaceReconnectRoot: vi.fn(),
 		};
 		const contextValues = new Map<string, unknown>([
 			["openFolderWorkspaceSupport", false],
@@ -1231,6 +1233,7 @@ describe("workspace Workbench command overrides", () => {
 			recentId: "00000000-0000-4000-8000-000000000099",
 			label: "alpha + 1 folders",
 			rootLabels: Object.freeze(["alpha", "beta"]),
+			remoteRoots: Object.freeze([]),
 		});
 		const workspaceRecentList = vi.fn(async () =>
 			Object.freeze({
@@ -1310,11 +1313,144 @@ describe("workspace Workbench command overrides", () => {
 		}
 	});
 
+	// `F220` S4 (ADR 0007 §4)
+	it("invokes onRecentRemoteRootsSelected with a picked entry's remote roots, after the local half opens", async () => {
+		const snapshot = Object.freeze({
+			workspaceId: "00000000-0000-4000-8000-000000000011",
+			revision: 8,
+			roots: Object.freeze([]),
+		}) satisfies WorkspaceSnapshot;
+		const remoteRoot = Object.freeze({
+			host: "build.example.com",
+			port: 2222,
+			user: "dev",
+			path: "/srv/project",
+			label: "project",
+		});
+		const entry = Object.freeze({
+			recentId: "00000000-0000-4000-8000-000000000099",
+			label: "project",
+			rootLabels: Object.freeze([]),
+			remoteRoots: Object.freeze([remoteRoot]),
+		});
+		const workspaceRecentList = vi.fn(async () =>
+			Object.freeze({
+				revision: 3,
+				restoreStatus: "restored" as const,
+				entries: Object.freeze([entry]),
+			}),
+		);
+		const workspaceOpenRecent = vi.fn(async () => snapshot);
+		const callOrder: string[] = [];
+		workspaceOpenRecent.mockImplementation(async () => {
+			callOrder.push("workspaceOpenRecent");
+			return snapshot;
+		});
+		const onRecentRemoteRootsSelected = vi.fn(async (remoteRoots) => {
+			callOrder.push("onRecentRemoteRootsSelected");
+			expect(remoteRoots).toEqual([remoteRoot]);
+		});
+		const quickInputService = {
+			pick: vi.fn(async (items) => items[0]),
+		};
+		const topologyCoordinator = {
+			runMutation: vi.fn(async (mutation: TestTopologyMutation) => {
+				const result = await mutation();
+				return result.result;
+			}),
+		} as unknown as WorkspaceTopologyCoordinator;
+		const notificationService = testNotificationService();
+		const registration = registerLocalWorkspaceCommands(
+			testBridge({ workspaceRecentList, workspaceOpenRecent }),
+			topologyCoordinator,
+			async () => {},
+			onRecentRemoteRootsSelected,
+		);
+		const accessor = testServiceAccessor(
+			new Map<unknown, unknown>([
+				[IQuickInputService, quickInputService],
+				[INotificationService, notificationService],
+			]),
+		);
+
+		try {
+			await CommandsRegistry.getCommand(
+				LOCAL_WORKSPACE_COMMAND_IDS.openRecent,
+			)?.handler(accessor as never);
+			expect(onRecentRemoteRootsSelected).toHaveBeenCalledExactlyOnceWith([
+				remoteRoot,
+			]);
+			expect(callOrder).toEqual([
+				"workspaceOpenRecent",
+				"onRecentRemoteRootsSelected",
+			]);
+			expect(notificationService.error).not.toHaveBeenCalled();
+		} finally {
+			registration.dispose();
+		}
+	});
+
+	// `F220` S4
+	it("never invokes onRecentRemoteRootsSelected for a purely local Recent entry", async () => {
+		const snapshot = Object.freeze({
+			workspaceId: "00000000-0000-4000-8000-000000000011",
+			revision: 8,
+			roots: Object.freeze([]),
+		}) satisfies WorkspaceSnapshot;
+		const entry = Object.freeze({
+			recentId: "00000000-0000-4000-8000-000000000099",
+			label: "alpha",
+			rootLabels: Object.freeze(["alpha"]),
+			remoteRoots: Object.freeze([]),
+		});
+		const workspaceRecentList = vi.fn(async () =>
+			Object.freeze({
+				revision: 3,
+				restoreStatus: "restored" as const,
+				entries: Object.freeze([entry]),
+			}),
+		);
+		const workspaceOpenRecent = vi.fn(async () => snapshot);
+		const onRecentRemoteRootsSelected = vi.fn(async () => {});
+		const quickInputService = {
+			pick: vi.fn(async (items) => items[0]),
+		};
+		const topologyCoordinator = {
+			runMutation: vi.fn(async (mutation: TestTopologyMutation) => {
+				const result = await mutation();
+				return result.result;
+			}),
+		} as unknown as WorkspaceTopologyCoordinator;
+		const notificationService = testNotificationService();
+		const registration = registerLocalWorkspaceCommands(
+			testBridge({ workspaceRecentList, workspaceOpenRecent }),
+			topologyCoordinator,
+			async () => {},
+			onRecentRemoteRootsSelected,
+		);
+		const accessor = testServiceAccessor(
+			new Map<unknown, unknown>([
+				[IQuickInputService, quickInputService],
+				[INotificationService, notificationService],
+			]),
+		);
+
+		try {
+			await CommandsRegistry.getCommand(
+				LOCAL_WORKSPACE_COMMAND_IDS.openRecent,
+			)?.handler(accessor as never);
+			expect(onRecentRemoteRootsSelected).not.toHaveBeenCalled();
+		} finally {
+			registration.dispose();
+		}
+	});
+
 	it("keeps empty, dismissed, failed-remove and clear-history branches side-effect safe", async () => {
 		const entry = Object.freeze({
 			recentId: "00000000-0000-4000-8000-000000000098",
 			label: "alpha",
 			rootLabels: Object.freeze(["alpha"]),
+			remoteRoots: Object.freeze([]),
 		});
 		const workspaceRecentList = vi
 			.fn()

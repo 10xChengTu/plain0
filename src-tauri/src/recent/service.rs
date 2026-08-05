@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use crate::error::CommandError;
 
-use crate::workspace::dto::{WorkspaceRecentEntry, WorkspaceRecentId};
+use crate::workspace::dto::{WorkspaceRecentEntry, WorkspaceRecentId, WorkspaceRecentRemoteRoot};
 use crate::workspace::MAX_WORKSPACE_ROOTS;
 
 const HISTORY_DIRECTORY: &str = "workspace-state";
@@ -35,6 +35,23 @@ const MAX_STAGING_ATTEMPTS: usize = 16;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct WorkspaceHistoryRoot {
     pub(crate) canonical_path: PathBuf,
+    pub(crate) display_name: String,
+}
+
+/// One remote root to record alongside a workspace's local roots — `F220`
+/// S4, ADR 0007 §4. The caller (`workspace::commands::record_current_workspace`)
+/// assembles this from two sources this module deliberately never depends on
+/// itself: `workspace::service::WorkspaceService::remote_history_roots` (for
+/// `canonical_path`/`display_name`) and `remote::session::RemoteSessionService::state`
+/// (for `host`/`port`/`user`, resolved from the root's live `session_id`) —
+/// this module knows nothing about `RemoteSessionService`'s existence, only
+/// about these five already-resolved plain fields.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WorkspaceHistoryRemoteRoot {
+    pub(crate) host: String,
+    pub(crate) port: u16,
+    pub(crate) user: String,
+    pub(crate) canonical_path: String,
     pub(crate) display_name: String,
 }
 
@@ -77,6 +94,27 @@ struct StoredRecentEntry {
     root_labels: Vec<String>,
     label: String,
     last_opened_unix_ms: u64,
+    /// `F220` S4 addition — `#[serde(default)]` so every pre-`F220` entry an
+    /// existing user's `workspaces.plain.json` already has on disk (written
+    /// by a schema version that never had this field at all) deserializes
+    /// with an empty `Vec` here instead of failing `deny_unknown_fields`'s
+    /// sibling concern, forward-compat rejection of a *missing* field —
+    /// no schema-version bump or migration code needed (see the module doc).
+    #[serde(default)]
+    remote_roots: Vec<StoredRecentRemoteRoot>,
+}
+
+/// On-disk twin of [`WorkspaceHistoryRemoteRoot`]/[`crate::workspace::dto::WorkspaceRecentRemoteRoot`]
+/// — see either's own doc comment for the field contract (ADR 0007 §4: no
+/// host-key fingerprint or any credential material, ever).
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StoredRecentRemoteRoot {
+    host: String,
+    port: u16,
+    user: String,
+    path: String,
+    label: String,
 }
 
 impl Default for StoredHistory {
@@ -157,8 +195,22 @@ impl WorkspaceHistoryService {
         result
     }
 
-    pub(crate) fn record(&self, roots: &[WorkspaceHistoryRoot]) -> Result<(), CommandError> {
-        validate_roots(roots)?;
+    /// Records the current workspace's full root set — local *and* remote
+    /// halves together, since a real live [`crate::workspace::WorkspaceScope`]
+    /// may hold both at once (`F220` S4, ADR 0007 §4). A workspace is only
+    /// ever treated as "the same one" (reusing its existing `recent_id`
+    /// rather than minting a new entry) when *both* halves match exactly —
+    /// the local canonical-path list byte-for-byte (pre-existing behavior,
+    /// unchanged) *and* the remote `(host, port, user, path)` list
+    /// byte-for-byte (labels excluded from both comparisons, exactly like
+    /// local `root_labels` already was: a display-name-only rename is not a
+    /// different workspace).
+    pub(crate) fn record(
+        &self,
+        roots: &[WorkspaceHistoryRoot],
+        remote_roots: &[WorkspaceHistoryRemoteRoot],
+    ) -> Result<(), CommandError> {
+        validate_roots(roots, remote_roots)?;
         let mut cache = lock(&self.state.gate)?;
         let root = self.ensure_loaded(&mut cache)?;
         let mut next = cache.stored.clone();
@@ -167,7 +219,7 @@ impl WorkspaceHistoryService {
             .checked_add(1)
             .ok_or_else(workspace_history_unavailable)?;
 
-        if roots.is_empty() {
+        if roots.is_empty() && remote_roots.is_empty() {
             next.last_recent_id = None;
             next.revision = next_revision;
             write_history(&root, &next)?;
@@ -184,10 +236,21 @@ impl WorkspaceHistoryService {
                     .ok_or_else(workspace_history_unavailable)
             })
             .collect::<Result<Vec<_>, CommandError>>()?;
-        let existing_index = next
-            .entries
+        let stored_remote_roots = remote_roots
             .iter()
-            .position(|entry| entry.canonical_roots == canonical_roots);
+            .map(|remote_root| StoredRecentRemoteRoot {
+                host: remote_root.host.clone(),
+                port: remote_root.port,
+                user: remote_root.user.clone(),
+                path: remote_root.canonical_path.clone(),
+                label: remote_root.display_name.clone(),
+            })
+            .collect::<Vec<_>>();
+        let remote_identity = remote_root_identity_keys(&stored_remote_roots);
+        let existing_index = next.entries.iter().position(|entry| {
+            entry.canonical_roots == canonical_roots
+                && remote_root_identity_keys(&entry.remote_roots) == remote_identity
+        });
         let recent_id = existing_index
             .map(|index| next.entries.remove(index).recent_id)
             .unwrap_or_else(|| WorkspaceRecentId::new().as_wire());
@@ -195,7 +258,16 @@ impl WorkspaceHistoryService {
             .iter()
             .map(|root| root.display_name.clone())
             .collect::<Vec<_>>();
-        let label = workspace_label(&root_labels);
+        let all_labels = root_labels
+            .iter()
+            .cloned()
+            .chain(
+                remote_roots
+                    .iter()
+                    .map(|remote_root| remote_root.display_name.clone()),
+            )
+            .collect::<Vec<_>>();
+        let label = workspace_label(&all_labels);
         next.entries.insert(
             0,
             StoredRecentEntry {
@@ -204,6 +276,7 @@ impl WorkspaceHistoryService {
                 root_labels,
                 label,
                 last_opened_unix_ms: now_unix_ms(),
+                remote_roots: stored_remote_roots,
             },
         );
         next.entries.truncate(MAX_HISTORY_ENTRIES);
@@ -281,8 +354,11 @@ impl HistoryState {
     }
 }
 
-fn validate_roots(roots: &[WorkspaceHistoryRoot]) -> Result<(), CommandError> {
-    if roots.len() > MAX_WORKSPACE_ROOTS {
+fn validate_roots(
+    roots: &[WorkspaceHistoryRoot],
+    remote_roots: &[WorkspaceHistoryRemoteRoot],
+) -> Result<(), CommandError> {
+    if roots.len() > MAX_WORKSPACE_ROOTS || remote_roots.len() > MAX_WORKSPACE_ROOTS {
         return Err(workspace_history_unavailable());
     }
     let mut paths = std::collections::BTreeSet::new();
@@ -299,7 +375,83 @@ fn validate_roots(roots: &[WorkspaceHistoryRoot]) -> Result<(), CommandError> {
             return Err(workspace_history_unavailable());
         }
     }
+    let mut remote_keys = std::collections::BTreeSet::new();
+    for remote_root in remote_roots {
+        validate_remote_root_fields(
+            &remote_root.host,
+            &remote_root.user,
+            &remote_root.canonical_path,
+            &remote_root.display_name,
+        )?;
+        let key = (
+            remote_root.host.as_str(),
+            remote_root.port,
+            remote_root.user.as_str(),
+            remote_root.canonical_path.as_str(),
+        );
+        if !remote_keys.insert(key) {
+            return Err(workspace_history_unavailable());
+        }
+    }
     Ok(())
+}
+
+/// Shared shape check for one remote root's `(host, user, path, label)`
+/// fields — used both by [`validate_roots`] (the in-memory
+/// [`WorkspaceHistoryRemoteRoot`] a caller is about to record) and
+/// [`validate_stored`] (a [`StoredRecentRemoteRoot`] just read back off
+/// disk), so a hand-corrupted or downgraded-then-upgraded history file can
+/// never smuggle in an oversized or malformed remote root any more than a
+/// live `record()` call could. Reuses `remote::dto`'s own host/user length
+/// ceilings and `MAX_REMOTE_PICK_PATH_CHARS` (the same bound
+/// `remote_workspace_pick_directory`/`remote_workspace_add_root` already
+/// apply to an absolute remote path) rather than inventing new ones; `port`
+/// itself needs no check beyond its own `u16` type. `path` must start with
+/// `/` — SFTP paths are always POSIX-absolute on the wire (see
+/// `remote::remote_fs::join_remote_path`'s identical assumption).
+fn validate_remote_root_fields(
+    host: &str,
+    user: &str,
+    path: &str,
+    label: &str,
+) -> Result<(), CommandError> {
+    if host.is_empty() || host.len() > crate::remote::dto::MAX_REMOTE_HOST_CHARS {
+        return Err(workspace_history_unavailable());
+    }
+    if user.is_empty() || user.len() > crate::remote::dto::MAX_REMOTE_USER_CHARS {
+        return Err(workspace_history_unavailable());
+    }
+    if path.is_empty()
+        || !path.starts_with('/')
+        || path.len() > crate::remote::dto::MAX_REMOTE_PICK_PATH_CHARS
+    {
+        return Err(workspace_history_unavailable());
+    }
+    if label.is_empty() || label.len() > MAX_LABEL_BYTES {
+        return Err(workspace_history_unavailable());
+    }
+    Ok(())
+}
+
+/// The `(host, port, user, path)` identity every entry's remote roots are
+/// deduplicated and matched by — deliberately excludes `label` (a display
+/// rename is not a different workspace), mirroring `canonical_roots`
+/// excluding `root_labels` from the local dedup comparison in
+/// [`WorkspaceHistoryService::record`].
+fn remote_root_identity_keys(
+    entries: &[StoredRecentRemoteRoot],
+) -> Vec<(String, u16, String, String)> {
+    entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.host.clone(),
+                entry.port,
+                entry.user.clone(),
+                entry.path.clone(),
+            )
+        })
+        .collect()
 }
 
 fn validate_stored(stored: &StoredHistory) -> Result<(), CommandError> {
@@ -314,8 +466,9 @@ fn validate_stored(stored: &StoredHistory) -> Result<(), CommandError> {
         let recent_id = WorkspaceRecentId::parse_v4_wire(&entry.recent_id)
             .map_err(|_| workspace_history_unavailable())?;
         if !ids.insert(recent_id)
-            || entry.canonical_roots.is_empty()
+            || (entry.canonical_roots.is_empty() && entry.remote_roots.is_empty())
             || entry.canonical_roots.len() > MAX_WORKSPACE_ROOTS
+            || entry.remote_roots.len() > MAX_WORKSPACE_ROOTS
             || entry.canonical_roots.len() != entry.root_labels.len()
             || entry.label.is_empty()
             || entry.label.len() > MAX_LABEL_BYTES
@@ -330,6 +483,24 @@ fn validate_stored(stored: &StoredHistory) -> Result<(), CommandError> {
                 || label.is_empty()
                 || label.len() > MAX_LABEL_BYTES
             {
+                return Err(workspace_history_unavailable());
+            }
+        }
+        let mut remote_keys = std::collections::BTreeSet::new();
+        for remote_root in &entry.remote_roots {
+            validate_remote_root_fields(
+                &remote_root.host,
+                &remote_root.user,
+                &remote_root.path,
+                &remote_root.label,
+            )?;
+            let key = (
+                remote_root.host.as_str(),
+                remote_root.port,
+                remote_root.user.as_str(),
+                remote_root.path.as_str(),
+            );
+            if !remote_keys.insert(key) {
                 return Err(workspace_history_unavailable());
             }
         }
@@ -360,11 +531,25 @@ fn stored_paths(entry: &StoredRecentEntry) -> Result<Vec<PathBuf>, CommandError>
 }
 
 fn stored_entry_to_wire(entry: &StoredRecentEntry) -> Result<WorkspaceRecentEntry, CommandError> {
+    let remote_roots = entry
+        .remote_roots
+        .iter()
+        .map(|remote_root| {
+            WorkspaceRecentRemoteRoot::new(
+                remote_root.host.clone(),
+                remote_root.port,
+                remote_root.user.clone(),
+                remote_root.path.clone(),
+                remote_root.label.clone(),
+            )
+        })
+        .collect();
     Ok(WorkspaceRecentEntry::new(
         WorkspaceRecentId::parse_v4_wire(&entry.recent_id)
             .map_err(|_| workspace_history_unavailable())?,
         entry.label.clone(),
         entry.root_labels.clone(),
+        remote_roots,
     ))
 }
 
