@@ -130,6 +130,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter, EventTarget, Manager, State, WebviewWindow};
 
 use crate::error::CommandError;
+use crate::remote::session::RemoteSessionService;
 use crate::terminal::service::{TerminalOutputSink, TerminalService};
 use crate::trust::service::TrustService;
 use crate::workspace::service::WorkspaceService;
@@ -167,9 +168,33 @@ impl DebugAdapterConfirmationState {
     }
 }
 
-/// Reads whether `request` (the exact `(command, args, transport)` triple)
-/// has already been confirmed for the current workspace. `false`, never a
-/// rejection, for the `EMPTY` workspace — mirrors
+/// `F220` S7: resolves `request`'s `remote_host_fingerprint` dimension from
+/// `root_id` — the frontend never supplies this field itself (it stays
+/// "无感" of which backend `root_id` uses, per
+/// `AdapterConfirmationSubject::remote_host_fingerprint`'s own doc comment);
+/// this is the one place a live root's fingerprint is folded into a subject
+/// on the wire-command side, mirroring `remote::remote_dap`'s own resolution
+/// at the actual spawn gate (see `super::dto::AdapterSpawnDescriptor::confirmation_subject_remote`).
+/// `None` (unchanged, local identity) for a local root; the root's own
+/// `session_host_key_fingerprint` is unreachable directly — `remote_context`
+/// already carries it for a live remote root, so this never needs a second
+/// SSH-domain call.
+fn resolve_confirmation_subject(
+    workspace: &WorkspaceService,
+    window_label: &str,
+    root_id: RootId,
+    mut request: AdapterConfirmationSubject,
+) -> Result<AdapterConfirmationSubject, CommandError> {
+    request.remote_host_fingerprint = workspace
+        .remote_context(window_label, root_id)?
+        .map(|context| context.host_key_fingerprint);
+    Ok(request)
+}
+
+/// Reads whether `request` (the exact `(command, args, transport)` triple,
+/// plus `root_id`'s own local/remote identity — `F220` S7) has already been
+/// confirmed for the current workspace. `false`, never a rejection, for the
+/// `EMPTY` workspace — mirrors
 /// `trust::commands::workspace_trust_state`'s identical fail-closed-to-`false`
 /// contract.
 #[tauri::command]
@@ -178,15 +203,19 @@ pub(crate) async fn debug_adapter_confirmation_state(
     confirmation: State<'_, ConfirmationService>,
     workspace: State<'_, WorkspaceService>,
     request: AdapterConfirmationSubject,
+    root_id: RootId,
 ) -> Result<DebugAdapterConfirmationState, CommandError> {
+    let subject =
+        resolve_confirmation_subject(workspace.inner(), window.label(), root_id, request)?;
     let confirmed = confirmation
         .inner()
-        .is_confirmed(workspace.inner(), window.label(), &request)
+        .is_confirmed(workspace.inner(), window.label(), &subject)
         .await?;
     Ok(DebugAdapterConfirmationState::new(confirmed))
 }
 
-/// Persists confirmation for `request`, scoped to the current workspace's
+/// Persists confirmation for `request` (see [`resolve_confirmation_subject`]
+/// for `root_id`'s role — `F220` S7), scoped to the current workspace's
 /// stable roots identity. Rejects with `DEBUG_ADAPTER_CONFIRMATION_UNAVAILABLE`
 /// for the `EMPTY` workspace (nothing to grant confirmation against).
 #[tauri::command]
@@ -195,26 +224,33 @@ pub(crate) async fn debug_adapter_confirmation_grant(
     confirmation: State<'_, ConfirmationService>,
     workspace: State<'_, WorkspaceService>,
     request: AdapterConfirmationSubject,
+    root_id: RootId,
 ) -> Result<(), CommandError> {
+    let subject =
+        resolve_confirmation_subject(workspace.inner(), window.label(), root_id, request)?;
     confirmation
         .inner()
-        .grant(workspace.inner(), window.label(), &request)
+        .grant(workspace.inner(), window.label(), &subject)
         .await
 }
 
-/// Revokes a previously granted confirmation for `request`. Idempotent:
-/// revoking a triple that was never (or no longer) confirmed succeeds
-/// silently, mirroring `workspace_trust_revoke`.
+/// Revokes a previously granted confirmation for `request` (see
+/// [`resolve_confirmation_subject`] for `root_id`'s role — `F220` S7).
+/// Idempotent: revoking a triple that was never (or no longer) confirmed
+/// succeeds silently, mirroring `workspace_trust_revoke`.
 #[tauri::command]
 pub(crate) async fn debug_adapter_confirmation_revoke(
     window: WebviewWindow,
     confirmation: State<'_, ConfirmationService>,
     workspace: State<'_, WorkspaceService>,
     request: AdapterConfirmationSubject,
+    root_id: RootId,
 ) -> Result<(), CommandError> {
+    let subject =
+        resolve_confirmation_subject(workspace.inner(), window.label(), root_id, request)?;
     confirmation
         .inner()
-        .revoke(workspace.inner(), window.label(), &request)
+        .revoke(workspace.inner(), window.label(), &subject)
         .await
 }
 
@@ -275,6 +311,7 @@ pub(crate) async fn debug_launch(
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
     confirmation: State<'_, ConfirmationService>,
+    remote: State<'_, RemoteSessionService>,
     request: DebugSessionStartRequest,
 ) -> Result<DebugSessionStartResult, CommandError> {
     start_debug_session(
@@ -283,6 +320,7 @@ pub(crate) async fn debug_launch(
         trust,
         workspace,
         confirmation,
+        remote,
         request,
         LaunchRequestKind::Launch,
     )
@@ -298,6 +336,7 @@ pub(crate) async fn debug_attach(
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
     confirmation: State<'_, ConfirmationService>,
+    remote: State<'_, RemoteSessionService>,
     request: DebugSessionStartRequest,
 ) -> Result<DebugSessionStartResult, CommandError> {
     start_debug_session(
@@ -306,18 +345,21 @@ pub(crate) async fn debug_attach(
         trust,
         workspace,
         confirmation,
+        remote,
         request,
         LaunchRequestKind::Attach,
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_debug_session(
     window: WebviewWindow,
     debug_sessions: State<'_, DebugSessionService>,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
     confirmation: State<'_, ConfirmationService>,
+    remote: State<'_, RemoteSessionService>,
     request: DebugSessionStartRequest,
     request_kind: LaunchRequestKind,
 ) -> Result<DebugSessionStartResult, CommandError> {
@@ -336,6 +378,7 @@ async fn start_debug_session(
         .inner()
         .start_session(
             trust.inner(),
+            remote.inner(),
             workspace.inner(),
             window.label(),
             query.root_id,
@@ -686,10 +729,12 @@ const RUN_IN_TERMINAL_DEFAULT_ROWS: u16 = 24;
 /// `handle_run_in_terminal_reverse_request`'s sibling command functions above
 /// are themselves thin wrappers around `DebugSessionService` methods that
 /// take plain references, not `State<'_, T>`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_run_in_terminal_reverse_request(
     terminal: &TerminalService,
     trust: &TrustService,
     workspace: &WorkspaceService,
+    remote: &RemoteSessionService,
     window_label: &str,
     root_id: RootId,
     arguments: Option<&Value>,
@@ -711,6 +756,54 @@ pub(crate) fn handle_run_in_terminal_reverse_request(
         }
         command_line
     });
+
+    // `F220` S7 — a remote-backed root routes to a dedicated remote branch
+    // *before* any of the local-only `workspace.root_canonical_path` call
+    // below, exactly like every other domain's own "remote_context first"
+    // dispatch precedent (`terminal::service::TerminalService::start`,
+    // `git::remote_route::resolve_repo_route`): `root_canonical_path` itself
+    // fails closed with `ROOT_BACKEND_UNSUPPORTED` for a remote root.
+    let remote_context = match workspace.remote_context(window_label, root_id) {
+        Ok(context) => context,
+        Err(error) => {
+            return ReverseRequestOutcome {
+                success: false,
+                body: None,
+                message: Some(error.message().to_owned()),
+                notify: None,
+            };
+        }
+    };
+    if let Some(context) = remote_context {
+        // Research doc S7 "架构裁定 §4": cwd is best-effort (absent/empty
+        // defaults to the workspace root, mirroring the local branch below;
+        // an unsatisfiable `cd` fails loudly and visibly inside the spawned
+        // terminal itself rather than silently continuing at the wrong
+        // directory — see `remote::remote_dap::open_remote_run_in_terminal_channel`'s
+        // own doc comment). `env` is not forwarded at all (S5's own "does
+        // not forward local environment" stance, applied identically here) —
+        // `parsed.env` is deliberately never read on this branch; a
+        // debuggee's own requested environment overrides are silently not
+        // applied for a remote-launched `runInTerminal` session, a disclosed
+        // v1 narrowing, not an oversight.
+        let resolved_cwd =
+            resolve_remote_run_in_terminal_cwd(&context.base_path, parsed.cwd.as_deref());
+        let result = tauri::async_runtime::block_on(terminal.start_program_remote(
+            trust,
+            workspace,
+            remote,
+            window_label,
+            context,
+            parsed.program,
+            parsed.args,
+            resolved_cwd,
+            RUN_IN_TERMINAL_DEFAULT_COLS,
+            RUN_IN_TERMINAL_DEFAULT_ROWS,
+            sink,
+        ));
+        return run_in_terminal_outcome(result, title);
+    }
+
     let selected_root = match workspace.root_canonical_path(window_label, root_id) {
         Ok(root) => root,
         Err(error) => {
@@ -747,6 +840,36 @@ pub(crate) fn handle_run_in_terminal_reverse_request(
         RUN_IN_TERMINAL_DEFAULT_ROWS,
         sink,
     ));
+    run_in_terminal_outcome(result, title)
+}
+
+/// `F220` S7 — best-effort POSIX join of a `runInTerminal` `cwd` against a
+/// remote root's own canonical `base_path`: absent/empty defaults to
+/// `base_path` itself (mirroring the local branch's identical default to the
+/// selected root), an absolute `cwd` is used as-is, and a relative one is
+/// joined with a single `/` — plain string manipulation only, never a local
+/// `Path`/`PathBuf` (a remote path is not a path on this machine). Whether
+/// the resulting directory actually exists on the remote host is not
+/// validated here — see the caller's own doc comment for why an
+/// unsatisfiable `cd` is left to fail loudly inside the spawned terminal
+/// itself instead.
+fn resolve_remote_run_in_terminal_cwd(base_path: &str, cwd: Option<&str>) -> String {
+    match cwd {
+        None | Some("") => base_path.to_owned(),
+        Some(cwd) if cwd.starts_with('/') => cwd.to_owned(),
+        Some(cwd) => format!("{}/{cwd}", base_path.trim_end_matches('/')),
+    }
+}
+
+/// Shared by both the local and remote branches of
+/// [`handle_run_in_terminal_reverse_request`] — turns a
+/// `TerminalService::start_program`/`start_program_remote` result into the
+/// exact same [`ReverseRequestOutcome`] shape either branch already produced
+/// before this was factored out.
+fn run_in_terminal_outcome(
+    result: Result<(crate::terminal::dto::TerminalSessionId, Option<u32>), CommandError>,
+    title: String,
+) -> ReverseRequestOutcome {
     match result {
         Ok((terminal_session_id, process_id)) => {
             let notify_body = serde_json::json!({
@@ -806,6 +929,7 @@ impl ReverseRequestHandler for RunInTerminalReverseRequestHandler {
         let terminal = self.app.state::<TerminalService>();
         let trust = self.app.state::<TrustService>();
         let workspace = self.app.state::<WorkspaceService>();
+        let remote = self.app.state::<RemoteSessionService>();
         let sink: Arc<dyn TerminalOutputSink> =
             Arc::new(crate::terminal::commands::WindowEmitSink::new(
                 self.app.clone(),
@@ -815,6 +939,7 @@ impl ReverseRequestHandler for RunInTerminalReverseRequestHandler {
             terminal.inner(),
             trust.inner(),
             workspace.inner(),
+            remote.inner(),
             &self.window_label,
             self.root_id,
             arguments,

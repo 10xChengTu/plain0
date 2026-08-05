@@ -96,6 +96,7 @@ import {
 	decodeDebugVariablesResult,
 	decodeDebugVoid,
 	frozenDebugAdapterConfirmationRequest,
+	frozenDebugAdapterConfirmationRootId,
 	frozenDebugDisassembleRequest,
 	frozenDebugEvaluateRequest,
 	frozenDebugOutputAckRequest,
@@ -1384,22 +1385,31 @@ export function createNativeBridge(): PlainBridge {
 				}),
 			);
 		},
-		debugAdapterConfirmationState: async (descriptor) => {
+		debugAdapterConfirmationState: async (descriptor, rootId) => {
 			const request = frozenDebugAdapterConfirmationRequest(descriptor);
 			return decodeDebugAdapterConfirmationState(
-				await invoke<unknown>("debug_adapter_confirmation_state", { request }),
+				await invoke<unknown>("debug_adapter_confirmation_state", {
+					request,
+					rootId: frozenDebugAdapterConfirmationRootId(rootId),
+				}),
 			);
 		},
-		debugAdapterConfirmationGrant: async (descriptor) => {
+		debugAdapterConfirmationGrant: async (descriptor, rootId) => {
 			const request = frozenDebugAdapterConfirmationRequest(descriptor);
 			decodeDebugAdapterConfirmationVoid(
-				await invoke<unknown>("debug_adapter_confirmation_grant", { request }),
+				await invoke<unknown>("debug_adapter_confirmation_grant", {
+					request,
+					rootId: frozenDebugAdapterConfirmationRootId(rootId),
+				}),
 			);
 		},
-		debugAdapterConfirmationRevoke: async (descriptor) => {
+		debugAdapterConfirmationRevoke: async (descriptor, rootId) => {
 			const request = frozenDebugAdapterConfirmationRequest(descriptor);
 			decodeDebugAdapterConfirmationVoid(
-				await invoke<unknown>("debug_adapter_confirmation_revoke", { request }),
+				await invoke<unknown>("debug_adapter_confirmation_revoke", {
+					request,
+					rootId: frozenDebugAdapterConfirmationRootId(rootId),
+				}),
 			);
 		},
 		debugLaunch: async (rootId, target, adapterId, launchArguments) => {

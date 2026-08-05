@@ -36,6 +36,7 @@ pub(crate) mod agent;
 pub mod commands;
 pub mod dto;
 pub(crate) mod known_hosts;
+pub(crate) mod remote_dap;
 pub(crate) mod remote_fs;
 pub(crate) mod remote_git;
 pub(crate) mod remote_terminal;
@@ -392,15 +393,35 @@ pub(crate) fn remote_git_exec_unavailable() -> CommandError {
     )
 }
 
+/// `F220` S7: folds every unrecoverable-differently failure of the plain
+/// (no-pty) `exec` channel `remote::remote_dap` drives to launch a remote
+/// debug adapter (channel-open rejected, the `exec` request's own
+/// `SSH_MSG_CHANNEL_FAILURE` reply, a malformed/absent reply) into one
+/// caller-facing code — mirrors [`remote_git_exec_unavailable`]'s identical
+/// "fold every unrecoverable-differently case together" precedent for the
+/// sibling git `exec` transport. Distinct from [`remote_terminal_unavailable`]
+/// (the `pty-req`-attached `exec`/`shell` channel `remote::remote_terminal`
+/// drives — used by this same slice's `runInTerminal` routing, see
+/// `remote::remote_terminal::open_remote_terminal_exec_channel`) since the
+/// two are genuinely different channel shapes with independently audited
+/// call sites.
+pub(crate) fn remote_dap_exec_unavailable() -> CommandError {
+    CommandError::new(
+        "REMOTE_DAP_EXEC_UNAVAILABLE",
+        "The remote debug adapter exec channel is not available.",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         remote_agent_auth_rejected, remote_agent_no_identities, remote_agent_timed_out,
         remote_agent_unavailable, remote_connect_cancelled, remote_connect_failed,
-        remote_connect_timed_out, remote_git_exec_unavailable, remote_host_key_changed,
-        remote_host_key_store_unavailable, remote_request_invalid, remote_root_identity_changed,
-        remote_root_path_changed, remote_session_disconnected, remote_session_limit_reached,
-        remote_session_not_found, remote_shell_escape_invalid, remote_terminal_unavailable,
+        remote_connect_timed_out, remote_dap_exec_unavailable, remote_git_exec_unavailable,
+        remote_host_key_changed, remote_host_key_store_unavailable, remote_request_invalid,
+        remote_root_identity_changed, remote_root_path_changed, remote_session_disconnected,
+        remote_session_limit_reached, remote_session_not_found, remote_shell_escape_invalid,
+        remote_terminal_unavailable,
     };
 
     #[test]
@@ -463,6 +484,10 @@ mod tests {
         assert_eq!(
             remote_git_exec_unavailable().code(),
             "REMOTE_GIT_EXEC_UNAVAILABLE"
+        );
+        assert_eq!(
+            remote_dap_exec_unavailable().code(),
+            "REMOTE_DAP_EXEC_UNAVAILABLE"
         );
     }
 

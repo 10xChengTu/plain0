@@ -902,6 +902,35 @@ impl RemoteSessionService {
             .await
             .map_err(|_| super::remote_git_exec_unavailable())
     }
+
+    /// `F220` S7: opens a brand-new session channel on `session_id`'s live
+    /// SSH connection for `remote::remote_dap`'s own DAP-adapter `exec`
+    /// sequencing — mirrors [`Self::open_git_exec_channel`]'s identical
+    /// on-demand, no-persistent-pool shape (this domain's channel-management
+    /// precedent, now shared by all four channel-consuming domains: SFTP,
+    /// terminal, git exec, and DAP exec). Never itself reachable from outside
+    /// `remote::` — `remote::remote_dap` is the sole caller, so the raw,
+    /// `russh`-typed [`Channel`] this returns never crosses into `debug::`
+    /// (which is mechanically forbidden from importing `russh` at all — see
+    /// this module's own "russh is this module's alone to import" doc
+    /// section).
+    pub(crate) async fn open_dap_exec_channel(
+        &self,
+        window_label: &str,
+        session_id: RemoteSessionId,
+    ) -> Result<Channel<Msg>, CommandError> {
+        let handle = {
+            lock(&self.state.windows)
+                .get(window_label)
+                .and_then(|sessions| sessions.get(&session_id))
+                .map(|record| Arc::clone(&record.handle))
+                .ok_or_else(remote_session_not_found)?
+        };
+        handle
+            .channel_open_session()
+            .await
+            .map_err(|_| super::remote_dap_exec_unavailable())
+    }
 }
 
 /// The sole ambient directory open for the whole known-hosts store: created

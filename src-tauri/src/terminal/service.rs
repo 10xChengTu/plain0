@@ -138,6 +138,7 @@ use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, Master
 
 use crate::backup::{store as backup_store, BackupKey};
 use crate::error::CommandError;
+use crate::remote::remote_dap;
 use crate::remote::remote_terminal::{
     self, RemoteTerminalExitOutcome, RemoteTerminalKiller, RemoteTerminalResizer,
     RemoteTerminalWaiter,
@@ -757,6 +758,82 @@ impl TerminalService {
             sink,
         )
         .await
+    }
+
+    /// `F220` S7 — the remote-root twin of [`Self::start_program`]:
+    /// `debug::commands::handle_run_in_terminal_reverse_request`'s own
+    /// remote branch calls this instead once it has already resolved
+    /// `root_id` to a live [`RemoteRootContext`] (via `workspace.remote_context`,
+    /// exactly like [`Self::start`]/[`Self::start_remote`]'s own dispatch —
+    /// see that pair's doc comments). Runs `program`/`args` directly on the
+    /// same SSH session's own remote terminal channel (research doc S7
+    /// "架构裁定 §4": "runInTerminal 反向请求路由到同会话的远程终端" — reusing
+    /// `F220` S5's own `remote::remote_terminal` channel machinery, via
+    /// `remote::remote_dap::open_remote_run_in_terminal_channel`, never a
+    /// second, independent SSH session). `cwd` is already resolved by the caller
+    /// (plain best-effort string-joined against the root's own `base_path` —
+    /// see `debug::commands::resolve_remote_run_in_terminal_cwd`) — this
+    /// method never re-derives it. Unlike [`Self::start_program`]'s local
+    /// path, no `env_overrides` parameter exists at all: a remote exec
+    /// channel has no structured per-invocation environment channel (see
+    /// `remote::remote_terminal`'s own module doc for the identical stance
+    /// `F220` S5 already took for the plain interactive-shell case), so a
+    /// debuggee's own requested environment is never applied here — a
+    /// disclosed v1 narrowing. The returned `Option<u32>` process id is
+    /// always `None`: an SSH channel's `exit-status` carries no PID, unlike
+    /// a local `Child::process_id()`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn start_program_remote(
+        &self,
+        trust: &TrustService,
+        workspace: &WorkspaceService,
+        remote: &RemoteSessionService,
+        window_label: &str,
+        context: RemoteRootContext,
+        program: String,
+        args: Vec<String>,
+        cwd: String,
+        cols: u16,
+        rows: u16,
+        sink: Arc<dyn TerminalOutputSink>,
+    ) -> Result<(TerminalSessionId, Option<u32>), CommandError> {
+        trust.require_trusted(workspace, window_label).await?;
+        self.session_capacity_gate(window_label)?;
+        let handles = remote_dap::open_remote_run_in_terminal_channel(
+            remote,
+            window_label,
+            context.session_id,
+            &program,
+            &args,
+            &cwd,
+            cols,
+            rows,
+        )
+        .await?;
+        let window_label_owned = window_label.to_owned();
+        let state = Arc::clone(&self.state);
+        let session_id = tauri::async_runtime::spawn_blocking(move || {
+            finish_spawn_sync(
+                &state,
+                &window_label_owned,
+                Box::new(handles.reader),
+                Box::new(handles.writer),
+                PtyResizer::Remote(handles.resizer),
+                PtyKiller::Remote(handles.killer),
+                PtyWaiter::Remote(handles.waiter),
+                // No workspace-root-relative pwd projection for a
+                // `runInTerminal`-launched session — mirrors
+                // `Self::start_program`'s own identical `None` for the local
+                // case.
+                None,
+                cols,
+                rows,
+                sink,
+            )
+        })
+        .await
+        .map_err(|_| terminal_unavailable())??;
+        Ok((session_id, None))
     }
 
     #[allow(clippy::too_many_arguments)]

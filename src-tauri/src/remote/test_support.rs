@@ -1511,3 +1511,412 @@ pub(crate) async fn connect_git_exec_test_session(
         other => panic!("expected connected, got {other:?}"),
     }
 }
+
+// -----------------------------------------------------------------------
+// `F220` S7's own hermetic long-lived-exec-channel test fixture — see
+// `remote::remote_dap`'s own module doc for what this exercises. Deliberately
+// a *separate* handler/server/fixture triple from `GitExecTestSshHandler`/
+// `GitExecTestSshServer`/`GitExecFixture` above: that fixture's own
+// `run_exec_and_stream` spawns the real child only once `channel_eof`
+// arrives — a deliberate simplification that is behaviorally invisible to
+// `remote_git`'s own one-shot "send stdin (if any), then eof, *then* start
+// reading a reply" usage pattern (see that fixture's own doc comment), but
+// would be wrong here: a live DAP session (and a `runInTerminal`-launched
+// program) writes to the channel for its *entire* lifetime and never sends
+// `eof` until teardown, so this fixture spawns the real child eagerly, right
+// inside `exec_request` itself — exactly what a real `sshd` does — and
+// forwards every subsequent `data()` call straight to the child's own stdin
+// for as long as the channel stays open, proving real cross-`Content-Length`-
+// frame-boundary chunking actually happens on the wire (the research doc's
+// own S7 description: "确保跨帧分片、Content-Length 边界在通道上真实发生").
+// -----------------------------------------------------------------------
+
+/// One live `exec` channel's real spawned child — populated the instant
+/// `exec_request` spawns it, so `data()` (arriving on every subsequent
+/// `SSH_MSG_CHANNEL_DATA`) always has somewhere to forward client input.
+#[derive(Default)]
+struct DapExecChannelState {
+    stdin: Option<tokio::process::ChildStdin>,
+}
+
+/// Real server-side, eager-spawn `exec` handling — see the section-level doc
+/// comment above for why this is a distinct fixture from
+/// [`GitExecTestSshHandler`]. `exec_request` spawns `sh -c "<command>"`
+/// immediately and starts streaming its stdout/stderr back concurrently;
+/// `data` forwards every chunk straight to the child's stdin; `channel_eof`
+/// drops the stdin handle (closing the child's own stdin, exactly like a
+/// real `sshd` would once the client signals it is done writing — this
+/// fixture's own analogue of `RemoteDapKiller`-and-`RemoteTerminalKiller`-
+/// style teardown's `eof()` half).
+#[derive(Clone)]
+struct DapExecTestSshHandler {
+    accepted_key: Option<russh::keys::ssh_key::PublicKey>,
+    kill_switch: Arc<AsyncMutex<Option<ServerHandle>>>,
+    channels: Arc<AsyncMutex<HashMap<ChannelId, DapExecChannelState>>>,
+}
+
+impl ServerHandler for DapExecTestSshHandler {
+    type Error = russh::Error;
+
+    async fn auth_publickey(
+        &mut self,
+        _user: &str,
+        public_key: &russh::keys::ssh_key::PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        let accepted = self
+            .accepted_key
+            .as_ref()
+            .is_some_and(|accepted| accepted == public_key);
+        Ok(if accepted {
+            Auth::Accept
+        } else {
+            Auth::reject()
+        })
+    }
+
+    async fn auth_succeeded(&mut self, session: &mut Session) -> Result<(), Self::Error> {
+        *self.kill_switch.lock().await = Some(session.handle());
+        Ok(())
+    }
+
+    async fn channel_open_session(
+        &mut self,
+        channel: Channel<Msg>,
+        reply: ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.channels
+            .lock()
+            .await
+            .insert(channel.id(), DapExecChannelState::default());
+        reply.accept().await;
+        Ok(())
+    }
+
+    /// Replies success without recording anything — this fixture never
+    /// simulates a rejected `pty-req` (mirrors `TerminalTestSshHandler::pty_request`'s
+    /// own "happy path only" precedent). Exists purely so a `pty-req`
+    /// followed by `exec` (`remote::remote_terminal::open_remote_terminal_exec_channel`'s
+    /// own sequencing for a `runInTerminal`-launched remote program) succeeds
+    /// against this same fixture — `remote::remote_dap`'s own two entry
+    /// points (plain `exec` for a launched adapter, `pty-req`+`exec` for
+    /// `runInTerminal`) are both served by this one handler/fixture pair.
+    #[allow(clippy::too_many_arguments)]
+    async fn pty_request(
+        &mut self,
+        channel: ChannelId,
+        _term: &str,
+        _col_width: u32,
+        _row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _modes: &[(russh::Pty, u32)],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        Ok(())
+    }
+
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        let handle = session.handle();
+
+        let Ok(command_text) = String::from_utf8(data.to_vec()) else {
+            tokio::spawn(async move {
+                let _ = handle.exit_status_request(channel, 127).await;
+                let _ = handle.eof(channel).await;
+                let _ = handle.close(channel).await;
+            });
+            return Ok(());
+        };
+
+        let mut child = match tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(&command_text)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => {
+                tokio::spawn(async move {
+                    let _ = handle.exit_status_request(channel, 127).await;
+                    let _ = handle.eof(channel).await;
+                    let _ = handle.close(channel).await;
+                });
+                return Ok(());
+            }
+        };
+
+        let stdin = child.stdin.take();
+        let mut stdout = child.stdout.take().expect("stdout is always piped here");
+        let mut stderr = child.stderr.take().expect("stderr is always piped here");
+        if let Some(state) = self.channels.lock().await.get_mut(&channel) {
+            state.stdin = stdin;
+        }
+
+        tokio::spawn(async move {
+            let stdout_handle = handle.clone();
+            let stdout_task = tokio::spawn(async move {
+                let mut buffer = [0_u8; 32 * 1024];
+                loop {
+                    match stdout.read(&mut buffer).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => {
+                            if stdout_handle
+                                .data(channel, buffer[..read].to_vec())
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            let stderr_handle = handle.clone();
+            let stderr_task = tokio::spawn(async move {
+                let mut buffer = [0_u8; 32 * 1024];
+                loop {
+                    match stderr.read(&mut buffer).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(read) => {
+                            if stderr_handle
+                                .extended_data(channel, 1, buffer[..read].to_vec())
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            let _ = stdout_task.await;
+            let _ = stderr_task.await;
+            let status = child.wait().await;
+            let code = status.ok().and_then(|status| status.code()).unwrap_or(-1);
+            let _ = handle.exit_status_request(channel, code as u32).await;
+            let _ = handle.eof(channel).await;
+            let _ = handle.close(channel).await;
+        });
+        Ok(())
+    }
+
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let mut channels = self.channels.lock().await;
+        if let Some(state) = channels.get_mut(&channel) {
+            if let Some(stdin) = state.stdin.as_mut() {
+                let _ = stdin.write_all(data).await;
+            }
+        }
+        Ok(())
+    }
+
+    async fn channel_eof(
+        &mut self,
+        channel: ChannelId,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if let Some(state) = self.channels.lock().await.get_mut(&channel) {
+            // Dropping the stdin handle closes the pipe, signaling EOF to
+            // the child — mirrors `GitExecTestSshHandler`'s own
+            // `drop(child_stdin)` for the identical reason, just triggered by
+            // a real mid-session `eof` here instead of a one-shot write.
+            state.stdin = None;
+        }
+        Ok(())
+    }
+
+    /// Replies with the server's own `SSH_MSG_CHANNEL_CLOSE` the instant the
+    /// client sends one — mirrors `TerminalTestSshHandler::channel_close`'s
+    /// identical "real-sshd-like cooperative half of the kill grace" role.
+    async fn channel_close(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        session.close(channel)?;
+        Ok(())
+    }
+}
+
+struct DapExecTestSshServer {
+    accepted_key: Option<russh::keys::ssh_key::PublicKey>,
+    kill_switch: Arc<AsyncMutex<Option<ServerHandle>>>,
+}
+
+impl ServerTrait for DapExecTestSshServer {
+    type Handler = DapExecTestSshHandler;
+
+    fn new_client(&mut self, _peer_addr: Option<SocketAddr>) -> DapExecTestSshHandler {
+        DapExecTestSshHandler {
+            accepted_key: self.accepted_key.clone(),
+            kill_switch: Arc::clone(&self.kill_switch),
+            channels: Arc::new(AsyncMutex::new(HashMap::new())),
+        }
+    }
+}
+
+pub(crate) struct DapExecFixture {
+    pub(crate) address: SocketAddr,
+    pub(crate) agent_socket_path: PathBuf,
+    kill_switch: Arc<AsyncMutex<Option<ServerHandle>>>,
+    _agent_temp: TempDir,
+    _server_task: tokio::task::JoinHandle<()>,
+    _agent_task: tokio::task::JoinHandle<()>,
+}
+
+impl DapExecFixture {
+    /// Polls briefly for the server-side session `Handle` to become
+    /// available — mirrors [`TerminalFixture::server_handle`]'s own
+    /// identical bounded-poll rationale (only captured once a connection
+    /// actually authenticates).
+    async fn server_handle(&self) -> ServerHandle {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(handle) = self.kill_switch.lock().await.clone() {
+                return handle;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("server-side session handle never became available");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Forces the **server** side of this fixture's live connection to send
+    /// a real SSH disconnect message — the whole-session "the peer actively
+    /// disconnects" scenario, tearing down every channel (including a live
+    /// DAP adapter exec channel) without ever sending `exit-status` for it —
+    /// mirrors [`TerminalFixture::force_server_disconnect`]/
+    /// [`SftpFixture::force_server_disconnect`] exactly.
+    pub(crate) async fn force_server_disconnect(&self) {
+        let handle = self.server_handle().await;
+        handle
+            .disconnect(
+                russh::Disconnect::ByApplication,
+                "forced test disconnect".to_owned(),
+                "en-US".to_owned(),
+            )
+            .await
+            .expect("server-side disconnect message sends");
+    }
+}
+
+/// Starts a loopback sshd serving real, eagerly-spawned `exec` requests (see
+/// [`DapExecTestSshHandler`]'s own doc comment) plus a real agent server
+/// offering `identity` — mirrors [`start_git_exec_fixture`]'s identical
+/// two-server-task setup shape.
+pub(crate) async fn start_dap_exec_fixture(identity: &PrivateKey) -> DapExecFixture {
+    let agent_temp = TempDir::new().expect("tempdir creates");
+
+    let host_key = generate_key();
+    let config = Arc::new(russh::server::Config {
+        keys: vec![host_key],
+        ..Default::default()
+    });
+
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind loopback");
+    let address = listener.local_addr().expect("local addr");
+
+    let kill_switch: Arc<AsyncMutex<Option<ServerHandle>>> = Arc::new(AsyncMutex::new(None));
+    let mut server = DapExecTestSshServer {
+        accepted_key: Some(identity.public_key().clone()),
+        kill_switch: Arc::clone(&kill_switch),
+    };
+    let server_task = tokio::spawn(async move {
+        let running = server.run_on_socket(config, &listener);
+        let _ = running.await;
+    });
+
+    let agent_socket_path = agent_temp.path().join("agent.sock");
+    let listener = UnixListener::bind(&agent_socket_path).expect("bind agent socket");
+    let stream = tokio_stream::wrappers::UnixListenerStream::new(listener);
+    let agent_task = tokio::spawn(async move {
+        let _ = agent_server::serve(stream, ()).await;
+    });
+    let mut loader = AgentClient::connect_uds(&agent_socket_path)
+        .await
+        .expect("connect to test agent");
+    loader
+        .add_identity(identity, &[])
+        .await
+        .expect("load identity into test agent");
+
+    DapExecFixture {
+        address,
+        agent_socket_path,
+        kill_switch,
+        _agent_temp: agent_temp,
+        _server_task: server_task,
+        _agent_task: agent_task,
+    }
+}
+
+fn dap_exec_connect_target(fixture: &DapExecFixture, user: &str) -> RemoteConnectTarget {
+    RemoteConnectTarget {
+        host: fixture.address.ip().to_string(),
+        port: fixture.address.port(),
+        user: user.to_owned(),
+    }
+}
+
+/// [`connect_git_exec_test_session`]'s twin for [`DapExecFixture`] — see that
+/// function's own doc comment for the full two-phase-connect rationale this
+/// drives identically.
+pub(crate) async fn connect_dap_exec_test_session(
+    service: &RemoteSessionService,
+    window_label: &str,
+    fixture: &DapExecFixture,
+) -> RemoteSessionId {
+    let sink: Arc<dyn RemoteSessionEventSink> = Arc::new(NullRemoteSessionEventSink);
+    let target = dap_exec_connect_target(fixture, "octocat");
+    let pending = service
+        .connect(
+            window_label,
+            target.clone(),
+            &fixture.agent_socket_path,
+            Arc::clone(&sink),
+        )
+        .await
+        .expect("connect call itself succeeds for an unknown host");
+    let (algorithm, sha256_fingerprint) = match pending {
+        RemoteSessionConnectResult::HostKeyPendingConfirmation {
+            algorithm,
+            sha256_fingerprint,
+            ..
+        } => (algorithm, sha256_fingerprint),
+        other => panic!("expected pending confirmation, got {other:?}"),
+    };
+    let confirmed = service
+        .confirm_host_key(
+            window_label,
+            RemoteHostKeyConfirmParts {
+                target,
+                algorithm,
+                sha256_fingerprint,
+            },
+            &fixture.agent_socket_path,
+            sink,
+        )
+        .await
+        .expect("confirm_host_key succeeds");
+    match confirmed {
+        RemoteSessionConnectResult::Connected { session_id } => session_id,
+        other => panic!("expected connected, got {other:?}"),
+    }
+}

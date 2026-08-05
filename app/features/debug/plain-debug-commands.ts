@@ -223,6 +223,7 @@ async function runStartDebugging(
 		registryBytes,
 		launchBytes,
 		configuration.name,
+		rootId,
 	);
 	if (preparation.kind === "declined") {
 		return;

@@ -14568,8 +14568,8 @@ describe("Plain F100 S1 debug adapter confirmation command registration Harness"
 				? {
 						...entry,
 						source: entry.source.replace(
-							".is_confirmed(workspace.inner(), window.label(), &request)",
-							'.is_confirmed(workspace.inner(), "main", &request)',
+							".is_confirmed(workspace.inner(), window.label(), &subject)",
+							'.is_confirmed(workspace.inner(), "main", &subject)',
 						),
 					}
 				: entry,
@@ -14852,8 +14852,8 @@ describe("Plain F100 S1 debug adapter confirmation TypeScript boundary Harness",
 			"app/platform/tauri/native.ts",
 			(source) =>
 				source.replace(
-					"debugAdapterConfirmationState: async (descriptor) => {",
-					"debugAdapterConfirmationStateUnused: async (descriptor) => {",
+					"debugAdapterConfirmationState: async (descriptor, rootId) => {",
+					"debugAdapterConfirmationStateUnused: async (descriptor, rootId) => {",
 				),
 		);
 		const failures = validateDebugAdapterConfirmationBoundary(mutated);
@@ -14989,7 +14989,7 @@ fn bypass(argv: &[String]) -> Result<String, CommandError> {
 		);
 		const failures = validateShellEscapeSoleCallerBoundary(hostile);
 		expect(failures).toContain(
-			"src-tauri/src/remote/session.rs must not call encode_posix_command_line — every SSH exec command line must be built exclusively by src-tauri/src/remote/remote_git.rs",
+			"src-tauri/src/remote/session.rs must not call encode_posix_command_line — every SSH exec command line must be built exclusively by src-tauri/src/remote/remote_git.rs or src-tauri/src/remote/remote_dap.rs",
 		);
 	});
 
@@ -15001,7 +15001,7 @@ fn bypass(argv: &[String]) -> Result<String, CommandError> {
 		);
 		const failures = validateShellEscapeSoleCallerBoundary(hostile);
 		expect(failures).toContain(
-			"src-tauri/src/remote/session.rs must not reference the shell_escape module — only src-tauri/src/remote/remote_git.rs may call into it",
+			"src-tauri/src/remote/session.rs must not reference the shell_escape module — only src-tauri/src/remote/remote_git.rs or src-tauri/src/remote/remote_dap.rs may call into it",
 		);
 	});
 
@@ -15019,8 +15019,24 @@ fn bypass(argv: &[String]) -> Result<String, CommandError> {
 		);
 		const failures = validateShellEscapeSoleCallerBoundary(hostile);
 		expect(failures).toContain(
-			"src-tauri/src/remote/remote_git.rs must call shell_escape::encode_posix_command_line — it is this crate's sole audited exec-command-line builder",
+			"src-tauri/src/remote/remote_git.rs must call shell_escape::encode_posix_command_line — it is one of this crate's sole audited exec-command-line builders",
 		);
+	});
+
+	it("accepts remote_dap.rs as the second audited caller (F220 S7)", () => {
+		const withRemoteDap = [
+			...shellEscapeSources,
+			{
+				relativePath: "src-tauri/src/remote/remote_dap.rs",
+				source: `
+use super::shell_escape::encode_posix_command_line;
+fn build(argv: &[String]) -> Result<String, CommandError> {
+  encode_posix_command_line(argv)
+}
+`,
+			},
+		];
+		expect(validateShellEscapeSoleCallerBoundary(withRemoteDap)).toEqual([]);
 	});
 
 	it("ignores encode_posix_command_line/shell_escape spelled out inside comments or string literals", () => {

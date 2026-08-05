@@ -2405,15 +2405,29 @@ async function installNativeIpcMock(
 
 			// --- `F100` S3: real session-lifecycle + interactive debugging mock. ---
 			const debugAdapterConfirmations = new Set<string>();
-			function debugAdapterConfirmationKey(request: {
-				command?: string;
-				args?: readonly string[];
-				transport?: string;
-			}): string {
+			// `F220` S7 — `confirmRootId` folds in the requested root's own
+			// remote identity (the bound session's `hostKeyFingerprint`, `null`
+			// for the native root or an unrecognized id), mirroring
+			// `src-tauri/src/debug/dto.rs`'s
+			// `AdapterConfirmationSubject::remote_host_fingerprint`: a command
+			// confirmed for the native root must never be treated as already
+			// confirmed for a remote one, or vice versa.
+			function debugAdapterConfirmationKey(
+				request: {
+					command?: string;
+					args?: readonly string[];
+					transport?: string;
+				},
+				confirmRootId?: string,
+			): string {
 				return JSON.stringify([
 					request.command,
 					request.args,
 					request.transport,
+					confirmRootId === undefined
+						? null
+						: (remoteRootBindings.get(confirmRootId)?.hostKeyFingerprint ??
+							null),
 				]);
 			}
 			function debugAdapterNotConfirmed() {
@@ -2454,6 +2468,15 @@ async function installNativeIpcMock(
 					code: "ROOT_NOT_AUTHORIZED",
 					message:
 						"The requested workspace root is not authorized for this window.",
+				};
+			}
+			// `F220` S7 — mirrors `src-tauri/src/debug/mod.rs`'s
+			// `debug_remote_transport_unsupported`.
+			function debugRemoteTransportUnsupported() {
+				return {
+					code: "DEBUG_REMOTE_TRANSPORT_UNSUPPORTED",
+					message:
+						"TCP and TCP-spawn debug adapter transports are not supported for a remote workspace root; only the stdio (exec-channel) transport is supported.",
 				};
 			}
 			// `F100` S4: the adversarial "step request issued while the session
@@ -4862,9 +4885,13 @@ async function installNativeIpcMock(
 										transport?: string;
 								  }
 								| undefined;
+							const confirmRootId = args.rootId as string | undefined;
 							return {
 								confirmed: debugAdapterConfirmations.has(
-									debugAdapterConfirmationKey(confirmRequest ?? {}),
+									debugAdapterConfirmationKey(
+										confirmRequest ?? {},
+										confirmRootId,
+									),
 								),
 							};
 						}
@@ -4876,8 +4903,12 @@ async function installNativeIpcMock(
 										transport?: string;
 								  }
 								| undefined;
+							const confirmRootId = args.rootId as string | undefined;
 							debugAdapterConfirmations.add(
-								debugAdapterConfirmationKey(confirmRequest ?? {}),
+								debugAdapterConfirmationKey(
+									confirmRequest ?? {},
+									confirmRootId,
+								),
 							);
 							return null;
 						}
@@ -4889,8 +4920,12 @@ async function installNativeIpcMock(
 										transport?: string;
 								  }
 								| undefined;
+							const confirmRootId = args.rootId as string | undefined;
 							debugAdapterConfirmations.delete(
-								debugAdapterConfirmationKey(confirmRequest ?? {}),
+								debugAdapterConfirmationKey(
+									confirmRequest ?? {},
+									confirmRootId,
+								),
 							);
 							return null;
 						}
@@ -4908,8 +4943,29 @@ async function installNativeIpcMock(
 										port?: number;
 								  }
 								| undefined;
-							if (startRequest?.rootId !== rootId) {
+							// `F220` S7 — a remote-backed root is a real, separately
+							// authorized root, not only the fixed native one: any id
+							// `remoteRootBindings` recognizes is accepted too — see
+							// that map's own doc comment.
+							const launchTargetRootId = startRequest?.rootId;
+							const launchTargetIsRemote =
+								launchTargetRootId !== undefined &&
+								remoteRootBindings.has(launchTargetRootId);
+							if (launchTargetRootId !== rootId && !launchTargetIsRemote) {
 								throw debugRootNotAuthorized();
+							}
+							// `F220` S7 — research doc "架构裁定 §4"/v1 narrowing:
+							// only the `stdio` (exec-channel) transport is
+							// supported for a remote root — `tcp`/`tcpSpawn` fail
+							// closed here, before any confirmation check, exactly
+							// like `debug::service::DebugSessionService::start_session_with_tcp_spawn_budget`'s
+							// own `workspace.remote_context` dispatch.
+							if (
+								launchTargetIsRemote &&
+								(startRequest?.transport === "tcp" ||
+									startRequest?.transport === "tcpSpawn")
+							) {
+								throw debugRemoteTransportUnsupported();
 							}
 							// `F210` S6 — a `"tcpSpawn"` request is confirmed
 							// under the same `"tcp"` identity a plain `"tcp"`
@@ -4919,10 +4975,13 @@ async function installNativeIpcMock(
 							const isTcpSpawn = startRequest?.transport === "tcpSpawn";
 							if (
 								!debugAdapterConfirmations.has(
-									debugAdapterConfirmationKey({
-										...startRequest,
-										transport: isTcpSpawn ? "tcp" : startRequest?.transport,
-									}),
+									debugAdapterConfirmationKey(
+										{
+											...startRequest,
+											transport: isTcpSpawn ? "tcp" : startRequest?.transport,
+										},
+										launchTargetRootId,
+									),
 								)
 							) {
 								throw debugAdapterNotConfirmed();
@@ -4939,7 +4998,7 @@ async function installNativeIpcMock(
 							}
 							const sessionId = nextDebugSessionId();
 							liveDebugSessions.add(sessionId);
-							debugSessionRoots.set(sessionId, rootId);
+							debugSessionRoots.set(sessionId, launchTargetRootId ?? rootId);
 							return {
 								sessionId,
 								capabilities: debugFixtureForTest.capabilities ?? {},
@@ -4968,9 +5027,14 @@ async function installNativeIpcMock(
 								setBreakpointsRequest?.sessionId ?? "";
 							if (
 								!liveDebugSessions.has(breakpointSessionId) ||
+								// `F220` S7 — no longer forced to the fixed native
+								// `rootId`: whichever root `debug_launch`/`debug_attach`
+								// actually recorded for this session (native or
+								// remote — see `debugSessionRoots.set`'s own call
+								// site) is the only one this session's own
+								// `debug_set_breakpoints` calls may ever name.
 								setBreakpointsRequest?.rootId !==
-									debugSessionRoots.get(breakpointSessionId) ||
-								setBreakpointsRequest?.rootId !== rootId
+									debugSessionRoots.get(breakpointSessionId)
 							) {
 								throw debugSessionNotFound();
 							}
@@ -28507,6 +28571,466 @@ test("F220 S6: fetch/pull/push against a remote root are rejected server-side wi
 	}, remoteRootId);
 	expect(error?.code).toBe("GIT_REMOTE_NETWORK_UNSUPPORTED");
 	expect(error?.code).not.toBe("ROOT_BACKEND_UNSUPPORTED");
+
+	expect(pageErrors).toEqual([]);
+});
+
+// --- `F220` S7 "远程 DAP" ----------------------------------------------------
+
+const DEBUG_LAUNCH_JSON_REMOTE = JSON.stringify({
+	version: "0.2.0",
+	configurations: [
+		{
+			type: "python",
+			request: "launch",
+			name: "Debug remote main.py",
+			plainAdapter: {
+				transport: "stdio",
+				command: "/usr/bin/python3",
+				args: ["-m", "debugpy.adapter"],
+			},
+			program: "main.py",
+		},
+	],
+});
+
+/** Opens a mixed local+remote workspace (mirrors
+ * `openMixedLocalAndRemoteWorkspaceForGit`'s own identical shape) with a
+ * remote root that carries `main.py` and `.vscode/launch.json` — the
+ * shared setup every `F220` S7 test below starts from. Trust is granted
+ * up front (`terminalTrustedForTest: true`) so each test can focus on the
+ * adapter-confirmation gate itself, the one this slice actually changes. */
+async function openMixedLocalAndRemoteWorkspaceForDebug(
+	page: Page,
+	debugFixtureForTest: TestDebugFixture = {},
+): Promise<{ readonly remoteRootId: string }> {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{},
+		{},
+		debugFixtureForTest,
+		{},
+		[],
+		0,
+		0,
+		null,
+		{
+			directoryTreeForTest: {
+				"/home": "directory",
+				"/home/octocat": "directory",
+				"/home/octocat/project": "directory",
+				"/home/octocat/project/.vscode": "directory",
+				"/home/octocat/project/main.py": { content: DEBUG_MAIN_PY },
+				"/home/octocat/project/.vscode/launch.json": {
+					content: DEBUG_LAUNCH_JSON_REMOTE,
+				},
+			},
+		},
+	);
+	await openNativeWorkspaceExplorer(page);
+	await connectMockSshSession(page, "example.com", "octocat");
+	await openRemoteFolderViaQuickPick(page, ["home", "octocat", "project"]);
+	await clearAllToasts(page);
+
+	const remoteRootIds = await page.evaluate(() =>
+		(
+			window as unknown as {
+				__PLAIN_TEST_REMOTE_ROOT_IDS__(): readonly string[];
+			}
+		).__PLAIN_TEST_REMOTE_ROOT_IDS__(),
+	);
+	expect(remoteRootIds).toHaveLength(1);
+	const remoteRootId = remoteRootIds[0]!;
+	expect(remoteRootId).not.toBe(nativeRootId);
+
+	expect(pageErrors).toEqual([]);
+	return { remoteRootId };
+}
+
+/** Drives "Plain: Start Debugging" through the multi-root picker (selecting
+ * the remote root by its own mock-assigned display name, "project" — the
+ * leaf segment of `/home/octocat/project`, see
+ * `browser-mock.ts`'s own `remoteMockDisplayName`), then the adapter
+ * confirmation dialog (trust is already granted by the caller's own setup,
+ * so no trust dialog appears — mirrors `startForRoot`'s identical shape in
+ * "Debug requires an explicit multi-root choice…"). A caller starting a
+ * *second* session against the same already-confirmed `(command, args,
+ * transport)` triple within the same page (no intervening navigation — see
+ * `resolveDebugAdapterConfirmation`'s own "already-confirmed" skip-dialog
+ * branch) correctly sees no dialog at all here; this function handles both
+ * outcomes. Returns the live session id once `debug_launch` has actually
+ * completed. */
+async function startRemoteDebugSession(page: Page): Promise<string> {
+	await openRunAndDebugView(page);
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Start Debugging",
+		"Plain: Start Debugging",
+	);
+	const palette = page.locator(".quick-input-widget");
+	await expect(palette.locator("input")).toHaveAttribute(
+		"placeholder",
+		"Select a workspace folder to debug",
+	);
+	const remoteRow = palette
+		.locator(".quick-input-list .monaco-list-row")
+		.filter({ hasText: "project" });
+	await expect(remoteRow).toHaveCount(1);
+	const launchCallsBefore = (await terminalCallsFor(page, "debug_launch"))
+		.length;
+	await remoteRow.click();
+	await expect(palette).toBeHidden();
+
+	const dialog = page.getByRole("dialog");
+	await expect
+		.poll(async () => {
+			if (await dialog.isVisible()) {
+				return true;
+			}
+			return (
+				(await terminalCallsFor(page, "debug_launch")).length >
+				launchCallsBefore
+			);
+		})
+		.toBe(true);
+	if (await dialog.isVisible()) {
+		await expect(dialog).toContainText('Run "/usr/bin/python3"?');
+		// `F220` S7 — the confirmation dialog's own "如实反映" of *where* this
+		// command is about to run, not merely a cosmetic label (see
+		// `debugAdapterConfirmationDetail`'s own doc comment).
+		await expect(dialog).toContainText(
+			"This command will run on the remote host for this workspace root, not on this machine.",
+		);
+		await dialog
+			.getByRole("button", { name: "Run Adapter", exact: true })
+			.click();
+		await expect(dialog).toHaveCount(0);
+	}
+
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_launch")).length)
+		.toBe(launchCallsBefore + 1);
+	return currentDebugSessionId(page);
+}
+
+test("F220 S7: full remote debug chain — launch.json read, root picker, remote-flavored confirmation, breakpoints, stopped, call stack/variables, disconnect", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	const { remoteRootId } = await openMixedLocalAndRemoteWorkspaceForDebug(
+		page,
+		{
+			stackFramesByThread: {
+				1: [
+					{
+						id: 1,
+						name: "main",
+						line: 6,
+						column: 5,
+						sourcePath: "main.py",
+						sourceName: "main.py",
+						instructionPointerReference: null,
+					},
+				],
+			},
+			scopesByFrame: {
+				1: [
+					{
+						name: "Locals",
+						variablesReference: 100,
+						namedVariables: 1,
+						indexedVariables: null,
+						expensive: false,
+					},
+				],
+			},
+			variablesByReference: {
+				100: [
+					{
+						name: "total",
+						value: "7",
+						type: "int",
+						variablesReference: 0,
+						namedVariables: null,
+						indexedVariables: null,
+					},
+				],
+			},
+		},
+	);
+
+	// launch.json 读取: a real `workspace_read_file` against the remote root,
+	// not a canned response — confirmed below via the real request shape.
+	// `openMixedLocalAndRemoteWorkspaceForDebug`'s own `openNativeWorkspaceExplorer`
+	// call already leaves Explorer as the active, visible view (a second
+	// click on its own activity-bar tab would toggle it closed instead).
+	const explorer = page.getByRole("tree", { name: "Files Explorer" });
+	await expect(explorer).toBeVisible();
+	await explorer
+		.getByRole("treeitem", { name: "main.py", exact: true })
+		.dblclick();
+	await expect(
+		page.getByRole("tab", { name: /^main\.py(?:,.*)?$/ }),
+	).toBeVisible();
+
+	// 配置选择 (root picker) + 确认门 (remote-flavored copy) — see
+	// `startRemoteDebugSession`'s own doc comment.
+	const sessionId = await startRemoteDebugSession(page);
+	const [launchCall] = await terminalCallsFor(page, "debug_launch");
+	expect(launchCall?.args.request).toMatchObject({
+		rootId: remoteRootId,
+		command: "/usr/bin/python3",
+		args: ["-m", "debugpy.adapter"],
+		adapterId: "python",
+		arguments: { program: "main.py" },
+	});
+	const launchReads = (
+		await terminalCallsFor(page, "workspace_read_file")
+	).filter(
+		(call) =>
+			(call.args.request as { relativePath?: string }).relativePath ===
+			".vscode/launch.json",
+	);
+	expect(
+		launchReads.some(
+			(call) =>
+				(call.args.request as { rootId?: string }).rootId === remoteRootId,
+		),
+	).toBe(true);
+
+	// 断点: a real glyph-margin click on the *remote* file syncs through the
+	// exact same `debug_set_breakpoints` request shape a local root uses,
+	// carrying the remote root's own id.
+	await clickGlyphMargin(page, "total = add(3, 4)");
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "debug_set_breakpoints")).length,
+		)
+		.toBe(1);
+	const [breakpointsCall] = await terminalCallsFor(
+		page,
+		"debug_set_breakpoints",
+	);
+	expect(breakpointsCall?.args.request).toEqual({
+		sessionId,
+		rootId: remoteRootId,
+		path: "main.py",
+		breakpoints: [
+			{ line: 6, condition: null, logMessage: null, hitCondition: null },
+		],
+	});
+	const glyph = page.locator(".plain-debug-breakpoint-glyph");
+	await expect(glyph).toHaveClass(/plain-debug-breakpoint-glyph-verified/);
+
+	// stopped → 调用栈/变量: a real `stopped` event drives a real
+	// `debug_stack_trace`/`debug_scopes`/`debug_variables` chain, rendering
+	// the seeded remote frame/scope/variable.
+	await emitDebugTestEvent(page, sessionId, "stopped", {
+		threadId: 1,
+		reason: "breakpoint",
+	});
+	await expect(
+		page.locator(".plain-debug-call-stack-view-frame-button"),
+	).toHaveText(["main (main.py:6)"]);
+	const tree = page.locator(".plain-debug-variables-view-tree");
+	const localsNode = tree
+		.locator(":scope > .plain-debug-variables-node")
+		.filter({ hasText: "Locals" });
+	await expect(localsNode).toHaveCount(1);
+	await localsNode
+		.locator(
+			":scope > .plain-debug-variables-row > .plain-debug-variables-toggle",
+		)
+		.click();
+	await expect(
+		localsNode.locator(
+			":scope > .plain-debug-variables-children > .plain-debug-variables-node",
+		),
+	).toHaveText(["total: 7 (int)"]);
+
+	// 断开: `Plain: Stop Debugging` tears the session down cleanly — no
+	// session-ended toast for a deliberate stop (see the next test for the
+	// distinct-notification half of this same contract).
+	await executePaletteCommand(page, "Stop Debugging", "Plain: Stop Debugging");
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_disconnect")).length)
+		.toBe(1);
+	expect(
+		await page.locator(".notifications-toasts .notification-toast").count(),
+	).toBe(0);
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("F220 S7: a mid-session remote disconnect shows the same distinct sessionEnded notification a local adapter crash would, never disguised as a deliberate stop", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await openMixedLocalAndRemoteWorkspaceForDebug(page);
+	const explorer = page.getByRole("tree", { name: "Files Explorer" });
+	await expect(explorer).toBeVisible();
+	await explorer
+		.getByRole("treeitem", { name: "main.py", exact: true })
+		.dblclick();
+	await expect(
+		page.getByRole("tab", { name: /^main\.py(?:,.*)?$/ }),
+	).toBeVisible();
+
+	const toasts = page.locator(".notifications-toasts .notification-toast");
+	const transportClosedToast = toasts.filter({
+		hasText: "the debug adapter's connection closed unexpectedly",
+	});
+
+	// Control, run first: a deliberate stop shows no such notification —
+	// proves the meaningful interaction below is a real, distinct signal,
+	// not this Workbench always toasting on session end.
+	await startRemoteDebugSession(page);
+	await executePaletteCommand(page, "Stop Debugging", "Plain: Stop Debugging");
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_disconnect")).length)
+		.toBe(1);
+	await expect(toasts).toHaveCount(0);
+
+	// Meaningful interaction: research doc S7's own "会话按既有 adapter-died
+	// 路径终结（reader EOF 语义）" — from the frontend's own perspective this
+	// is indistinguishable from a local adapter's transport closing, exactly
+	// the point: no separate remote-specific event/copy exists, or needs to.
+	const sessionId = await startRemoteDebugSession(page);
+	await emitDebugTestEvent(page, sessionId, "plain/sessionEnded", {
+		reason: "transportClosed",
+	});
+	await expect(transportClosedToast).toHaveCount(1);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("F220 S7: a tcp/tcpSpawn transport request against a remote root is rejected with the dedicated code, even bypassing the UI's own transport choice", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	const { remoteRootId } = await openMixedLocalAndRemoteWorkspaceForDebug(page);
+
+	// Grants the `tcp` identity's own confirmation first — proves the
+	// rejection below is the dedicated transport-level check, not merely an
+	// unconfirmed-subject rejection reusing the same error family.
+	// `debug_adapter_confirmation_grant`'s wire shape is `{request, rootId}`
+	// (`rootId` a sibling of `request`, not nested inside it — `F220` S7) —
+	// `directTauriInvoke` always wraps its whole payload as `{request}`, so
+	// this one call is built directly instead.
+	await page.evaluate(
+		({ rootId }) => {
+			const testWindow = window as unknown as {
+				__TAURI_INTERNALS__: {
+					invoke(command: string, args?: unknown): Promise<unknown>;
+				};
+			};
+			return testWindow.__TAURI_INTERNALS__.invoke(
+				"debug_adapter_confirmation_grant",
+				{
+					request: {
+						command: "/usr/bin/lldb-dap",
+						args: [],
+						transport: "tcp",
+					},
+					rootId,
+				},
+			);
+		},
+		{ rootId: remoteRootId },
+	);
+
+	const tcpError = (await page.evaluate(async (rootId) => {
+		const testWindow = window as unknown as {
+			__TAURI_INTERNALS__: {
+				invoke(command: string, args?: unknown): Promise<unknown>;
+			};
+		};
+		try {
+			await testWindow.__TAURI_INTERNALS__.invoke("debug_launch", {
+				request: {
+					rootId,
+					transport: "tcp",
+					command: "/usr/bin/lldb-dap",
+					args: [],
+					host: "127.0.0.1",
+					port: 5678,
+					adapterId: "lldb",
+					arguments: {},
+				},
+			});
+			return null;
+		} catch (error) {
+			return error as { code?: string; message?: string };
+		}
+	}, remoteRootId)) as { code?: string; message?: string } | null;
+	expect(tcpError?.code).toBe("DEBUG_REMOTE_TRANSPORT_UNSUPPORTED");
+	expect(tcpError?.code).not.toBe("ROOT_BACKEND_UNSUPPORTED");
+	expect(tcpError?.code).not.toBe("DEBUG_ADAPTER_NOT_CONFIRMED");
+
+	const tcpSpawnError = (await page.evaluate(async (rootId) => {
+		const testWindow = window as unknown as {
+			__TAURI_INTERNALS__: {
+				invoke(command: string, args?: unknown): Promise<unknown>;
+			};
+		};
+		try {
+			await testWindow.__TAURI_INTERNALS__.invoke("debug_launch", {
+				request: {
+					rootId,
+					transport: "tcpSpawn",
+					command: "/usr/bin/python3",
+					args: ["-m", "debugpy.adapter", "--listen"],
+					port: 5678,
+					adapterId: "python",
+					arguments: {},
+				},
+			});
+			return null;
+		} catch (error) {
+			return error as { code?: string; message?: string };
+		}
+	}, remoteRootId)) as { code?: string; message?: string } | null;
+	expect(tcpSpawnError?.code).toBe("DEBUG_REMOTE_TRANSPORT_UNSUPPORTED");
+
+	// Neither rejected attempt ever produced a live session — both raced
+	// entirely before `debug_launch`'s own `sessionId` allocation, so there
+	// is nothing for the frontend to have tracked.
+	const sessionIds = await page.evaluate(() =>
+		(
+			window as unknown as {
+				__PLAIN_TEST_DEBUG_SESSION_IDS__(): readonly string[];
+			}
+		).__PLAIN_TEST_DEBUG_SESSION_IDS__(),
+	);
+	expect(sessionIds).toEqual([]);
 
 	expect(pageErrors).toEqual([]);
 });

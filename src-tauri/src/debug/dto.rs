@@ -67,7 +67,14 @@ impl AdapterSpawnDescriptor {
     /// `transport` — the sole place this crate constructs one from a spawn
     /// descriptor, so [`super::exec::spawn_adapter`]/[`super::tcp::connect_adapter`]
     /// both call this rather than each hand-assembling the three fields
-    /// themselves.
+    /// themselves. Always builds the *local* identity
+    /// (`remote_host_fingerprint: None`) — `scripts/plain/boundary-contracts.mjs`'s
+    /// `validateDebugAdapterSpawnBoundary`/`validateDebugAdapterConnectBoundary`/
+    /// `validateDebugTcpCompanionSpawnBoundary` mechanically lock this exact
+    /// one-argument call shape at every local spawn/connect gate, so this
+    /// method's own signature never grew a `root_id`/fingerprint parameter —
+    /// see [`Self::confirmation_subject_remote`] (`F220` S7) for the sibling
+    /// constructor a *remote*-root gate uses instead.
     pub(crate) fn confirmation_subject(
         &self,
         transport: AdapterTransportKind,
@@ -76,6 +83,34 @@ impl AdapterSpawnDescriptor {
             command: self.command.clone(),
             args: self.args.clone(),
             transport,
+            remote_host_fingerprint: None,
+        }
+    }
+
+    /// `F220` S7 — the remote-root twin of [`Self::confirmation_subject`]:
+    /// identical `(command, args, transport)` identity, plus the live
+    /// session's own pinned host-key fingerprint folded into
+    /// `remote_host_fingerprint`. This is what keeps "confirmed locally" and
+    /// "confirmed on this remote host" as two independently-confirmable
+    /// identities even when `command`/`args`/`transport` are byte-for-byte
+    /// identical (see `docs/research/2026-08-05-ssh-remote-workspace.md`'s
+    /// S7 vertical-slice description: "确认三元组含「远程」维度…避免「本地确认
+    /// 过的命令」在远程免确认") — a workspace that happens to have both a
+    /// local and a remote root open at once must never let a confirmation
+    /// granted for one silently cover the other. Sole caller:
+    /// `remote::remote_dap`'s own trust → remote-context → confirmation gate
+    /// (mirroring, but not mechanically locked by, the same shape
+    /// [`Self::confirmation_subject`]'s local call sites use).
+    pub(crate) fn confirmation_subject_remote(
+        &self,
+        transport: AdapterTransportKind,
+        host_key_fingerprint: String,
+    ) -> AdapterConfirmationSubject {
+        AdapterConfirmationSubject {
+            command: self.command.clone(),
+            args: self.args.clone(),
+            transport,
+            remote_host_fingerprint: Some(host_key_fingerprint),
         }
     }
 }
@@ -127,10 +162,14 @@ pub enum AdapterTransportKind {
 
 /// The exact, precise identity the first-run confirmation gate is keyed on —
 /// "主导会话裁定" item 2's `(command 绝对路径, args 数组, transport)` triple,
-/// verbatim. Two subjects that differ in *any single field* are two distinct,
+/// verbatim, plus (`F220` S7) an optional fourth dimension for a remote-root
+/// launch. Two subjects that differ in *any single field* are two distinct,
 /// independently-confirmable identities — this is the whole safety property
 /// [`super::confirm::ConfirmationService`] exists to provide (a silently
-/// edited `command` must never inherit an earlier confirmation).
+/// edited `command` must never inherit an earlier confirmation, and — as of
+/// `F220` S7 — a command confirmed for local execution must never inherit a
+/// confirmation for running that exact same command on a remote host, or
+/// vice versa).
 ///
 /// Deliberately excludes `host`/`port` — see [`TcpConnectDescriptor`]'s own
 /// doc comment for why. This is also the wire shape the three
@@ -138,6 +177,28 @@ pub enum AdapterTransportKind {
 /// (camelCase, unknown fields rejected — the frontend confirmation resolver
 /// in `app/features/debug/plain-debug-adapter-confirmation.ts` sends exactly
 /// this shape).
+///
+/// # `remote_host_fingerprint` (`F220` S7)
+///
+/// `None` for a local root — every existing local confirmation (persisted
+/// before this slice, or granted after it for a local root) round-trips
+/// through this field as `None` unchanged, so no prior confirmation is
+/// invalidated by this addition. For a remote root, this carries the live
+/// session's own pinned host-key fingerprint (ADR 0006 §3) — the same stable,
+/// reconnect-surviving identity `workspace::RemoteRootContext::host_key_fingerprint`
+/// already is elsewhere in this codebase, deliberately **not** the
+/// session's own `sessionId` (a fresh value every reconnect — see ADR 0006
+/// §5 — which would force a needless re-confirmation on every reconnect to
+/// the exact same host) and **not** the caller's `rootId` (a fresh value
+/// every time a workspace is reopened, which would defeat "first-run"
+/// confirmation's whole point of surviving a restart). The three
+/// `debug_adapter_confirmation_*` Tauri commands never accept this field
+/// directly from the frontend (`#[serde(default)]`, always server-resolved —
+/// see `super::commands`'s own `resolve_confirmation_subject`): the frontend
+/// stays "无感" of which backend a root uses, exactly like every other
+/// remote-workspace-capable command surface in this codebase — it only ever
+/// supplies the `rootId` it already has, and Rust decides whether that root
+/// is local or remote.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
@@ -145,6 +206,8 @@ pub struct AdapterConfirmationSubject {
     pub command: String,
     pub args: Vec<String>,
     pub transport: AdapterTransportKind,
+    #[serde(default)]
+    pub remote_host_fingerprint: Option<String>,
 }
 
 // ---------------------------------------------------------------------

@@ -31,16 +31,21 @@ use std::thread::JoinHandle;
 use serde_json::Value;
 
 use crate::error::CommandError;
+use crate::remote::remote_dap;
+use crate::remote::session::RemoteSessionService;
 use crate::trust::service::TrustService;
 use crate::workspace::service::WorkspaceService;
-use crate::workspace::RootId;
+use crate::workspace::{RemoteRootContext, RootId};
 
 use super::confirm::ConfirmationService;
-use super::dto::{self, DebugSessionId, SessionTransportRequest};
+use super::dto::{self, AdapterTransportKind, DebugSessionId, SessionTransportRequest};
 use super::session::{
     self, DebugEventSink, DebugSession, HandshakeConfig, LaunchRequestKind, ReverseRequestHandler,
 };
-use super::{debug_request_failed, debug_session_not_found, debug_transport_unavailable};
+use super::{
+    debug_remote_transport_unsupported, debug_request_failed, debug_session_not_found,
+    debug_transport_unavailable,
+};
 
 /// Rust-authoritative live-session table, `.manage()`d exactly once by
 /// `lib.rs`. See the module doc for the overall shape.
@@ -93,9 +98,11 @@ impl DebugSessionService {
     /// `TcpSpawn`-transport request — see that method's own doc comment for
     /// why the budget is a parameter at all.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn start_session(
         &self,
         trust: &TrustService,
+        remote: &RemoteSessionService,
         workspace: &WorkspaceService,
         window_label: &str,
         root_id: RootId,
@@ -110,6 +117,7 @@ impl DebugSessionService {
     ) -> Result<(DebugSessionId, Value), CommandError> {
         self.start_session_with_tcp_spawn_budget(
             trust,
+            remote,
             workspace,
             window_label,
             root_id,
@@ -142,6 +150,7 @@ impl DebugSessionService {
     pub(crate) async fn start_session_with_tcp_spawn_budget_for_test(
         &self,
         trust: &TrustService,
+        remote: &RemoteSessionService,
         workspace: &WorkspaceService,
         window_label: &str,
         root_id: RootId,
@@ -157,6 +166,7 @@ impl DebugSessionService {
     ) -> Result<(DebugSessionId, Value), CommandError> {
         self.start_session_with_tcp_spawn_budget(
             trust,
+            remote,
             workspace,
             window_label,
             root_id,
@@ -173,10 +183,21 @@ impl DebugSessionService {
         .await
     }
 
+    /// `F220` S7 — before deciding which local transport variant `transport`
+    /// names, a remote-backed `root_id` routes to [`Self::start_remote_session`]
+    /// instead: mirrors `terminal::service::TerminalService::start`'s own
+    /// "remote_context first" dispatch precedent (that method's own doc
+    /// comment), trust-checked once, up front, for both branches — the same
+    /// acceptable trust/root-gate redundancy `git::remote_route::resolve_repo_route`'s
+    /// own doc comment already discloses (every local transport variant below
+    /// still independently re-checks trust via its own
+    /// `exec::spawn_adapter`/`tcp::connect_adapter`/`exec::spawn_adapter_as_tcp_companion`
+    /// gate, unchanged).
     #[allow(clippy::too_many_arguments)]
     async fn start_session_with_tcp_spawn_budget(
         &self,
         trust: &TrustService,
+        remote: &RemoteSessionService,
         workspace: &WorkspaceService,
         window_label: &str,
         root_id: RootId,
@@ -190,6 +211,26 @@ impl DebugSessionService {
         reverse_requests: Arc<dyn ReverseRequestHandler>,
         tcp_spawn_connect_budget: std::time::Duration,
     ) -> Result<(DebugSessionId, Value), CommandError> {
+        trust.require_trusted(workspace, window_label).await?;
+        if let Some(context) = workspace.remote_context(window_label, root_id)? {
+            return self
+                .start_remote_session(
+                    remote,
+                    workspace,
+                    window_label,
+                    root_id,
+                    context,
+                    confirmation,
+                    request,
+                    transport,
+                    adapter_id,
+                    arguments,
+                    breakpoints,
+                    sink,
+                    reverse_requests,
+                )
+                .await;
+        }
         let cancel = Arc::new(AtomicBool::new(false));
         let (reader, writer, teardown) = match transport {
             SessionTransportRequest::Stdio { command, args } => {
@@ -318,6 +359,122 @@ impl DebugSessionService {
             }
         };
 
+        self.finish_starting_session(
+            window_label,
+            root_id,
+            reader,
+            writer,
+            teardown,
+            request,
+            adapter_id,
+            arguments,
+            breakpoints,
+            sink,
+            reverse_requests,
+        )
+        .await
+    }
+
+    /// `F220` S7 — the remote-root twin of the local `match transport` block
+    /// in [`Self::start_session_with_tcp_spawn_budget`] (this method's sole
+    /// caller, which has already checked trust and resolved `context` before
+    /// reaching here): `Stdio` routes to `remote::remote_dap`'s exec-channel
+    /// adapter; `Tcp`/`TcpSpawn` fail closed with
+    /// [`debug_remote_transport_unsupported`] — research doc S7's own
+    /// "架构裁定 §4"/v1 narrowing (a remote root has no local loopback for
+    /// `Tcp` to connect to, and `TcpSpawn` requires spawning a *local*
+    /// companion process a remote exec channel cannot stand in for). The
+    /// confirmation subject is built with [`dto::AdapterSpawnDescriptor::confirmation_subject_remote`]
+    /// (never the plain [`dto::AdapterSpawnDescriptor::confirmation_subject`]
+    /// every local variant uses) — see that method's own doc comment for why
+    /// this keeps a remote launch's confirmation independently keyed from an
+    /// identical local one.
+    #[allow(clippy::too_many_arguments)]
+    async fn start_remote_session(
+        &self,
+        remote: &RemoteSessionService,
+        workspace: &WorkspaceService,
+        window_label: &str,
+        root_id: RootId,
+        context: RemoteRootContext,
+        confirmation: &ConfirmationService,
+        request: LaunchRequestKind,
+        transport: SessionTransportRequest,
+        adapter_id: String,
+        arguments: Value,
+        breakpoints: Vec<session::SourceBreakpoints>,
+        sink: Arc<dyn DebugEventSink>,
+        reverse_requests: Arc<dyn ReverseRequestHandler>,
+    ) -> Result<(DebugSessionId, Value), CommandError> {
+        let (command, args) = match transport {
+            SessionTransportRequest::Stdio { command, args } => (command, args),
+            SessionTransportRequest::Tcp { .. } | SessionTransportRequest::TcpSpawn { .. } => {
+                return Err(debug_remote_transport_unsupported());
+            }
+        };
+        let descriptor = dto::AdapterSpawnDescriptor { command, args };
+        let subject = descriptor.confirmation_subject_remote(
+            AdapterTransportKind::Stdio,
+            context.host_key_fingerprint.clone(),
+        );
+        confirmation
+            .require_confirmed(workspace, window_label, &subject)
+            .await?;
+
+        let handles = remote_dap::open_remote_dap_adapter_channel(
+            remote,
+            window_label,
+            context.session_id,
+            &context.base_path,
+            &descriptor.command,
+            &descriptor.args,
+        )
+        .await?;
+        let reader: Box<dyn Read + Send> = Box::new(handles.reader);
+        let writer: Box<dyn Write + Send> = Box::new(handles.writer);
+        let killer = Arc::new(handles.killer);
+        let teardown: Box<dyn Fn() + Send + Sync> = Box::new(move || killer.shutdown());
+
+        self.finish_starting_session(
+            window_label,
+            root_id,
+            reader,
+            writer,
+            teardown,
+            request,
+            adapter_id,
+            arguments,
+            breakpoints,
+            sink,
+            reverse_requests,
+        )
+        .await
+    }
+
+    /// Shared tail of both [`Self::start_session_with_tcp_spawn_budget`]'s
+    /// local match and [`Self::start_remote_session`]: starts the real
+    /// [`DebugSession`] over an already-connected `reader`/`writer`/
+    /// `teardown` triple (transport-agnostic from this point on — see
+    /// `debug::session`'s own module doc), runs the handshake, and — only
+    /// once `launch`/`attach` has actually succeeded — records the session in
+    /// this window's live table. A handshake failure tears the just-started
+    /// session down (`shutdown` + `join_reader`) before propagating the
+    /// error, exactly like the pre-`F220`-S7 inline version did.
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_starting_session(
+        &self,
+        window_label: &str,
+        root_id: RootId,
+        reader: Box<dyn Read + Send>,
+        writer: Box<dyn Write + Send>,
+        teardown: Box<dyn Fn() + Send + Sync>,
+        request: LaunchRequestKind,
+        adapter_id: String,
+        arguments: Value,
+        breakpoints: Vec<session::SourceBreakpoints>,
+        sink: Arc<dyn DebugEventSink>,
+        reverse_requests: Arc<dyn ReverseRequestHandler>,
+    ) -> Result<(DebugSessionId, Value), CommandError> {
         let session_id = DebugSessionId::new();
         let debug_session = DebugSession::start_with_reverse_requests(
             session_id,

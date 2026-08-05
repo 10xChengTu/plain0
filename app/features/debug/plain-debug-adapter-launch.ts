@@ -41,6 +41,7 @@
  * `debugAdapterConfirmationDetail`'s own doc comment.
  */
 
+import { isKnownRemoteRootId } from "../remote/plain-remote-workspace-commands";
 import {
 	parseDebugAdapterRegistry,
 	parseLaunchConfigurations,
@@ -83,6 +84,7 @@ export async function prepareDebugAdapterLaunch(
 	registryBytes: Uint8Array | null,
 	launchConfigurationBytes: Uint8Array,
 	configurationName: string,
+	rootId: string,
 ): Promise<DebugAdapterLaunchPreparation> {
 	const registryResult =
 		registryBytes === null
@@ -118,6 +120,7 @@ export async function prepareDebugAdapterLaunch(
 		return Object.freeze({ kind: "adapter-not-found", type: resolved.type });
 	}
 	const isSpawnThenConnect = resolved.descriptor.transport === "tcpSpawn";
+	const isRemoteRoot = isKnownRemoteRootId(rootId);
 	const decision = await resolveDebugAdapterConfirmation(
 		bridge,
 		dialogService,
@@ -127,6 +130,8 @@ export async function prepareDebugAdapterLaunch(
 				args: resolved.descriptor.args,
 				transport: isSpawnThenConnect ? "tcp" : resolved.descriptor.transport,
 			},
+			rootId,
+			isRemoteRoot,
 			configSource: resolved.configSource,
 			spawnBeforeConnect: isSpawnThenConnect,
 			port: isSpawnThenConnect ? resolved.descriptor.port : undefined,

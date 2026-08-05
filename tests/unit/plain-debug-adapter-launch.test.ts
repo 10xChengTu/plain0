@@ -50,6 +50,8 @@ const REGISTRY_BYTES = utf8(
 	]),
 );
 
+const FAKE_ROOT_ID = "00000000-0000-4000-8000-000000000001";
+
 function launchBytes(configurations: readonly unknown[]): Uint8Array {
 	return utf8(JSON.stringify({ configurations }));
 }
@@ -68,6 +70,7 @@ describe("prepareDebugAdapterLaunch", () => {
 			REGISTRY_BYTES,
 			launchBytes(configurations),
 			"Run",
+			FAKE_ROOT_ID,
 		);
 
 		expect(result).toEqual({
@@ -97,6 +100,7 @@ describe("prepareDebugAdapterLaunch", () => {
 			REGISTRY_BYTES,
 			launchBytes(configurations),
 			"Run",
+			FAKE_ROOT_ID,
 		);
 
 		expect(result.kind).toBe("ready");
@@ -122,6 +126,7 @@ describe("prepareDebugAdapterLaunch", () => {
 			REGISTRY_BYTES,
 			launchBytes(configurations),
 			"Run",
+			FAKE_ROOT_ID,
 		);
 
 		expect(result).toEqual({ kind: "declined" });
@@ -150,6 +155,7 @@ describe("prepareDebugAdapterLaunch", () => {
 			null,
 			launchBytes(configurations),
 			"Run",
+			FAKE_ROOT_ID,
 		);
 
 		expect(result).toEqual({
@@ -172,6 +178,7 @@ describe("prepareDebugAdapterLaunch", () => {
 			utf8("not json"),
 			launchBytes([{ type: "debugpy", request: "launch", name: "Run" }]),
 			"Run",
+			FAKE_ROOT_ID,
 		);
 		expect(result.kind).toBe("invalid-registry");
 	});
@@ -183,6 +190,7 @@ describe("prepareDebugAdapterLaunch", () => {
 			REGISTRY_BYTES,
 			utf8("not json"),
 			"Run",
+			FAKE_ROOT_ID,
 		);
 		expect(result.kind).toBe("invalid-launch-configuration");
 	});
@@ -194,6 +202,7 @@ describe("prepareDebugAdapterLaunch", () => {
 			REGISTRY_BYTES,
 			launchBytes([{ type: "debugpy", request: "launch", name: "Other" }]),
 			"Run",
+			FAKE_ROOT_ID,
 		);
 		expect(result).toEqual({ kind: "configuration-not-found", name: "Run" });
 	});
@@ -205,6 +214,7 @@ describe("prepareDebugAdapterLaunch", () => {
 			REGISTRY_BYTES,
 			launchBytes([{ type: "unknown-type", request: "launch", name: "Run" }]),
 			"Run",
+			FAKE_ROOT_ID,
 		);
 		expect(result).toEqual({ kind: "adapter-not-found", type: "unknown-type" });
 	});
@@ -247,6 +257,7 @@ describe("prepareDebugAdapterLaunch", () => {
 			null,
 			launchBytes(configurations),
 			"Run",
+			FAKE_ROOT_ID,
 		);
 
 		expect(result).toEqual({
@@ -287,6 +298,7 @@ describe("prepareDebugAdapterLaunch", () => {
 			null,
 			launchBytes([{ type: "debugpy", request: "launch", name: "Run" }]),
 			"Run",
+			FAKE_ROOT_ID,
 		);
 		expect(result).toEqual({ kind: "adapter-not-found", type: "debugpy" });
 	});

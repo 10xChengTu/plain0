@@ -2441,21 +2441,34 @@ export interface PlainBridge {
 	 * `src-tauri/src/debug/confirm.rs`'s module doc and
 	 * `app/features/debug/plain-debug-adapter-confirmation.ts`'s
 	 * `resolveDebugAdapterConfirmation`. `false`, never a rejection, for the
-	 * `EMPTY` workspace. */
+	 * `EMPTY` workspace. `rootId` (`F220` S7) is the workspace root this
+	 * launch config targets — Rust alone decides whether that root is local
+	 * or remote and folds a live remote root's own host-key fingerprint into
+	 * the confirmation identity server-side
+	 * (`src-tauri/src/debug/dto.rs`'s `AdapterConfirmationSubject::remote_host_fingerprint`);
+	 * the frontend never learns or sends that fingerprint itself, staying
+	 * exactly as backend-agnostic about `rootId` as every other remote-
+	 * workspace-capable command surface in this codebase. */
 	debugAdapterConfirmationState(
 		descriptor: DebugAdapterConfirmationSubject,
+		rootId: string,
 	): Promise<DebugAdapterConfirmationState>;
 	/** Persists confirmation for the exact triple, scoped to the current
 	 * workspace's stable roots identity. Rejects with
-	 * `DEBUG_ADAPTER_CONFIRMATION_UNAVAILABLE` for the `EMPTY` workspace. */
+	 * `DEBUG_ADAPTER_CONFIRMATION_UNAVAILABLE` for the `EMPTY` workspace. See
+	 * `debugAdapterConfirmationState`'s own doc comment for `rootId`'s role
+	 * (`F220` S7). */
 	debugAdapterConfirmationGrant(
 		descriptor: DebugAdapterConfirmationSubject,
+		rootId: string,
 	): Promise<void>;
 	/** Revokes a previously granted confirmation for the exact triple.
 	 * Idempotent — revoking a triple that was never (or no longer) confirmed
-	 * succeeds silently. */
+	 * succeeds silently. See `debugAdapterConfirmationState`'s own doc
+	 * comment for `rootId`'s role (`F220` S7). */
 	debugAdapterConfirmationRevoke(
 		descriptor: DebugAdapterConfirmationSubject,
+		rootId: string,
 	): Promise<void>;
 	/** `F100` S3: starts a new debug session by sending DAP's `launch` request
 	 * against `target`, with `adapterId` becoming `initialize`'s

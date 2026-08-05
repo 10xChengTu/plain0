@@ -49,6 +49,7 @@ fn subject(
         command: command.to_owned(),
         args: args.iter().map(|arg| (*arg).to_owned()).collect(),
         transport,
+        remote_host_fingerprint: None,
     }
 }
 

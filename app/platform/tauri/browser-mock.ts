@@ -198,6 +198,7 @@ import {
 	decodeDebugAdapterConfirmationState,
 	decodeDebugAdapterConfirmationVoid,
 	frozenDebugAdapterConfirmationRequest,
+	frozenDebugAdapterConfirmationRootId,
 	frozenDebugDisassembleRequest,
 	frozenDebugEvaluateRequest,
 	frozenDebugOutputAckRequest,
@@ -6163,13 +6164,23 @@ export function createBrowserMockBridge(
 	 * every mocked window shares one fixture-global fake workspace already,
 	 * matching `terminalTrusted`'s identical simplification). */
 	const debugAdapterConfirmations = new Set<string>();
+	/** `F220` S7 — folds `rootId`'s own local/remote identity into the key,
+	 * mirroring `src-tauri/src/debug/dto.rs`'s
+	 * `AdapterConfirmationSubject::remote_host_fingerprint`: `null` for a
+	 * local root (byte-identical to the pre-S7 key, so every existing local
+	 * confirmation test keeps passing unchanged), the bound remote session's
+	 * own `hostKeyFingerprint` for a remote one — see `remoteRootBindings`'s
+	 * own doc comment for why that value (not `sessionId`/`rootId`) is the
+	 * stable dimension used here. */
 	function debugAdapterConfirmationKey(
 		descriptor: DebugAdapterConfirmationSubject,
+		rootId: string,
 	): string {
 		return JSON.stringify([
 			descriptor.command,
 			descriptor.args,
 			descriptor.transport,
+			remoteRootBindings.get(rootId)?.hostKeyFingerprint ?? null,
 		]);
 	}
 	function debugAdapterConfirmationUnavailable(): CommandError {
@@ -6192,6 +6203,18 @@ export function createBrowserMockBridge(
 		return commandError(
 			"DEBUG_SESSION_NOT_FOUND",
 			"The requested debug session does not exist for this window.",
+		);
+	}
+
+	/** `F220` S7 — mirrors `src-tauri/src/debug/mod.rs`'s
+	 * `debug_remote_transport_unsupported`: a `tcp`/`tcpSpawn` transport
+	 * request naming a remote-backed root fails closed with this dedicated
+	 * code, never silently downgraded to `stdio` and never the generic
+	 * `ROOT_BACKEND_UNSUPPORTED`. */
+	function debugRemoteTransportUnsupported(): CommandError {
+		return commandError(
+			"DEBUG_REMOTE_TRANSPORT_UNSUPPORTED",
+			"TCP and TCP-spawn debug adapter transports are not supported for a remote workspace root; only the stdio (exec-channel) transport is supported.",
 		);
 	}
 
@@ -6446,19 +6469,36 @@ export function createBrowserMockBridge(
 		if (!roots.has(request.rootId as string)) {
 			throw rootNotAuthorized();
 		}
+		const wireTransport = request.transport as "stdio" | "tcp" | "tcpSpawn";
+		// `F220` S7 — a remote-backed root routes before any confirmation
+		// check, exactly like `debug::service::DebugSessionService::start_session_with_tcp_spawn_budget`'s
+		// own `workspace.remote_context` dispatch: `tcp`/`tcpSpawn` fail
+		// closed for a remote root; `stdio` proceeds to the exact same
+		// confirmation/session-creation path below (only the confirmation
+		// key's own remote dimension differs — see
+		// `debugAdapterConfirmationKey`'s own doc comment).
+		if (
+			(wireTransport === "tcp" || wireTransport === "tcpSpawn") &&
+			remoteRootBindings.has(request.rootId as string)
+		) {
+			throw debugRemoteTransportUnsupported();
+		}
 		// `F210` S6 — a `"tcpSpawn"` request is confirmed under the *same*
 		// `"tcp"` identity a plain `"tcp"` request uses (see
 		// `plain-debug-adapter-launch.ts`'s own `prepareDebugAdapterLaunch`
 		// doc comment, and `src-tauri/src/debug/exec.rs`'s
 		// `spawn_adapter_as_tcp_companion` for the real Rust side of this
 		// same mapping) — never a third, distinct confirmation identity.
-		const wireTransport = request.transport as "stdio" | "tcp" | "tcpSpawn";
 		const subject: DebugAdapterConfirmationSubject = Object.freeze({
 			command: request.command as string,
 			args: request.args as readonly string[],
 			transport: wireTransport === "tcpSpawn" ? "tcp" : wireTransport,
 		});
-		if (!debugAdapterConfirmations.has(debugAdapterConfirmationKey(subject))) {
+		if (
+			!debugAdapterConfirmations.has(
+				debugAdapterConfirmationKey(subject, request.rootId as string),
+			)
+		) {
 			throw debugAdapterNotConfirmed();
 		}
 		if (wireTransport === "tcpSpawn") {
@@ -9989,31 +10029,47 @@ export function createBrowserMockBridge(
 			gitWorktreeDirtyPaths.delete(request.path);
 			return "removed";
 		},
-		async debugAdapterConfirmationState(descriptor) {
+		async debugAdapterConfirmationState(descriptor, rootId) {
 			const request = frozenDebugAdapterConfirmationRequest(descriptor);
+			const resolvedRootId = frozenDebugAdapterConfirmationRootId(rootId);
+			if (roots.size === 0) {
+				return decodeDebugAdapterConfirmationState({ confirmed: false });
+			}
+			if (!roots.has(resolvedRootId)) {
+				throw rootNotAuthorized();
+			}
 			return decodeDebugAdapterConfirmationState({
-				confirmed:
-					roots.size === 0
-						? false
-						: debugAdapterConfirmations.has(
-								debugAdapterConfirmationKey(request),
-							),
+				confirmed: debugAdapterConfirmations.has(
+					debugAdapterConfirmationKey(request, resolvedRootId),
+				),
 			});
 		},
-		async debugAdapterConfirmationGrant(descriptor) {
+		async debugAdapterConfirmationGrant(descriptor, rootId) {
 			if (roots.size === 0) {
 				throw debugAdapterConfirmationUnavailable();
 			}
 			const request = frozenDebugAdapterConfirmationRequest(descriptor);
-			debugAdapterConfirmations.add(debugAdapterConfirmationKey(request));
+			const resolvedRootId = frozenDebugAdapterConfirmationRootId(rootId);
+			if (!roots.has(resolvedRootId)) {
+				throw rootNotAuthorized();
+			}
+			debugAdapterConfirmations.add(
+				debugAdapterConfirmationKey(request, resolvedRootId),
+			);
 			decodeDebugAdapterConfirmationVoid(null);
 		},
-		async debugAdapterConfirmationRevoke(descriptor) {
+		async debugAdapterConfirmationRevoke(descriptor, rootId) {
 			if (roots.size === 0) {
 				throw debugAdapterConfirmationUnavailable();
 			}
 			const request = frozenDebugAdapterConfirmationRequest(descriptor);
-			debugAdapterConfirmations.delete(debugAdapterConfirmationKey(request));
+			const resolvedRootId = frozenDebugAdapterConfirmationRootId(rootId);
+			if (!roots.has(resolvedRootId)) {
+				throw rootNotAuthorized();
+			}
+			debugAdapterConfirmations.delete(
+				debugAdapterConfirmationKey(request, resolvedRootId),
+			);
 			decodeDebugAdapterConfirmationVoid(null);
 		},
 		async debugLaunch(rootId, target, adapterId, launchArguments) {

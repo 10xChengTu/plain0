@@ -23066,44 +23066,47 @@ const DEBUG_COMMAND_CONTRACTS = Object.freeze([
 		file: "src-tauri/src/debug/commands.rs",
 		name: "debug_adapter_confirmation_state",
 		parameters:
-			"window:WebviewWindow,confirmation:State<'_,ConfirmationService>,workspace:State<'_,WorkspaceService>,request:AdapterConfirmationSubject",
+			"window:WebviewWindow,confirmation:State<'_,ConfirmationService>,workspace:State<'_,WorkspaceService>,request:AdapterConfirmationSubject,root_id:RootId",
 		returnType: "->Result<DebugAdapterConfirmationState,CommandError>",
-		body: "letconfirmed=confirmation.inner().is_confirmed(workspace.inner(),window.label(),&request).await?;Ok(DebugAdapterConfirmationState::new(confirmed))",
+		body: "letsubject=resolve_confirmation_subject(workspace.inner(),window.label(),root_id,request)?;letconfirmed=confirmation.inner().is_confirmed(workspace.inner(),window.label(),&subject).await?;Ok(DebugAdapterConfirmationState::new(confirmed))",
 	},
 	{
 		file: "src-tauri/src/debug/commands.rs",
 		name: "debug_adapter_confirmation_grant",
 		parameters:
-			"window:WebviewWindow,confirmation:State<'_,ConfirmationService>,workspace:State<'_,WorkspaceService>,request:AdapterConfirmationSubject",
+			"window:WebviewWindow,confirmation:State<'_,ConfirmationService>,workspace:State<'_,WorkspaceService>,request:AdapterConfirmationSubject,root_id:RootId",
 		returnType: "->Result<(),CommandError>",
-		body: "confirmation.inner().grant(workspace.inner(),window.label(),&request).await",
+		body: "letsubject=resolve_confirmation_subject(workspace.inner(),window.label(),root_id,request)?;confirmation.inner().grant(workspace.inner(),window.label(),&subject).await",
 	},
 	{
 		file: "src-tauri/src/debug/commands.rs",
 		name: "debug_adapter_confirmation_revoke",
 		parameters:
-			"window:WebviewWindow,confirmation:State<'_,ConfirmationService>,workspace:State<'_,WorkspaceService>,request:AdapterConfirmationSubject",
+			"window:WebviewWindow,confirmation:State<'_,ConfirmationService>,workspace:State<'_,WorkspaceService>,request:AdapterConfirmationSubject,root_id:RootId",
 		returnType: "->Result<(),CommandError>",
-		body: "confirmation.inner().revoke(workspace.inner(),window.label(),&request).await",
+		body: "letsubject=resolve_confirmation_subject(workspace.inner(),window.label(),root_id,request)?;confirmation.inner().revoke(workspace.inner(),window.label(),&subject).await",
 	},
 	// `F100` S2 — the real session-lifecycle surface (`debug/mod.rs`'s own
 	// module doc), completing the command set S1's `commands.rs` module doc
-	// already named as what S2 would add.
+	// already named as what S2 would add. `F220` S7 added `remote:
+	// State<'_, RemoteSessionService>` to `debug_launch`/`debug_attach` —
+	// `DebugSessionService::start_session`'s own new remote-dispatch
+	// parameter (`debug/service.rs`'s own module doc).
 	{
 		file: "src-tauri/src/debug/commands.rs",
 		name: "debug_launch",
 		parameters:
-			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,confirmation:State<'_,ConfirmationService>,request:DebugSessionStartRequest",
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,confirmation:State<'_,ConfirmationService>,remote:State<'_,RemoteSessionService>,request:DebugSessionStartRequest",
 		returnType: "->Result<DebugSessionStartResult,CommandError>",
-		body: "start_debug_session(window,debug_sessions,trust,workspace,confirmation,request,LaunchRequestKind::Launch,).await",
+		body: "start_debug_session(window,debug_sessions,trust,workspace,confirmation,remote,request,LaunchRequestKind::Launch,).await",
 	},
 	{
 		file: "src-tauri/src/debug/commands.rs",
 		name: "debug_attach",
 		parameters:
-			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,confirmation:State<'_,ConfirmationService>,request:DebugSessionStartRequest",
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,confirmation:State<'_,ConfirmationService>,remote:State<'_,RemoteSessionService>,request:DebugSessionStartRequest",
 		returnType: "->Result<DebugSessionStartResult,CommandError>",
-		body: "start_debug_session(window,debug_sessions,trust,workspace,confirmation,request,LaunchRequestKind::Attach,).await",
+		body: "start_debug_session(window,debug_sessions,trust,workspace,confirmation,remote,request,LaunchRequestKind::Attach,).await",
 	},
 	{
 		file: "src-tauri/src/debug/commands.rs",
@@ -23426,12 +23429,12 @@ const DEBUG_ADAPTER_CONFIRMATION_BRIDGE_METHOD_AUDITS = Object.freeze([
 	Object.freeze({
 		bridgeMethod: "debugAdapterConfirmationState",
 		containingMethod: "resolveDebugAdapterConfirmation",
-		argumentTexts: Object.freeze(["request.subject"]),
+		argumentTexts: Object.freeze(["request.subject", "request.rootId"]),
 	}),
 	Object.freeze({
 		bridgeMethod: "debugAdapterConfirmationGrant",
 		containingMethod: "resolveDebugAdapterConfirmation",
-		argumentTexts: Object.freeze(["request.subject"]),
+		argumentTexts: Object.freeze(["request.subject", "request.rootId"]),
 	}),
 ]);
 
@@ -23780,7 +23783,10 @@ function validateDebugAdapterConfirmationModuleFace(source) {
 			statement.name?.text === "resolveDebugAdapterConfirmation",
 	);
 	const expectedResolveBody = `{
-		const state = await bridge.debugAdapterConfirmationState(request.subject);
+		const state = await bridge.debugAdapterConfirmationState(
+			request.subject,
+			request.rootId,
+		);
 		if (state.confirmed) {
 			return Object.freeze({ kind: "already-confirmed" });
 		}
@@ -23792,7 +23798,7 @@ function validateDebugAdapterConfirmationModuleFace(source) {
 		if (!confirmation.confirmed) {
 			return Object.freeze({ kind: "declined" });
 		}
-		await bridge.debugAdapterConfirmationGrant(request.subject);
+		await bridge.debugAdapterConfirmationGrant(request.subject, request.rootId);
 		return Object.freeze({ kind: "confirmed" });
 	}`.replaceAll(/\s+/g, "");
 	if (
@@ -23868,6 +23874,7 @@ function validateDebugAdapterLaunchGuardedCall(source) {
 			return Object.freeze({ kind: "adapter-not-found", type: resolved.type });
 		}
 		const isSpawnThenConnect = resolved.descriptor.transport === "tcpSpawn";
+		const isRemoteRoot = isKnownRemoteRootId(rootId);
 		const decision = await resolveDebugAdapterConfirmation(
 			bridge,
 			dialogService,
@@ -23877,6 +23884,8 @@ function validateDebugAdapterLaunchGuardedCall(source) {
 					args: resolved.descriptor.args,
 					transport: isSpawnThenConnect ? "tcp" : resolved.descriptor.transport,
 				},
+				rootId,
+				isRemoteRoot,
 				configSource: resolved.configSource,
 				spawnBeforeConnect: isSpawnThenConnect,
 				port: isSpawnThenConnect ? resolved.descriptor.port : undefined,
@@ -25370,20 +25379,31 @@ export function validateRemoteCommandRegistration(rustSources) {
  * `remote::remote_git`'s own module doc): mirrors
  * `validateRemoteSshLibraryOwnershipBoundary`'s identical "single-owner
  * token" discipline, applied to `shell_escape::encode_posix_command_line`
- * (and the `shell_escape` module path itself) instead of `russh`. Only
- * `remote/remote_git.rs` may call the encoder or reference the module by
- * path — every other file in the crate, *including* every other file inside
- * `remote/` itself (the SFTP/terminal/session machinery has no business
- * building a shell command line at all), is mechanically forbidden from
- * doing either. This is what stands between "an argv array" and "a
- * hand-rolled shell string built by whichever file feels like it" — without
- * this guard, a future edit could add a second, unaudited call site that
- * concatenates a caller-supplied string into a command line without ever
- * routing it through the one audited, hostile-matrix-tested encoder.
+ * (and the `shell_escape` module path itself) instead of `russh`. Only the
+ * two files in [`SHELL_ESCAPE_CALLER_PATHS`] may call the encoder or
+ * reference the module by path — every other file in the crate, *including*
+ * every other file inside `remote/` itself (the SFTP/terminal/session
+ * machinery has no business building a shell command line at all), is
+ * mechanically forbidden from doing either. This is what stands between "an
+ * argv array" and "a hand-rolled shell string built by whichever file feels
+ * like it" — without this guard, a future edit could add a second,
+ * unaudited call site that concatenates a caller-supplied string into a
+ * command line without ever routing it through the one audited, hostile-
+ * matrix-tested encoder. `F220` S7 widened the caller set from a single file
+ * to this closed two-file list: `remote::remote_dap` needs the identical
+ * `cd '<dir>' && exec '<program>' '<args…>'` command-line shape for both
+ * launching a remote DAP adapter over a plain `exec` channel and routing a
+ * `runInTerminal` reverse request to a `pty-req`+`exec` channel
+ * (`remote::remote_dap`'s own module doc) — a second, independently audited
+ * caller, not a loosening of the "only one place builds this string" intent.
  */
+const SHELL_ESCAPE_CALLER_PATHS = Object.freeze([
+	"src-tauri/src/remote/remote_git.rs",
+	"src-tauri/src/remote/remote_dap.rs",
+]);
+
 export function validateShellEscapeSoleCallerBoundary(rustSources) {
 	const failures = [];
-	const soleCallerPath = "src-tauri/src/remote/remote_git.rs";
 	const soleOwnerPath = "src-tauri/src/remote/shell_escape.rs";
 	// The encoder's own hostile-matrix test file, `shell_escape/tests.rs` —
 	// calling `encode_posix_command_line` directly is the entire point of
@@ -25398,6 +25418,7 @@ export function validateShellEscapeSoleCallerBoundary(rustSources) {
 	const encodeCallPattern =
 		/(?<![A-Za-z0-9_])encode_posix_command_line(?![A-Za-z0-9_])/;
 	const modulePathPattern = /(?<![A-Za-z0-9_])shell_escape(?![A-Za-z0-9_])/;
+	const callerPathsLabel = SHELL_ESCAPE_CALLER_PATHS.join(" or ");
 
 	for (const { relativePath, source } of rustSources) {
 		const normalizedPath = relativePath.replaceAll("\\", "/");
@@ -25410,17 +25431,17 @@ export function validateShellEscapeSoleCallerBoundary(rustSources) {
 		const executable = stripRustCommentsAndLiterals(source);
 		const referencesEncoder = encodeCallPattern.test(executable);
 
-		if (normalizedPath === soleCallerPath) {
+		if (SHELL_ESCAPE_CALLER_PATHS.includes(normalizedPath)) {
 			if (!referencesEncoder) {
 				failures.push(
-					`${soleCallerPath} must call shell_escape::encode_posix_command_line — it is this crate's sole audited exec-command-line builder`,
+					`${normalizedPath} must call shell_escape::encode_posix_command_line — it is one of this crate's sole audited exec-command-line builders`,
 				);
 			}
 			continue;
 		}
 		if (referencesEncoder) {
 			failures.push(
-				`${normalizedPath} must not call encode_posix_command_line — every SSH exec command line must be built exclusively by ${soleCallerPath}`,
+				`${normalizedPath} must not call encode_posix_command_line — every SSH exec command line must be built exclusively by ${callerPathsLabel}`,
 			);
 			continue;
 		}
@@ -25432,7 +25453,7 @@ export function validateShellEscapeSoleCallerBoundary(rustSources) {
 		}
 		if (modulePathPattern.test(executable)) {
 			failures.push(
-				`${normalizedPath} must not reference the shell_escape module — only ${soleCallerPath} may call into it`,
+				`${normalizedPath} must not reference the shell_escape module — only ${callerPathsLabel} may call into it`,
 			);
 		}
 	}

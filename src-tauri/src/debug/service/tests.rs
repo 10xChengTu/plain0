@@ -42,6 +42,7 @@ use crate::debug::session::{
     DebugEventSink, LaunchRequestKind, ReverseRequestHandler, ReverseRequestOutcome,
     SessionEndReason,
 };
+use crate::remote::session::RemoteSessionService;
 use crate::terminal::service::{TerminalOutputSink, TerminalService};
 use crate::trust::service::TrustService;
 use crate::workspace::dto::WorkspacePickRootsMode;
@@ -84,6 +85,7 @@ struct TestRunInTerminalHandler {
     terminal: std::sync::Arc<TerminalService>,
     trust: std::sync::Arc<TrustService>,
     workspace: std::sync::Arc<WorkspaceService>,
+    remote: std::sync::Arc<RemoteSessionService>,
     window_label: String,
     root_id: RootId,
     sink: std::sync::Arc<dyn TerminalOutputSink>,
@@ -103,6 +105,7 @@ impl ReverseRequestHandler for TestRunInTerminalHandler {
             &self.terminal,
             &self.trust,
             &self.workspace,
+            &self.remote,
             &self.window_label,
             self.root_id,
             arguments,
@@ -184,9 +187,19 @@ struct TrustedConfirmedFixture {
     _root: TempDir,
     _trust_base: TempDir,
     _confirm_base: TempDir,
+    _remote_base: TempDir,
     workspace: WorkspaceService,
     trust: TrustService,
     confirmation: ConfirmationService,
+    /// `F220` S7 — every existing (local-root) test in this file passes this
+    /// through unused: `DebugSessionService::start_session`'s new `remote`
+    /// parameter is only ever consulted for a *remote*-backed `root_id` (see
+    /// `DebugSessionService::start_session_with_tcp_spawn_budget`'s own
+    /// `workspace.remote_context` dispatch) — a freshly constructed, never-
+    /// connected [`RemoteSessionService`] is exactly as inert here as an
+    /// unused `&TrustService`/`&WorkspaceService` reference would be for a
+    /// code path that never reaches it.
+    remote: RemoteSessionService,
     root_id: RootId,
 }
 
@@ -198,6 +211,7 @@ fn trusted_and_confirmed(
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let confirm_base = TempDir::new().unwrap();
+    let remote_base = TempDir::new().unwrap();
     let workspace = workspace_with_root(window_label, root.path());
     let trust = TrustService::new(trust_base.path().to_path_buf());
     block_on(trust.grant(&workspace, window_label)).expect("grant succeeds");
@@ -208,14 +222,17 @@ fn trusted_and_confirmed(
         &descriptor.confirmation_subject(transport),
     ))
     .expect("confirmation grant succeeds");
+    let remote = RemoteSessionService::new(remote_base.path().to_path_buf());
     let root_id = root_id_at(&workspace, window_label, 0);
     TrustedConfirmedFixture {
         _root: root,
         _trust_base: trust_base,
         _confirm_base: confirm_base,
+        _remote_base: remote_base,
         workspace,
         trust,
         confirmation,
+        remote,
         root_id,
     }
 }
@@ -597,6 +614,7 @@ fn debug_launch_over_a_real_spawned_stdio_process_drives_the_full_handshake_end_
 
     let result = block_on(service.start_session(
         &fixture.trust,
+        &fixture.remote,
         &fixture.workspace,
         window_label,
         fixture.root_id,
@@ -638,6 +656,368 @@ fn debug_launch_over_a_real_spawned_stdio_process_drives_the_full_handshake_end_
     assert_eq!(service.session_count_for_test(window_label), 0);
 }
 
+/// `F220` S7 — every fixture piece a remote-root `DebugSessionService::start_session`
+/// hermetic test needs alive for its duration: a real loopback sshd serving
+/// eagerly-spawned `exec` requests (`test_support::DapExecFixture`), the
+/// `RemoteSessionService` connected to it, and a `WorkspaceService` whose one
+/// root is authorized as `RemoteSsh` against that exact live session (never
+/// the test-only `authorize_remote_root_for_test`, which mints an
+/// unconnected random session id — this must be the *real* one the exec
+/// channel actually opens against).
+struct RemoteDebugFixture {
+    _remote_base: TempDir,
+    _repo_dir: TempDir,
+    _trust_base: TempDir,
+    _confirm_base: TempDir,
+    remote: RemoteSessionService,
+    workspace: WorkspaceService,
+    trust: TrustService,
+    confirmation: ConfirmationService,
+    root_id: RootId,
+    host_key_fingerprint: String,
+    session_id: crate::remote::dto::RemoteSessionId,
+}
+
+/// `grant_trust`/`grant_confirmation` are independent switches so
+/// untrusted-workspace and unconfirmed-subject rejection tests can each start
+/// from an otherwise-identical, fully-wired remote root.
+fn remote_debug_fixture(
+    window_label: &str,
+    descriptor: &AdapterSpawnDescriptor,
+    grant_trust: bool,
+    grant_confirmation: bool,
+) -> RemoteDebugFixture {
+    let remote_base = TempDir::new().unwrap();
+    let remote = RemoteSessionService::new(remote_base.path().to_path_buf());
+    let identity = crate::remote::test_support::generate_key();
+    let fixture = block_on(crate::remote::test_support::start_dap_exec_fixture(
+        &identity,
+    ));
+    let session_id = block_on(crate::remote::test_support::connect_dap_exec_test_session(
+        &remote,
+        window_label,
+        &fixture,
+    ));
+    let host_key_fingerprint = remote
+        .session_host_key_fingerprint(window_label, session_id)
+        .expect("a just-connected session reports its own live fingerprint");
+
+    // The hermetic fixture's "remote" host is this same test machine (see
+    // `test_support::DapExecTestSshHandler`'s own doc comment) — a real,
+    // existing local directory is what `cd '<base_path>' && exec …` needs to
+    // succeed against.
+    let repo_dir = TempDir::new().unwrap();
+    let canonical_base_path = std::fs::canonicalize(repo_dir.path())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let trust_base = TempDir::new().unwrap();
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    let workspace = WorkspaceService::new();
+    let (root_id, _snapshot) = workspace
+        .authorize_remote_root(
+            window_label,
+            session_id,
+            &host_key_fingerprint,
+            &canonical_base_path,
+            "remote-debug-test-root",
+        )
+        .expect("remote root authorizes against the real live session");
+    if grant_trust {
+        block_on(trust.grant(&workspace, window_label)).expect("grant succeeds");
+    }
+
+    let confirm_base = TempDir::new().unwrap();
+    let confirmation = ConfirmationService::new(confirm_base.path().to_path_buf());
+    if grant_confirmation {
+        let subject = descriptor
+            .confirmation_subject_remote(AdapterTransportKind::Stdio, host_key_fingerprint.clone());
+        block_on(confirmation.grant(&workspace, window_label, &subject))
+            .expect("remote confirmation grant succeeds");
+    }
+
+    RemoteDebugFixture {
+        _remote_base: remote_base,
+        _repo_dir: repo_dir,
+        _trust_base: trust_base,
+        _confirm_base: confirm_base,
+        remote,
+        workspace,
+        trust,
+        confirmation,
+        root_id,
+        host_key_fingerprint,
+        session_id,
+    }
+}
+
+/// `F220` S7 — the remote-root twin of
+/// `debug_launch_over_a_real_spawned_stdio_process_drives_the_full_handshake_end_to_end`:
+/// the exact same real Python mock adapter script, but launched over a real
+/// SSH `exec` channel against a real loopback sshd instead of a local
+/// `Command::spawn`, driven through the exact same production
+/// `DebugSessionService::start_session` entry point (`SessionTransportRequest::Stdio`
+/// — the frontend never distinguishes "local" from "remote" transport
+/// requests; only `root_id`'s own backend decides). Proves the full chain:
+/// trust → remote-context dispatch → remote confirmation gate → real exec
+/// channel → real handshake → a real runtime `setBreakpoints` sync → the
+/// adapter's own post-handshake `stopped` event → a clean disconnect leaving
+/// zero sessions.
+#[test]
+fn debug_launch_over_a_real_remote_exec_channel_drives_the_full_handshake_breakpoints_and_stopped_event(
+) {
+    let Some(python3) = resolve_python3() else {
+        eprintln!(
+            "skipping debug_launch_over_a_real_remote_exec_channel_drives_the_full_handshake_breakpoints_and_stopped_event: \
+             python3 not found via `command -v python3`; cannot construct the real remote mock adapter subprocess"
+        );
+        return;
+    };
+    let descriptor = AdapterSpawnDescriptor {
+        command: python3.to_string_lossy().into_owned(),
+        args: vec!["-c".to_owned(), PYTHON_MOCK_ADAPTER_SCRIPT.to_owned()],
+    };
+    let window_label = "main";
+    let fixture = remote_debug_fixture(window_label, &descriptor, true, true);
+    let service = DebugSessionService::new();
+    let (sink, sink_for_session) = recording_sink();
+
+    let result = block_on(service.start_session(
+        &fixture.trust,
+        &fixture.remote,
+        &fixture.workspace,
+        window_label,
+        fixture.root_id,
+        &fixture.confirmation,
+        LaunchRequestKind::Launch,
+        SessionTransportRequest::Stdio {
+            command: descriptor.command.clone(),
+            args: descriptor.args.clone(),
+        },
+        "mock-python".to_owned(),
+        json!({"program": "does-not-matter.py"}),
+        Vec::new(),
+        sink_for_session,
+        noop_reverse_requests(),
+    ));
+
+    let (session_id, capabilities) =
+        result.expect("a real remote exec-channel adapter completes the full handshake");
+    assert_eq!(
+        capabilities
+            .get("supportsConfigurationDoneRequest")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(service.session_count_for_test(window_label), 1);
+
+    let breakpoints_body = block_on(service.send_request_for_root(
+        window_label,
+        session_id,
+        fixture.root_id,
+        "setBreakpoints",
+        json!({
+            "source": { "path": "main.py" },
+            "breakpoints": [{ "line": 6 }],
+        }),
+    ))
+    .expect("setBreakpoints succeeds over the real remote channel");
+    assert_eq!(
+        breakpoints_body
+            .get("breakpoints")
+            .and_then(Value::as_array)
+            .and_then(|entries| entries.first())
+            .and_then(|entry| entry.get("verified"))
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+
+    assert!(
+        wait_until(
+            || sink
+                .events_snapshot()
+                .iter()
+                .any(|(id, name, _)| *id == session_id && name == "stopped"),
+            Duration::from_secs(5)
+        ),
+        "expected the real remote subprocess's post-handshake `stopped` event to be forwarded"
+    );
+
+    block_on(service.disconnect(window_label, session_id)).expect("disconnect succeeds");
+    assert_eq!(service.session_count_for_test(window_label), 0);
+}
+
+/// `F220` S7 — research doc "架构裁定 §4"/v1 narrowing: a `tcp`/`tcpSpawn`
+/// transport request against a remote root fails closed with the dedicated
+/// `DEBUG_REMOTE_TRANSPORT_UNSUPPORTED` code — never silently downgraded to
+/// `stdio`, never the generic `ROOT_BACKEND_UNSUPPORTED`, and (proven here by
+/// never granting the `tcp` confirmation identity at all) rejected *before*
+/// the confirmation gate, not because of it.
+#[test]
+fn debug_launch_rejects_tcp_and_tcp_spawn_transports_for_a_remote_root() {
+    let descriptor = AdapterSpawnDescriptor {
+        command: "/usr/bin/lldb-dap".to_owned(),
+        args: Vec::new(),
+    };
+    let window_label = "main";
+    let fixture = remote_debug_fixture(window_label, &descriptor, true, false);
+    let service = DebugSessionService::new();
+    let (_sink, sink_for_session) = recording_sink();
+
+    let tcp_result = block_on(service.start_session(
+        &fixture.trust,
+        &fixture.remote,
+        &fixture.workspace,
+        window_label,
+        fixture.root_id,
+        &fixture.confirmation,
+        LaunchRequestKind::Launch,
+        SessionTransportRequest::Tcp {
+            command: descriptor.command.clone(),
+            args: descriptor.args.clone(),
+            host: "127.0.0.1".to_owned(),
+            port: 5678,
+        },
+        "lldb".to_owned(),
+        json!({}),
+        Vec::new(),
+        std::sync::Arc::clone(&sink_for_session),
+        noop_reverse_requests(),
+    ));
+    let tcp_error = tcp_result.expect_err("tcp transport must be rejected for a remote root");
+    assert_eq!(tcp_error.code(), "DEBUG_REMOTE_TRANSPORT_UNSUPPORTED");
+
+    let tcp_spawn_result = block_on(service.start_session(
+        &fixture.trust,
+        &fixture.remote,
+        &fixture.workspace,
+        window_label,
+        fixture.root_id,
+        &fixture.confirmation,
+        LaunchRequestKind::Launch,
+        SessionTransportRequest::TcpSpawn {
+            command: descriptor.command.clone(),
+            args: descriptor.args.clone(),
+            port: 5678,
+        },
+        "lldb".to_owned(),
+        json!({}),
+        Vec::new(),
+        sink_for_session,
+        noop_reverse_requests(),
+    ));
+    let tcp_spawn_error =
+        tcp_spawn_result.expect_err("tcpSpawn transport must be rejected for a remote root");
+    assert_eq!(tcp_spawn_error.code(), "DEBUG_REMOTE_TRANSPORT_UNSUPPORTED");
+
+    assert_eq!(service.session_count_for_test(window_label), 0);
+}
+
+/// `F220` S7 — an untrusted workspace fails closed before ever reaching the
+/// remote-context dispatch, the confirmation gate, or the SSH exec channel —
+/// exactly like `spawn_adapter`'s own local trust gate, now proven for the
+/// remote branch specifically.
+#[test]
+fn debug_launch_over_a_remote_root_fails_closed_when_the_workspace_is_untrusted() {
+    let descriptor = AdapterSpawnDescriptor {
+        command: "/usr/bin/python3".to_owned(),
+        args: vec!["-m".to_owned(), "debugpy.adapter".to_owned()],
+    };
+    let window_label = "main";
+    // Neither trust nor confirmation granted — trust must fail first.
+    let fixture = remote_debug_fixture(window_label, &descriptor, false, false);
+    let service = DebugSessionService::new();
+    let (_sink, sink_for_session) = recording_sink();
+
+    let result = block_on(service.start_session(
+        &fixture.trust,
+        &fixture.remote,
+        &fixture.workspace,
+        window_label,
+        fixture.root_id,
+        &fixture.confirmation,
+        LaunchRequestKind::Launch,
+        SessionTransportRequest::Stdio {
+            command: descriptor.command.clone(),
+            args: descriptor.args.clone(),
+        },
+        "python".to_owned(),
+        json!({}),
+        Vec::new(),
+        sink_for_session,
+        noop_reverse_requests(),
+    ));
+    let error = result.expect_err("an untrusted workspace must never reach the exec channel");
+    assert_eq!(error.code(), "WORKSPACE_NOT_TRUSTED");
+    assert_eq!(service.session_count_for_test(window_label), 0);
+}
+
+/// `F220` S7 — the exact `(command, args, transport)` triple confirmed for a
+/// *local* root must not silently cover the identical triple on a *remote*
+/// one: `AdapterConfirmationSubject::remote_host_fingerprint` is an
+/// independent dimension of the confirmation key (see that field's own doc
+/// comment). Reuses `remote_debug_fixture`'s already-live remote session, but
+/// grants confirmation only under the *local*-shaped subject (no
+/// `remote_host_fingerprint`) — a real `start_session` attempt against the
+/// remote root must still report `DEBUG_ADAPTER_NOT_CONFIRMED`.
+#[test]
+fn a_confirmation_granted_for_the_local_identity_does_not_cover_the_identical_remote_one() {
+    let descriptor = AdapterSpawnDescriptor {
+        command: "/usr/bin/python3".to_owned(),
+        args: vec!["-m".to_owned(), "debugpy.adapter".to_owned()],
+    };
+    let window_label = "main";
+    let fixture = remote_debug_fixture(window_label, &descriptor, true, false);
+    // Grants the *local* identity only — mirrors exactly what
+    // `descriptor.confirmation_subject(AdapterTransportKind::Stdio)` (the
+    // plain local constructor `exec::spawn_adapter` itself uses) produces.
+    block_on(fixture.confirmation.grant(
+        &fixture.workspace,
+        window_label,
+        &descriptor.confirmation_subject(AdapterTransportKind::Stdio),
+    ))
+    .expect("local-shaped confirmation grant succeeds");
+
+    let service = DebugSessionService::new();
+    let (_sink, sink_for_session) = recording_sink();
+    let result = block_on(service.start_session(
+        &fixture.trust,
+        &fixture.remote,
+        &fixture.workspace,
+        window_label,
+        fixture.root_id,
+        &fixture.confirmation,
+        LaunchRequestKind::Launch,
+        SessionTransportRequest::Stdio {
+            command: descriptor.command.clone(),
+            args: descriptor.args.clone(),
+        },
+        "python".to_owned(),
+        json!({}),
+        Vec::new(),
+        sink_for_session,
+        noop_reverse_requests(),
+    ));
+    let error = result
+        .expect_err("a local-only confirmation grant must not satisfy the remote root's own gate");
+    assert_eq!(error.code(), "DEBUG_ADAPTER_NOT_CONFIRMED");
+
+    // Sanity check on the fixture itself: the *remote*-shaped subject really
+    // is a different key from the one just granted (never coincidentally the
+    // same JSON) — `fixture.host_key_fingerprint` is not empty for this real
+    // connected session, so this is a real, non-trivial second identity.
+    assert!(!fixture.host_key_fingerprint.is_empty());
+    assert_ne!(
+        descriptor.confirmation_subject(AdapterTransportKind::Stdio),
+        descriptor.confirmation_subject_remote(
+            AdapterTransportKind::Stdio,
+            fixture.host_key_fingerprint.clone()
+        ),
+    );
+    let _ = fixture.session_id;
+}
+
 /// `F100` S3: the interactive debugging surface (`send_request` — the
 /// generic seam `debug_set_breakpoints`/`debug_stack_trace`/`debug_scopes`/
 /// `debug_variables`/`debug_evaluate` all resolve to), exercised end to end
@@ -673,6 +1053,7 @@ fn interactive_debugging_commands_work_end_to_end_over_a_real_spawned_stdio_proc
 
     let (session_id, _capabilities) = block_on(service.start_session(
         &fixture.trust,
+        &fixture.remote,
         &fixture.workspace,
         window_label,
         fixture.root_id,
@@ -880,6 +1261,7 @@ fn step_control_commands_send_their_own_distinct_dap_command_and_surface_a_not_s
 
     let (session_id, _capabilities) = block_on(service.start_session(
         &fixture.trust,
+        &fixture.remote,
         &fixture.workspace,
         window_label,
         fixture.root_id,
@@ -1128,6 +1510,7 @@ fn run_in_terminal_reverse_request_spawns_a_real_terminal_service_session_with_n
     let selected_root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let confirm_base = TempDir::new().unwrap();
+    let remote_base = TempDir::new().unwrap();
     // `Arc`-wrapped (unlike `trusted_and_confirmed`'s own owned fields) —
     // `TestRunInTerminalHandler` must outlive this function's own call to
     // `start_session` (a reverse request can arrive at any later point in
@@ -1154,6 +1537,7 @@ fn run_in_terminal_reverse_request_spawns_a_real_terminal_service_session_with_n
         &descriptor.confirmation_subject(AdapterTransportKind::Stdio),
     ))
     .expect("confirmation grant succeeds");
+    let remote = std::sync::Arc::new(RemoteSessionService::new(remote_base.path().to_path_buf()));
 
     let service = DebugSessionService::new();
     let (sink, sink_for_session) = recording_sink();
@@ -1168,6 +1552,7 @@ fn run_in_terminal_reverse_request_spawns_a_real_terminal_service_session_with_n
             terminal: std::sync::Arc::clone(&terminal),
             trust: std::sync::Arc::clone(&trust),
             workspace: std::sync::Arc::clone(&workspace),
+            remote: std::sync::Arc::clone(&remote),
             window_label: window_label.to_owned(),
             root_id: selected_root_id,
             sink: terminal_sink_for_handler,
@@ -1175,6 +1560,7 @@ fn run_in_terminal_reverse_request_spawns_a_real_terminal_service_session_with_n
 
     let (session_id, _capabilities) = block_on(service.start_session(
         &trust,
+        &remote,
         &workspace,
         window_label,
         selected_root_id,
@@ -1385,6 +1771,7 @@ fn debug_launch_over_a_real_tcp_socket_drives_the_full_handshake_end_to_end() {
 
     let result = block_on(service.start_session(
         &fixture.trust,
+        &fixture.remote,
         &fixture.workspace,
         window_label,
         fixture.root_id,
@@ -1457,6 +1844,7 @@ fn close_window_tears_down_every_live_session_and_the_peer_observes_the_connecti
 
     let (_session_id, _capabilities) = block_on(service.start_session(
         &fixture.trust,
+        &fixture.remote,
         &fixture.workspace,
         window_label,
         fixture.root_id,
@@ -1490,17 +1878,20 @@ fn start_session_still_requires_confirmation_before_ever_attempting_to_connect()
     let root = TempDir::new().unwrap();
     let trust_base = TempDir::new().unwrap();
     let confirm_base = TempDir::new().unwrap();
+    let remote_base = TempDir::new().unwrap();
     let window_label = "main";
     let workspace = workspace_with_root(window_label, root.path());
     let trust = TrustService::new(trust_base.path().to_path_buf());
     block_on(trust.grant(&workspace, window_label)).expect("grant succeeds");
     // Deliberately never confirmed.
     let confirmation = ConfirmationService::new(confirm_base.path().to_path_buf());
+    let remote = RemoteSessionService::new(remote_base.path().to_path_buf());
 
     let service = DebugSessionService::new();
     let (_sink, sink_for_session) = recording_sink();
     let result = block_on(service.start_session(
         &trust,
+        &remote,
         &workspace,
         window_label,
         root_id_at(&workspace, window_label, 0),
@@ -1722,6 +2113,7 @@ fn tcp_spawn_completes_the_handshake_over_a_delayed_listener_and_tears_down_both
     let start = Instant::now();
     let result = block_on(service.start_session(
         &fixture.trust,
+        &fixture.remote,
         &fixture.workspace,
         window_label,
         fixture.root_id,
@@ -1828,6 +2220,7 @@ fn tcp_spawn_fails_immediately_with_the_exited_code_when_the_companion_exits_bef
 
     let result = block_on(service.start_session(
         &fixture.trust,
+        &fixture.remote,
         &fixture.workspace,
         window_label,
         fixture.root_id,
@@ -1889,6 +2282,7 @@ fn tcp_spawn_kills_the_never_listening_companion_and_reports_timed_out_once_the_
     let start = Instant::now();
     let result = block_on(service.start_session_with_tcp_spawn_budget_for_test(
         &fixture.trust,
+        &fixture.remote,
         &fixture.workspace,
         window_label,
         fixture.root_id,
@@ -1985,6 +2379,7 @@ fn start_real_python_session(
     let (sink, sink_for_session) = recording_sink();
     let (session_id, _capabilities) = block_on(service.start_session(
         &fixture.trust,
+        &fixture.remote,
         &fixture.workspace,
         window_label,
         fixture.root_id,

@@ -249,6 +249,27 @@ export function frozenDebugAdapterConfirmationRequest(
 }
 
 /**
+ * `F220` S7 — validates the `rootId` sent alongside every
+ * `debug_adapter_confirmation_*` request: the workspace root a launch config
+ * targets, forwarded opaquely (never inspected by this codec) so Rust alone
+ * can resolve whether that root is local or remote — see
+ * `src-tauri/src/debug/dto.rs`'s `AdapterConfirmationSubject::remote_host_fingerprint`
+ * doc comment. Same exact-UUID-v4 validation as [`frozenRootId`] below, kept
+ * as its own exported function (rather than reusing that one directly) so
+ * this shape's own violation is reported under
+ * `DEBUG_ADAPTER_CONFIRMATION_INVALID_REQUEST`, not
+ * `DEBUG_SESSION_REQUEST_INVALID` — the two wire shapes this file's own
+ * `frozenDebugAdapterConfirmationRequest`/`frozenDebugSessionStartRequest`
+ * already keep independently validated and independently erroring.
+ */
+export function frozenDebugAdapterConfirmationRootId(value: unknown): string {
+	if (!isUuidV4(value)) {
+		return debugAdapterConfirmationRequestInvalid();
+	}
+	return value;
+}
+
+/**
  * Decodes a `debug_adapter_confirmation_state` response: an own-data,
  * exactly `{ confirmed }` object — mirrors
  * `terminal-codec.ts`'s `decodeWorkspaceTrustState`.

@@ -60,12 +60,15 @@ function fakeDialogService(confirmed: boolean): {
 	};
 }
 
+const FAKE_ROOT_ID = "00000000-0000-4000-8000-000000000001";
+
 const STDIO_REQUEST: DebugAdapterConfirmationRequest = {
 	subject: {
 		command: "/usr/bin/python3",
 		args: ["-m", "debugpy.adapter"],
 		transport: "stdio",
 	},
+	rootId: FAKE_ROOT_ID,
 	configSource: ".plain/debug-adapters.json",
 };
 
@@ -75,6 +78,7 @@ const TCP_REQUEST: DebugAdapterConfirmationRequest = {
 		args: ["--tcp-server-port=0"],
 		transport: "tcp",
 	},
+	rootId: FAKE_ROOT_ID,
 	configSource: ".vscode/launch.json (inline plainAdapter override)",
 };
 
@@ -88,6 +92,7 @@ const TCP_SPAWN_REQUEST: DebugAdapterConfirmationRequest = {
 		args: ["-m", "debugpy.adapter", "--listen"],
 		transport: "tcp",
 	},
+	rootId: FAKE_ROOT_ID,
 	configSource: ".plain/debug-adapters.json",
 	spawnBeforeConnect: true,
 	port: 5678,
@@ -123,6 +128,30 @@ describe("debugAdapterConfirmationMessage/Detail", () => {
 		const detail = debugAdapterConfirmationDetail(TCP_REQUEST);
 		expect(detail).toContain("TCP");
 		expect(detail).toContain(TCP_REQUEST.configSource);
+	});
+
+	// `F220` S7 — a real, visible fact distinguishing a remote-root
+	// confirmation from a local one; absent entirely for the ordinary local
+	// case (`isRemoteRoot` unset on every other fixture in this file).
+	it("names the remote host when isRemoteRoot is set, and omits that notice entirely otherwise", () => {
+		const localDetail = debugAdapterConfirmationDetail(STDIO_REQUEST);
+		expect(localDetail).not.toContain("remote host");
+
+		const remoteRequest: DebugAdapterConfirmationRequest = {
+			...STDIO_REQUEST,
+			isRemoteRoot: true,
+		};
+		const remoteDetail = debugAdapterConfirmationDetail(remoteRequest);
+		expect(remoteDetail).toContain(
+			"This command will run on the remote host for this workspace root, not on this machine.",
+		);
+		// The message (the dialog's short title) is deliberately unaffected —
+		// only the detail body grows the extra notice, mirroring how
+		// spawnBeforeConnect's own extra semantics are also detail-only for
+		// everything except the loopback target itself.
+		expect(debugAdapterConfirmationMessage(remoteRequest)).toBe(
+			debugAdapterConfirmationMessage(STDIO_REQUEST),
+		);
 	});
 
 	it("states the spawn-then-connect semantics (start command AND connect to the fixed loopback port) when spawnBeforeConnect is set", () => {

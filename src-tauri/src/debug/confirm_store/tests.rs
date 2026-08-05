@@ -21,6 +21,7 @@ fn subject(
         command: command.to_owned(),
         args: args.iter().map(|arg| (*arg).to_owned()).collect(),
         transport,
+        remote_host_fingerprint: None,
     }
 }
 
@@ -124,6 +125,32 @@ fn every_component_of_the_triple_independently_changes_the_key() {
     assert_ne!(base_key, confirmation_key(&different_command).unwrap());
     assert_ne!(base_key, confirmation_key(&different_args).unwrap());
     assert_ne!(base_key, confirmation_key(&different_transport).unwrap());
+}
+
+/// `F220` S7: the exact same `(command, args, transport)` triple confirmed
+/// for local execution must not be confused with the identical triple on a
+/// remote host — and two different remote hosts must not share a
+/// confirmation either. See `AdapterConfirmationSubject::remote_host_fingerprint`'s
+/// own doc comment for why the fingerprint (not `sessionId`/`rootId`) is the
+/// dimension used here.
+#[test]
+fn remote_host_fingerprint_independently_changes_the_key() {
+    let local = subject(
+        "/usr/bin/python3",
+        &["-m", "debugpy.adapter"],
+        AdapterTransportKind::Stdio,
+    );
+    let mut remote_one = local.clone();
+    remote_one.remote_host_fingerprint = Some("SHA256:one".to_owned());
+    let mut remote_two = local.clone();
+    remote_two.remote_host_fingerprint = Some("SHA256:two".to_owned());
+
+    let local_key = confirmation_key(&local).unwrap();
+    let remote_one_key = confirmation_key(&remote_one).unwrap();
+    let remote_two_key = confirmation_key(&remote_two).unwrap();
+    assert_ne!(local_key, remote_one_key);
+    assert_ne!(local_key, remote_two_key);
+    assert_ne!(remote_one_key, remote_two_key);
 }
 
 /// A naive delimiter-joined key would collide here (`command="a"`,

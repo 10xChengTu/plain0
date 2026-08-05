@@ -487,6 +487,26 @@ pub(crate) fn debug_run_in_terminal_arguments_invalid() -> &'static str {
      are otherwise malformed."
 }
 
+/// `F220` S7 — returned by
+/// [`service::DebugSessionService::start_session`] when a `Tcp`/`TcpSpawn`
+/// transport request names a remote-backed root. Research doc S7's own
+/// "架构裁定 §4"/垂直切片 description narrows v1 remote debugging to the
+/// `Stdio`-shaped exec-channel transport only (`remote::remote_dap`); a
+/// remote root has no local loopback of its own for `Tcp` to connect out to,
+/// and `TcpSpawn` additionally requires spawning a *local* companion process
+/// (`exec::spawn_adapter_as_tcp_companion`) that a remote root's own exec
+/// channel cannot stand in for. Fails closed with this dedicated code — never
+/// silently downgraded to `Stdio`, never the generic `ROOT_BACKEND_UNSUPPORTED`
+/// (this is a `debug`-domain-specific, actionable rejection, not a generic
+/// backend-capability gap).
+pub(crate) fn debug_remote_transport_unsupported() -> CommandError {
+    CommandError::new(
+        "DEBUG_REMOTE_TRANSPORT_UNSUPPORTED",
+        "TCP and TCP-spawn debug adapter transports are not supported for a remote workspace \
+         root; only the stdio (exec-channel) transport is supported.",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -494,9 +514,9 @@ mod tests {
         debug_adapter_not_confirmed, debug_adapter_response_malformed,
         debug_adapter_spawn_unavailable, debug_adapter_startup_crashed,
         debug_adapter_tcp_companion_connect_timed_out, debug_adapter_tcp_companion_exited,
-        debug_handshake_failed, debug_request_failed, debug_request_timed_out,
-        debug_run_in_terminal_arguments_invalid, debug_session_ended, debug_session_not_found,
-        debug_session_request_invalid, debug_transport_unavailable,
+        debug_handshake_failed, debug_remote_transport_unsupported, debug_request_failed,
+        debug_request_timed_out, debug_run_in_terminal_arguments_invalid, debug_session_ended,
+        debug_session_not_found, debug_session_request_invalid, debug_transport_unavailable,
     };
 
     #[test]
@@ -555,6 +575,10 @@ mod tests {
         assert_eq!(
             debug_adapter_tcp_companion_connect_timed_out().code(),
             "DEBUG_ADAPTER_TCP_COMPANION_CONNECT_TIMED_OUT"
+        );
+        assert_eq!(
+            debug_remote_transport_unsupported().code(),
+            "DEBUG_REMOTE_TRANSPORT_UNSUPPORTED"
         );
     }
 

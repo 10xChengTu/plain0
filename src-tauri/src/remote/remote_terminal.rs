@@ -282,6 +282,72 @@ pub(crate) async fn open_remote_terminal_channel(
     cols: u16,
     rows: u16,
 ) -> Result<RemoteTerminalHandles, CommandError> {
+    open_remote_terminal_channel_with(
+        remote,
+        window_label,
+        session_id,
+        RemoteTerminalStart::Shell,
+        cols,
+        rows,
+    )
+    .await
+}
+
+/// `F220` S7 — the `runInTerminal`-launched-program twin of
+/// [`open_remote_terminal_channel`]: drives the same `pty-req` sequencing but
+/// follows it with `exec` instead of `request_shell`, running `command_line`
+/// directly rather than an interactive login shell. `command_line` is an
+/// already shell-escaped, ready-to-send command string — `remote::remote_dap`
+/// (the sole caller) is the only file in this crate permitted to build one
+/// (`scripts/plain/boundary-contracts.mjs`'s `validateShellEscapeSoleCallerBoundary`);
+/// this module itself never imports `shell_escape` and has no opinion on what
+/// the string contains, exactly mirroring `remote::remote_git`'s own
+/// "this module builds the argv, `shell_escape` encodes it, only the sole
+/// caller ever sees the encoder" split. Every other piece of this module's
+/// channel machinery — backpressure, kill grace, exit-outcome typing — is
+/// reused unchanged via [`open_remote_terminal_channel_with`].
+pub(crate) async fn open_remote_terminal_exec_channel(
+    remote: &RemoteSessionService,
+    window_label: &str,
+    session_id: RemoteSessionId,
+    command_line: &str,
+    cols: u16,
+    rows: u16,
+) -> Result<RemoteTerminalHandles, CommandError> {
+    open_remote_terminal_channel_with(
+        remote,
+        window_label,
+        session_id,
+        RemoteTerminalStart::Exec(command_line),
+        cols,
+        rows,
+    )
+    .await
+}
+
+/// Which second channel request [`open_remote_terminal_channel_with`] sends
+/// after `pty-req` succeeds — see [`open_remote_terminal_channel`]/
+/// [`open_remote_terminal_exec_channel`]'s own doc comments for what each
+/// variant is for.
+enum RemoteTerminalStart<'a> {
+    Shell,
+    Exec(&'a str),
+}
+
+/// Shared implementation behind [`open_remote_terminal_channel`]/
+/// [`open_remote_terminal_exec_channel`] — everything except which second
+/// channel request follows `pty-req` is byte-for-byte identical between the
+/// two, so this is the one place that shape (channel open → `pty-req` →
+/// `expect_success` → second request → `expect_success` → split → spawn
+/// [`pump`] → wire the five handles) is ever assembled.
+async fn open_remote_terminal_channel_with(
+    remote: &RemoteSessionService,
+    window_label: &str,
+    session_id: RemoteSessionId,
+    start: RemoteTerminalStart<'_>,
+    cols: u16,
+    rows: u16,
+) -> Result<RemoteTerminalHandles, CommandError> {
     let mut channel = remote
         .open_terminal_session_channel(window_label, session_id)
         .await
@@ -307,10 +373,20 @@ pub(crate) async fn open_remote_terminal_channel(
         .map_err(|_| super::remote_terminal_unavailable())?;
     expect_success(&mut channel).await?;
 
-    channel
-        .request_shell(true)
-        .await
-        .map_err(|_| super::remote_terminal_unavailable())?;
+    match start {
+        RemoteTerminalStart::Shell => {
+            channel
+                .request_shell(true)
+                .await
+                .map_err(|_| super::remote_terminal_unavailable())?;
+        }
+        RemoteTerminalStart::Exec(command_line) => {
+            channel
+                .exec(true, command_line.as_bytes().to_vec())
+                .await
+                .map_err(|_| super::remote_terminal_unavailable())?;
+        }
+    }
     expect_success(&mut channel).await?;
 
     let (read_half, write_half) = channel.split();
