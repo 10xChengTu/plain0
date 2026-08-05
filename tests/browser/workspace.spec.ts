@@ -3601,7 +3601,35 @@ async function installNativeIpcMock(
 						}
 						const frame = plb2Frame(args);
 						if (frame.rootId !== rootId) {
-							throw new Error("Backup targeted a foreign browser-test root.");
+							// `F220` S3B: a real dirty edit against a
+							// `remote_workspace_add_root`-authorized root now reaches
+							// this fixture's `backup_write` handler exactly like any
+							// other authorized root would in production (Rust's own
+							// `backup_write` validates against the currently
+							// authorized root set without a backend restriction —
+							// see `F160` S0's progress notes). This single-root
+							// fixture's own `backupEntries`/`PLA2` read-all encoding
+							// predates multi-root support, and hot-exit restoration
+							// parity for remote roots is an open `F220` S4 question,
+							// not this slice's — so a known remote root's backup is
+							// accepted and dropped here (not persisted, not
+							// replayed by `backup_read_all`) rather than thrown as a
+							// "foreign root", which would otherwise fail every real
+							// Ctrl+S against a remote root. Anything outside both the
+							// fixed native root and every authorized remote root
+							// still fails closed exactly as before.
+							if (!remoteRootTrees.has(frame.rootId)) {
+								throw new Error("Backup targeted a foreign browser-test root.");
+							}
+							calls.push({
+								command,
+								args: {
+									rootId: frame.rootId,
+									key: frame.key,
+									contentHex: hexFromBytes(frame.content),
+								},
+							});
+							return null;
 						}
 						calls.push({
 							command,
@@ -4280,8 +4308,21 @@ async function installNativeIpcMock(
 							const discard = args.request as
 								{ rootId?: string; key?: string } | undefined;
 							const key = discard?.key;
-							if (discard?.rootId !== rootId || typeof key !== "string") {
+							if (typeof key !== "string") {
 								throw new Error("Malformed backup_discard test request.");
+							}
+							if (discard?.rootId !== rootId) {
+								// `F220` S3B: mirrors `backup_write`'s own remote-root
+								// branch just above — a real save against a remote
+								// root discards its (never actually persisted by this
+								// fixture) backup too, so this must not throw.
+								if (
+									typeof discard?.rootId !== "string" ||
+									!remoteRootTrees.has(discard.rootId)
+								) {
+									throw new Error("Malformed backup_discard test request.");
+								}
+								return null;
 							}
 							backupEntries.delete(key);
 							persistBackupEntries();
@@ -25636,6 +25677,95 @@ test("Plain: Disconnect SSH Session… lists the live session, disconnects it, a
 // "Plain: Open Remote Folder…") is new.
 // ---------------------------------------------------------------------
 
+/**
+ * `F220` S3B regression pin. `F220` S3's own report diagnosed a
+ * `runMutation`-authorized *remote* root's non-editability as a defect
+ * somewhere in `WorkspaceTopologyCoordinator.runMutation()` or
+ * `@codingame/monaco-vscode-configuration-service-override`'s
+ * `reinitializeWorkspace()` — reasoning that every *local* mid-session
+ * root-add scenario instead goes through the native-OS-picker-backed
+ * "Workspaces: Add Folder to Workspace…" built-in command. That premise was
+ * wrong: `addRootFolder`'s own handler (`app/features/workspace/
+ * commands.ts`) calls `topologyCoordinator.runMutation()` too — the exact
+ * same function "Plain: Open Remote Folder…" calls. Both paths were always
+ * identical at the coordinator level.
+ *
+ * The real cause was this Browser suite's own fixture: every remote-root
+ * test below configured `installNativeIpcMock(page, …, "readonly", …)`.
+ * `workspace_capabilities`'s mock response ties `delete`/`trash` to that
+ * `mode`; `createPlainWorkspaceMutationPolicy`
+ * (`app/features/workspace/file-system-provider.ts`) requires
+ * `create && renameNoReplace && copyMove && delete && versionedWrite` before
+ * granting `allowsMutationDispatch`, so `mode: "readonly"` makes the
+ * *single, shared* `plain-workspace://` `IFileSystemProvider` (registered
+ * once in `main.ts`, serving every root regardless of backend, per ADR
+ * 0007's deliberately backend-opaque `rootId`) provider-wide
+ * `FileSystemProviderCapabilities.Readonly`. Vendor
+ * `FilesConfigurationService.isReadonly()` (`@codingame/monaco-vscode-api`'s
+ * `filesConfigurationService.js`) checks that provider-wide capability
+ * *before* ever consulting a specific file's own stat — so every file under
+ * the scheme becomes non-editable, and Explorer's "New File…"/"New
+ * Folder…" toolbar actions (gated by the same capability) stay disabled,
+ * regardless of whether the root in question is local or remote, or which
+ * command authorized it. In production, `workspace_capabilities()`
+ * (`src-tauri/src/workspace/commands.rs`) is `WorkspaceCapabilities::
+ * current_platform()` — a static, once-at-bootstrap, backend-independent
+ * value — so this condition can never actually arise from adding a remote
+ * root; it was purely this one fixture's own `mode` argument.
+ *
+ * This test proves the mechanism directly with a completely ordinary LOCAL
+ * root, authorized exactly like every other local test authorizes one
+ * (`File: Open Folder…` → `runMutation`; no SFTP/SSH/remote code involved
+ * at all): under `mode: "readonly"` it becomes exactly as non-editable as
+ * S3's report described, with the exact same two symptoms (Monaco's own
+ * read-only overlay message, "New File…"/"New Folder…" toolbar disabled) —
+ * proving those symptoms were never about `runMutation` or remote roots.
+ */
+test("a runMutation-authorized local root becomes non-editable under the exact same workspace_capabilities-driven condition S3 misattributed to remote roots", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(page, "arrayBuffer", "readonly");
+	const explorer = await openNativeWorkspaceExplorer(page);
+	const readme = explorer.getByRole("treeitem", {
+		name: "README.md",
+		exact: true,
+	});
+	await expect(readme).toBeVisible();
+
+	await expect(
+		page.getByRole("button", { name: "New File...", exact: true }),
+	).toHaveAttribute("aria-disabled", "true");
+	await expect(
+		page.getByRole("button", { name: "New Folder...", exact: true }),
+	).toHaveAttribute("aria-disabled", "true");
+
+	await readme.dblclick();
+	const editor = page
+		.getByRole("code")
+		.filter({ hasText: "Read-only Explorer fixture." });
+	await expect(editor).toBeVisible();
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "Read-only Explorer fixture." })
+		.click();
+	await page.keyboard.type("this keystroke must not land");
+	await expect(page.locator(".monaco-editor-overlaymessage")).toContainText(
+		"Editor is read-only because the file system of the file is read-only.",
+	);
+	await expect(
+		page.getByRole("code").filter({ hasText: "this keystroke must not land" }),
+	).toHaveCount(0);
+	await expect(page.locator(".tabs-container .tab.active")).not.toHaveClass(
+		/dirty/,
+	);
+	expect(await nativeInvocations(page, "workspace_write_file")).toHaveLength(0);
+
+	expect(pageErrors).toEqual([]);
+});
+
 test("Plain: Open Remote Folder… browses and authorizes a live session's directory, and Explorer opens, edits and saves through the same versioned write chain", async ({
 	page,
 }) => {
@@ -25648,10 +25778,26 @@ test("Plain: Open Remote Folder… browses and authorizes a live session's direc
 		}
 	});
 
+	// `F220` S3B: `mode: "supported"` (not S3's original `"readonly"`) — see
+	// the JSDoc above the "a runMutation-authorized local root becomes
+	// non-editable…" regression test just above for the full root-cause
+	// writeup. In short: the single shared `plain-workspace://`
+	// `IFileSystemProvider` (registered
+	// once in `main.ts`, serving local and remote roots alike per ADR 0007's
+	// backend-opaque `rootId`) derives its capabilities from this mock's own
+	// `workspace_capabilities` response; `"readonly"` zeroes `delete`, which
+	// `createPlainWorkspaceMutationPolicy` (`file-system-provider.ts`) turns
+	// into a provider-wide `FileSystemProviderCapabilities.Readonly` bit that
+	// `FilesConfigurationService.isReadonly()` checks before ever looking at
+	// a specific file — the actual, previously-misdiagnosed cause of every
+	// `runMutation`-authorized root (local or remote) rendering non-editable.
+	// `"supported"` is exactly what every already-passing local mid-session
+	// root-add scenario (e.g. `installMultiRootNativeIpcMock(page,
+	// "supported")`) already uses.
 	await installNativeIpcMock(
 		page,
 		"arrayBuffer",
-		"readonly",
+		"supported",
 		{},
 		20_000,
 		0,
@@ -25708,9 +25854,6 @@ test("Plain: Open Remote Folder… browses and authorizes a live session's direc
 		.filter({ hasText: "export const remoteMain = true;" });
 	await expect(editor).toBeVisible();
 
-	// The authorized remote root's id — see `directWorkspaceWriteFile`'s own
-	// doc comment just above `openRemoteFolderViaQuickPick` for why the write
-	// below is dispatched directly rather than through a real keystroke+Save.
 	const remoteRootIds = await page.evaluate(() =>
 		(
 			window as unknown as {
@@ -25722,36 +25865,53 @@ test("Plain: Open Remote Folder… browses and authorizes a live session's direc
 	const remoteRootId = remoteRootIds[0]!;
 	expect(remoteRootId).not.toBe(nativeRootId);
 
-	const currentStat = (await directTauriInvoke(page, "workspace_stat", {
-		rootId: remoteRootId,
-		relativePath: "main.ts",
-	})) as { version: string };
-	expect(currentStat.version).toMatch(/^wv1:[0-9a-f]{64}$/);
-
+	// The primary path: a real keystroke and a real Ctrl+S, exactly like
+	// `saveExplorerFile`'s own local-root pattern elsewhere in this file —
+	// proving a `runMutation`-authorized remote root's editor is genuinely
+	// writable, not just its read-only stat/readdir/readFile chain.
 	const savedContent = "export const remoteMain = true; // edited\n";
-	const writeResult = (await directWorkspaceWriteFile(
-		page,
-		remoteRootId,
-		"main.ts",
-		currentStat.version,
-		savedContent,
-	)) as { status: string; stat: { version: string } };
-	expect(writeResult.status).toBe("written");
-	expect(writeResult.stat.version).toMatch(/^wv1:[0-9a-f]{64}$/);
-	expect(writeResult.stat.version).not.toBe(currentStat.version);
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "export const remoteMain = true;" })
+		.click();
+	await page.keyboard.press("ControlOrMeta+A");
+	await page.keyboard.type(savedContent);
+	const activeTab = page.locator(".tabs-container .tab.active");
+	await expect(activeTab).toHaveClass(/dirty/);
+	await page.keyboard.press("ControlOrMeta+S");
+	await expect
+		.poll(
+			async () =>
+				(await nativeInvocations(page, "workspace_write_file")).length,
+		)
+		.toBe(1);
+	await expect(activeTab).not.toHaveClass(/dirty/);
+	await expect(
+		page.getByRole("code").filter({ hasText: "// edited" }),
+	).toBeVisible();
 
 	const write = (await nativeInvocations(page, "workspace_write_file"))[0]!
 		.args;
 	expect(write.request).toMatchObject({
 		rootId: remoteRootId,
 		relativePath: "main.ts",
-		expectedVersion: currentStat.version,
 	});
+	expect(
+		(write.request as { expectedVersion?: string }).expectedVersion,
+	).toMatch(/^wv1:[0-9a-f]{64}$/);
 	expect(write.contentHex).toBe(
 		[...new TextEncoder().encode(savedContent)]
 			.map((byte) => byte.toString(16).padStart(2, "0"))
 			.join(""),
 	);
+
+	// Supplementary wire-level check (kept per `F220` S3's own precedent):
+	// the real save above really did land a fresh, correctly-shaped version.
+	const currentStat = (await directTauriInvoke(page, "workspace_stat", {
+		rootId: remoteRootId,
+		relativePath: "main.ts",
+	})) as { version: string };
+	expect(currentStat.version).toMatch(/^wv1:[0-9a-f]{64}$/);
 
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);
@@ -25760,20 +25920,28 @@ test("Plain: Open Remote Folder… browses and authorizes a live session's direc
 test("a remote file's stale-version write is rejected exactly like the local backend rejects one", async ({
 	page,
 }) => {
-	// See `directWorkspaceWriteFile`'s doc comment: real Save-driven dirty
-	// state currently can't be established for a `runMutation`-authorized
-	// root (a separate, pre-existing limitation this slice's own E2E work
-	// surfaced), so this proves the *backend/mock* enforces the identical
-	// `WORKSPACE_FILE_MODIFIED` version-conflict semantics ADR 0007 §3
-	// requires for remote, rather than driving the local-only Reload/Save
-	// As/Details toast UI end to end.
+	// `F220` S3B: real Save-driven dirty state — the primary path below —
+	// now works for a `runMutation`-authorized root; see the root-cause
+	// comment above the "browses and authorizes…" test just above. This
+	// mirrors the local-only "shows a Reload/Save As/Details save-conflict
+	// notification…" test's own dblclick→edit→external-rewrite→Ctrl+S shape
+	// end to end, plus a supplementary direct wire-frame check (kept per
+	// S3's own precedent) proving the backend independently enforces the
+	// identical `WORKSPACE_FILE_MODIFIED` version-conflict code ADR 0007 §3
+	// requires for remote.
 	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
 	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
 
 	await installNativeIpcMock(
 		page,
 		"arrayBuffer",
-		"readonly",
+		"supported",
 		{},
 		20_000,
 		0,
@@ -25820,14 +25988,30 @@ test("a remote file's stale-version write is rejected exactly like the local bac
 	expect(remoteRootIds).toHaveLength(1);
 	const remoteRootId = remoteRootIds[0]!;
 
+	// The version the model resolves and caches as its own baseline.
 	const staleStat = (await directTauriInvoke(page, "workspace_stat", {
 		rootId: remoteRootId,
 		relativePath: "main.ts",
 	})) as { version: string };
 	const staleVersion = staleStat.version;
 
+	await mainFile.dblclick();
+	const editor = page
+		.getByRole("code")
+		.filter({ hasText: "export const remoteMain = true;" });
+	await expect(editor).toBeVisible();
+	await page
+		.locator(".monaco-editor .view-line")
+		.filter({ hasText: "export const remoteMain = true;" })
+		.click();
+	await page.keyboard.press("End");
+	await page.keyboard.type(" // local-unsaved-edit");
+	const activeTab = page.locator(".tabs-container .tab.active");
+	await expect(activeTab).toHaveClass(/dirty/);
+
 	// An external rewrite (mirrors an out-of-band SFTP-side change) bumps the
-	// real version behind the stale one's back.
+	// real version behind the open model's back; no wake is emitted, so this
+	// only exercises the save-time version mismatch.
 	await page.evaluate((remoteRootIdValue: string) => {
 		(
 			window as unknown as {
@@ -25844,6 +26028,56 @@ test("a remote file's stale-version write is rejected exactly like the local bac
 		);
 	}, remoteRootId);
 
+	await page.keyboard.press("ControlOrMeta+S");
+	// Filtered rather than a bare `toHaveCount(1)`: the still-visible "Plain:
+	// connected to octocat@example.com:22." info toast from
+	// `connectMockSshSession` above is sticky (VS Code info notifications
+	// don't auto-dismiss) and unrelated to this save-conflict assertion.
+	const toast = page
+		.locator(".notifications-toasts .notification-toast")
+		.filter({ hasText: "Failed to save 'main.ts'" });
+	await expect(toast).toHaveCount(1);
+	await expect(toast).toContainText("Failed to save 'main.ts'");
+	await expect(toast).toContainText(
+		"Reload the file before saving again, or use Save As to preserve your edits.",
+	);
+	await expect(
+		toast.getByRole("button", { name: "Reload", exact: true }),
+	).toHaveCount(1);
+	await expect(
+		toast.getByRole("button", { name: "Save As...", exact: true }),
+	).toHaveCount(1);
+	await expect(
+		toast.getByRole("button", { name: "Details", exact: true }),
+	).toHaveCount(1);
+	await expect(
+		toast.getByRole("button", { name: "Retry", exact: true }),
+	).toHaveCount(0);
+	await expect(toast.getByRole("button", { name: /Overwrite/ })).toHaveCount(0);
+
+	// Exactly like the local case: FileService's own stat-based pre-write
+	// validation rejects before ever invoking the provider's write path, so
+	// `workspace_write_file` is never dispatched and the model stays dirty
+	// with the local edit still visible.
+	expect(await nativeInvocations(page, "workspace_write_file")).toHaveLength(0);
+	await expect(activeTab).toHaveClass(/dirty/);
+	await expect(
+		page.getByRole("code").filter({ hasText: "local-unsaved-edit" }),
+	).toBeVisible();
+
+	await toast.getByRole("button", { name: "Reload", exact: true }).click();
+	await expect(toast).toHaveCount(0);
+	await expect(activeTab).not.toHaveClass(/dirty/);
+	await expect(
+		page.getByRole("code").filter({ hasText: "rewritten on the server" }),
+	).toBeVisible();
+	await expect(
+		page.getByRole("code").filter({ hasText: "local-unsaved-edit" }),
+	).toHaveCount(0);
+
+	// Supplementary wire-level check: the exact same stale version, raced
+	// through the raw `workspace_write_file` frame instead of the UI above,
+	// independently hits the identical backend guard.
 	const staleWriteFrame = await page.evaluate(
 		([rootId, relativePath, expectedVersion, content]) => {
 			const encoder = new TextEncoder();
@@ -25878,7 +26112,7 @@ test("a remote file's stale-version write is rejected exactly like the local bac
 			remoteRootId,
 			"main.ts",
 			staleVersion,
-			"export const remoteMain = true; // local edit\n",
+			"export const remoteMain = true; // stale wire write\n",
 		],
 	);
 	const rejection = await page.evaluate((frameArray) => {
@@ -25899,8 +26133,8 @@ test("a remote file's stale-version write is rejected exactly like the local bac
 	}, staleWriteFrame);
 	expect(rejection).toEqual({ ok: false, code: "WORKSPACE_FILE_MODIFIED" });
 
-	// The stale write never actually reached the tree — a follow-up write
-	// carrying the now-current version still succeeds cleanly.
+	// The stale wire write never actually reached the tree — a follow-up
+	// write carrying the now-current version still succeeds cleanly.
 	const currentStat = (await directTauriInvoke(page, "workspace_stat", {
 		rootId: remoteRootId,
 		relativePath: "main.ts",
@@ -25916,25 +26150,33 @@ test("a remote file's stale-version write is rejected exactly like the local bac
 	expect(recovered.status).toBe("written");
 
 	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toHaveLength(2);
+	expect(consoleErrors[0]).toContain("resulted in a save error");
+	expect(consoleErrors[0]).toContain("File Modified Since");
+	expect(consoleErrors[1]).toBe(
+		"Failed to save 'main.ts'. Reload the file before saving again, or use Save As to preserve your edits.",
+	);
 });
 
 test("create/rename/permanent-delete on a remote folder route through the same native IPC as a local root, and Refresh reveals every change in Explorer", async ({
 	page,
 }) => {
-	// See `directWorkspaceWriteFile`'s doc comment: driving create/rename/
-	// delete through the real Explorer toolbar/keybindings is blocked by the
-	// same pre-existing `runMutation`-root limitation, so the mutations
-	// themselves are dispatched directly (the exact command name/request
-	// shape a real Explorer action sends) and "Plain: Refresh Remote
-	// Folder" — unaffected by that limitation, since it only rescans — is
-	// what proves Explorer really does reflect each one afterward.
+	// `F220` S3B: create/rename/permanent-delete now drive the real Explorer
+	// toolbar/keybindings, exactly like the local multi-root "edits both
+	// roots…" test's own New Folder/New File/rename/permanent-delete
+	// sequence — see the root-cause comment above the "browses and
+	// authorizes…" test above. A window's own real UI mutations update its
+	// Explorer immediately (no watcher needed, same as a local root);
+	// "Plain: Refresh Remote Folder" exists for *out-of-band* changes only,
+	// which the dedicated "rescans an authorized remote root…" test below
+	// already covers, so this test no longer needs it for its own edits.
 	const pageErrors: string[] = [];
 	page.on("pageerror", (error) => pageErrors.push(error.message));
 
 	await installNativeIpcMock(
 		page,
 		"arrayBuffer",
-		"readonly",
+		"supported",
 		{},
 		20_000,
 		0,
@@ -25981,69 +26223,46 @@ test("create/rename/permanent-delete on a remote folder route through the same n
 	expect(remoteRootIds).toHaveLength(1);
 	const remoteRootId = remoteRootIds[0]!;
 
-	const created = (await directTauriInvoke(page, "workspace_create_file", {
-		rootId: remoteRootId,
-		relativePath: "scratch/note.txt",
-	})) as { kind: string };
-	expect(created.kind).toBe("file");
-
-	await executePaletteCommand(
-		page,
-		"Refresh Remote Folder",
-		"Plain: Refresh Remote Folder",
-	);
 	await scratch.click();
 	await page.keyboard.press("ArrowRight");
 	await expect(scratch).toHaveAttribute("aria-expanded", "true");
+	await page.getByRole("button", { name: "New File...", exact: true }).click();
+	await finishExplorerNameInput(page, "note.txt");
 	const note = explorer.getByRole("treeitem", {
 		name: "note.txt",
 		exact: true,
 	});
 	await expect(note).toBeVisible();
 
-	await directTauriInvoke(page, "workspace_rename", {
-		rootId: remoteRootId,
-		sourcePath: "scratch",
-		targetPath: "renamed",
-	});
-	await executePaletteCommand(
-		page,
-		"Refresh Remote Folder",
-		"Plain: Refresh Remote Folder",
-	);
+	await scratch.click();
+	await pressExplorerRenameKey(page);
+	await finishExplorerNameInput(page, "renamed");
 	await expect(scratch).toHaveCount(0);
 	const renamed = explorer.getByRole("treeitem", {
 		name: "renamed",
 		exact: true,
 	});
 	await expect(renamed).toBeVisible();
+	await renamed.click();
+	await page.keyboard.press("ArrowRight");
+	await expect(renamed).toHaveAttribute("aria-expanded", "true");
+	await expect(note).toBeVisible();
 
-	const prepared = (await directTauriInvoke(page, "workspace_prepare_delete", {
-		entries: [
-			{ rootId: remoteRootId, relativePath: "renamed", recursive: true },
-		],
-	})) as { confirmationId: string; entries: readonly { entryId: string }[] };
-	await directTauriInvoke(page, "workspace_begin_delete", {
-		confirmationId: prepared.confirmationId,
-	});
-	const committed = (await directTauriInvoke(
-		page,
-		"workspace_commit_delete_entry",
-		{
-			confirmationId: prepared.confirmationId,
-			entryId: prepared.entries[0]!.entryId,
-			rootId: remoteRootId,
-			relativePath: "renamed",
-			recursive: true,
-		},
-	)) as { status: string };
-	expect(committed.status).toBe("deleted");
-
-	await executePaletteCommand(
-		page,
-		"Refresh Remote Folder",
-		"Plain: Refresh Remote Folder",
-	);
+	await renamed.click();
+	const confirmDeleteKey = pressExplorerPermanentDeleteKey(page);
+	// `.monaco-dialog-box` rather than a bare `role=dialog`: the still-visible
+	// "Plain: connected to octocat@example.com:22." notification row from
+	// `connectMockSshSession` above is itself rendered with `role="dialog"`
+	// too (an established gotcha elsewhere in this file), so a generic
+	// `getByRole("dialog")` would match both.
+	const permanentDeleteDialog = page.locator(".monaco-dialog-box");
+	await expect(permanentDeleteDialog).toBeVisible();
+	await expect(permanentDeleteDialog).toContainText("永久删除“renamed”？");
+	await permanentDeleteDialog
+		.getByRole("button", { name: "永久删除", exact: true })
+		.click();
+	await confirmDeleteKey;
+	await expect(permanentDeleteDialog).toHaveCount(0);
 	await expect(renamed).toHaveCount(0);
 
 	const mutations = await page.evaluate(
