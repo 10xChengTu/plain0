@@ -20,6 +20,7 @@
 use tauri::{State, WebviewWindow};
 
 use crate::error::CommandError;
+use crate::remote::session::RemoteSessionService;
 use crate::trust::service::TrustService;
 use crate::workspace::picker::TauriDirectoryPicker;
 use crate::workspace::service::WorkspaceService;
@@ -74,12 +75,21 @@ pub(crate) async fn git_status(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    network_service: State<'_, GitNetworkService>,
+    remote: State<'_, RemoteSessionService>,
     root_id: RootId,
     request: GitStatusRequest,
 ) -> Result<GitStatusResult, CommandError> {
     request.validate();
     let scope = SelectedGitRoot::new(workspace.inner(), root_id);
-    let result = status::git_status(trust.inner(), &scope, window.label()).await?;
+    let result = status::git_status(
+        trust.inner(),
+        &scope,
+        network_service.inner(),
+        remote.inner(),
+        window.label(),
+    )
+    .await?;
     Ok(GitStatusResult::from(result))
 }
 
@@ -88,12 +98,22 @@ pub(crate) async fn git_diff_files(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    network_service: State<'_, GitNetworkService>,
+    remote: State<'_, RemoteSessionService>,
     root_id: RootId,
     request: GitDiffFilesRequest,
 ) -> Result<GitDiffFilesResult, CommandError> {
     let cached = request.into_parts();
     let scope = SelectedGitRoot::new(workspace.inner(), root_id);
-    let entries = diff::diff_files(trust.inner(), &scope, window.label(), cached).await?;
+    let entries = diff::diff_files(
+        trust.inner(),
+        &scope,
+        network_service.inner(),
+        remote.inner(),
+        window.label(),
+        cached,
+    )
+    .await?;
     Ok(GitDiffFilesResult::new(entries))
 }
 
@@ -116,12 +136,22 @@ pub(crate) async fn git_stage_paths(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    network_service: State<'_, GitNetworkService>,
+    remote: State<'_, RemoteSessionService>,
     root_id: RootId,
     request: GitStagePathsRequest,
 ) -> Result<(), CommandError> {
     let paths = request.into_parts()?;
     let scope = SelectedGitRoot::new(workspace.inner(), root_id);
-    stage::stage_paths(trust.inner(), &scope, window.label(), &paths).await
+    stage::stage_paths(
+        trust.inner(),
+        &scope,
+        network_service.inner(),
+        remote.inner(),
+        window.label(),
+        &paths,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -129,12 +159,22 @@ pub(crate) async fn git_unstage_paths(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    network_service: State<'_, GitNetworkService>,
+    remote: State<'_, RemoteSessionService>,
     root_id: RootId,
     request: GitUnstagePathsRequest,
 ) -> Result<(), CommandError> {
     let paths = request.into_parts()?;
     let scope = SelectedGitRoot::new(workspace.inner(), root_id);
-    stage::unstage_paths(trust.inner(), &scope, window.label(), &paths).await
+    stage::unstage_paths(
+        trust.inner(),
+        &scope,
+        network_service.inner(),
+        remote.inner(),
+        window.label(),
+        &paths,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -155,12 +195,23 @@ pub(crate) async fn git_commit(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    network_service: State<'_, GitNetworkService>,
+    remote: State<'_, RemoteSessionService>,
     root_id: RootId,
     request: GitCommitRequest,
 ) -> Result<(), CommandError> {
     let (message, amend) = request.into_parts()?;
     let scope = SelectedGitRoot::new(workspace.inner(), root_id);
-    commit::commit(trust.inner(), &scope, window.label(), &message, amend).await
+    commit::commit(
+        trust.inner(),
+        &scope,
+        network_service.inner(),
+        remote.inner(),
+        window.label(),
+        &message,
+        amend,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -380,12 +431,22 @@ pub(crate) async fn git_log_graph(
     window: WebviewWindow,
     trust: State<'_, TrustService>,
     workspace: State<'_, WorkspaceService>,
+    network_service: State<'_, GitNetworkService>,
+    remote: State<'_, RemoteSessionService>,
     root_id: RootId,
     request: GitLogGraphRequest,
 ) -> Result<GitLogGraphResultWire, CommandError> {
     let max_count = request.into_parts()?;
     let scope = SelectedGitRoot::new(workspace.inner(), root_id);
-    let result = log::log_graph(trust.inner(), &scope, window.label(), max_count).await?;
+    let result = log::log_graph(
+        trust.inner(),
+        &scope,
+        network_service.inner(),
+        remote.inner(),
+        window.label(),
+        max_count,
+    )
+    .await?;
     Ok(GitLogGraphResultWire::from(result))
 }
 

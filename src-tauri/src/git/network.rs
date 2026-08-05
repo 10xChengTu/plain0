@@ -89,7 +89,38 @@ use crate::workspace::RootId;
 
 use super::exec::{run_git, run_git_network, GitExecMode, GitExecOutput};
 use super::git_exec_unavailable;
+use super::git_remote_network_unsupported;
 use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
+
+/// `F220` S6: fails closed with [`git_remote_network_unsupported`] the
+/// instant `scope`'s explicitly selected root is remote-backed — checked
+/// first, before [`resolve_repo_toplevel`] or any exec attempt of either
+/// kind, in every one of [`preview`]/[`fetch`]/[`pull`]/[`push`]. See this
+/// module's own doc comment for why this is a distinct code from the generic
+/// `ROOT_BACKEND_UNSUPPORTED` fallback every *other* out-of-scope command in
+/// this domain still relies on.
+///
+/// Only checks the *explicit* `root_id` case (`scope.selected_root_id()` is
+/// `Some`) — mirrors `remote_route::resolve_repo_route`'s own documented
+/// narrowing for the implicit/no-explicit-root compatibility path (never
+/// reached by production IPC, every `git_*` command carries a mandatory
+/// `rootId`): a `None` selection falls through to
+/// [`resolve_repo_toplevel`]'s existing local-only behavior unchanged.
+fn reject_remote_root(
+    scope: &(impl GitRepositoryScope + ?Sized),
+    window_label: &str,
+) -> Result<(), CommandError> {
+    if let Some(root_id) = scope.selected_root_id() {
+        if scope
+            .workspace()
+            .remote_context(window_label, root_id)?
+            .is_some()
+        {
+            return Err(git_remote_network_unsupported());
+        }
+    }
+    Ok(())
+}
 
 /// The git revision expression for "the current branch's configured
 /// upstream" — resolved via `git rev-parse --abbrev-ref --symbolic-full-name`
@@ -205,14 +236,25 @@ pub(crate) struct NetworkPreview {
     pub(crate) behind: Option<u64>,
 }
 
-/// Tracks at most one in-flight `F080` S4 network operation (fetch/pull/
-/// push) per `(window, selected root)`, so
-/// [`GitNetworkService::request_cancel_for_root`] can reach the
-/// real cooperative-cancellation flag `run_git_network`'s `wait_with_limits`
-/// poll loop already checks (`F080` S0's mechanism — this service is simply
-/// the first thing in this domain that actually *exposes* it to a caller,
-/// because no write command before this slice was slow enough to need a
-/// user-reachable cancel path). The root identity remains part of the key so
+/// Tracks at most one in-flight network-shaped operation per `(window,
+/// selected root)`, so [`GitNetworkService::request_cancel_for_root`] can
+/// reach the real cooperative-cancellation flag the in-flight operation's own
+/// poll loop checks. Originally `F080` S4's own fetch/pull/push cancellation
+/// table (reaching `run_git_network`'s `wait_with_limits` poll loop, `F080`
+/// S0's mechanism — this service was simply the first thing in this domain
+/// to actually *expose* it to a caller, because no write command before that
+/// slice was slow enough to need a user-reachable cancel path).
+///
+/// `F220` S6 widens this to also serve the six git core-subset commands this
+/// slice routes to a remote root (`status`/`diff`/`log`/`stage`/`unstage`/
+/// `commit`) — every one of them now involves a real network round trip when
+/// routed remotely (unlike their `GitExecMode::BackgroundRead`/`Write` local
+/// counterparts, which are never cancellable by design), so
+/// `git::remote_route` calls [`Self::begin_for_root`]/[`Self::end_for_root`]
+/// around each remote invocation exactly like `fetch`/`pull`/`push` already
+/// do here — reusing the identical table, key shape and
+/// `git_network_cancel` IPC entry point rather than adding a second
+/// cancellation mechanism. The root identity remains part of the key so
 /// changing SCM selection can never cancel another repository's operation;
 /// no operation id is needed because the frontend still enforces at most one
 /// mutation per selected repository.
@@ -241,7 +283,16 @@ impl GitNetworkService {
         Self::default()
     }
 
-    fn begin_for_root(&self, window_label: &str, root_id: Option<RootId>) -> Arc<AtomicBool> {
+    /// `F220` S6: `pub(crate)` (not module-private, its pre-`F220` visibility)
+    /// so `git::remote_route`'s six routed remote commands can register their
+    /// own in-flight cancellation flag through the exact same table this
+    /// service already used exclusively for fetch/pull/push — see this
+    /// struct's own doc comment.
+    pub(crate) fn begin_for_root(
+        &self,
+        window_label: &str,
+        root_id: Option<RootId>,
+    ) -> Arc<AtomicBool> {
         let flag = Arc::new(AtomicBool::new(false));
         self.inflight
             .lock()
@@ -253,7 +304,9 @@ impl GitNetworkService {
         flag
     }
 
-    fn end_for_root(&self, window_label: &str, root_id: Option<RootId>) {
+    /// `F220` S6: see [`Self::begin_for_root`]'s own doc comment for why this
+    /// is now `pub(crate)`.
+    pub(crate) fn end_for_root(&self, window_label: &str, root_id: Option<RootId>) {
         self.inflight
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -322,6 +375,7 @@ pub(crate) async fn preview(
     window_label: &str,
     operation: NetworkOperation,
 ) -> Result<NetworkPreview, CommandError> {
+    reject_remote_root(workspace, window_label)?;
     let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
 
     let upstream_output = run_background_read(
@@ -398,6 +452,7 @@ pub(crate) async fn fetch(
     network: &GitNetworkService,
     window_label: &str,
 ) -> Result<(), CommandError> {
+    reject_remote_root(workspace, window_label)?;
     let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
     let args: Vec<String> = GIT_FETCH_ARGS.iter().map(|arg| (*arg).to_owned()).collect();
     let output = run_network(
@@ -420,6 +475,7 @@ pub(crate) async fn pull(
     network: &GitNetworkService,
     window_label: &str,
 ) -> Result<(), CommandError> {
+    reject_remote_root(workspace, window_label)?;
     let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
     let args: Vec<String> = GIT_PULL_ARGS.iter().map(|arg| (*arg).to_owned()).collect();
     let output = run_network(
@@ -447,6 +503,7 @@ pub(crate) async fn push(
     window_label: &str,
     force: bool,
 ) -> Result<(), CommandError> {
+    reject_remote_root(workspace, window_label)?;
     let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
     let args_const: &[&str] = if force {
         GIT_PUSH_FORCE_ARGS

@@ -22,14 +22,13 @@
 //! - `! <path>` — ignored (only emitted at all because the caller passes
 //!   `--ignored`; git omits these entirely otherwise).
 
-use std::sync::atomic::AtomicBool;
-
 use crate::error::CommandError;
+use crate::remote::session::RemoteSessionService;
 use crate::trust::service::TrustService;
 
-use super::exec::{run_git, GitExecMode};
-use super::git_exec_unavailable;
-use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
+use super::network::GitNetworkService;
+use super::remote_route::{resolve_repo_route, run_routed, RoutedGitMode};
+use super::repo::GitRepositoryScope;
 use super::wire::{split_n_fields, split_nul_records, GitPathBuf};
 
 /// `# branch.oid` — no commits yet is the literal token `(initial)`, modeled
@@ -150,7 +149,11 @@ fn status_parse_failed() -> CommandError {
     )
 }
 
-fn git_status_failed() -> CommandError {
+/// `pub(crate)`, not module-private, so `stash::conflicted_paths_from_status`
+/// (`F220` S6) can report the exact same code for a failed status re-read
+/// that [`git_status`] itself would have — see that function's own doc
+/// comment for why it no longer delegates to [`git_status`] directly.
+pub(crate) fn git_status_failed() -> CommandError {
     CommandError::new(
         "GIT_STATUS_FAILED",
         "git status did not complete successfully.",
@@ -167,24 +170,35 @@ fn git_status_failed() -> CommandError {
 pub(crate) const GIT_STATUS_ARGS: &[&str] =
     &["status", "--porcelain=v2", "-z", "--branch", "--ignored"];
 
-/// Resolves the current window's repository and runs [`GIT_STATUS_ARGS`]
-/// through the hardened background-read exec path, then parses the result.
+/// Resolves the current window's repository — local or remote, `F220` S6 —
+/// and runs [`GIT_STATUS_ARGS`] through the hardened background-read exec
+/// path (`run_git` locally, `remote::remote_git::run_remote_git` remotely —
+/// see `remote_route`'s own module doc), then parses the result. The parser
+/// itself is entirely backend-agnostic: both paths produce the identical
+/// [`super::exec::GitExecOutput`] shape.
 pub(crate) async fn git_status(
     trust: &TrustService,
     workspace: &(impl GitRepositoryScope + ?Sized),
+    network: &GitNetworkService,
+    remote: &RemoteSessionService,
     window_label: &str,
 ) -> Result<GitStatus, CommandError> {
-    let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
+    let route = resolve_repo_route(trust, workspace, remote, window_label).await?;
     let args: Vec<String> = GIT_STATUS_ARGS
         .iter()
         .map(|arg| (*arg).to_owned())
         .collect();
-    let cancel = AtomicBool::new(false);
-    let output = tauri::async_runtime::spawn_blocking(move || {
-        run_git(&repo_dir, &args, GitExecMode::BackgroundRead, &cancel)
-    })
-    .await
-    .map_err(|_| git_exec_unavailable())??;
+    let output = run_routed(
+        &route,
+        network,
+        remote,
+        window_label,
+        workspace.selected_root_id(),
+        RoutedGitMode::BackgroundRead,
+        &args,
+        None,
+    )
+    .await?;
     if output.exit_code != 0 {
         return Err(git_status_failed());
     }

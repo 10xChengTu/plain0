@@ -15,14 +15,13 @@
 //! `user.name`/`user.email` set, or the commit fails with a structured error
 //! (mapped by [`commit`] below), never a surprising auto-generated identity.
 
-use std::sync::atomic::AtomicBool;
-
 use crate::error::CommandError;
+use crate::remote::session::RemoteSessionService;
 use crate::trust::service::TrustService;
 
-use super::exec::{run_git_with_stdin, GitExecMode};
-use super::git_exec_unavailable;
-use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
+use super::network::GitNetworkService;
+use super::remote_route::{resolve_repo_route, run_routed, RoutedGitMode};
+use super::repo::GitRepositoryScope;
 
 /// Mirrors `dto::MAX_GIT_COMMIT_MESSAGE_BYTES` — see `git::stage`'s module
 /// doc comment for why domain functions re-validate what the DTO layer
@@ -78,6 +77,8 @@ pub(crate) const GIT_COMMIT_ARGS: &[&str] = &[
 pub(crate) async fn commit(
     trust: &TrustService,
     workspace: &(impl GitRepositoryScope + ?Sized),
+    network: &GitNetworkService,
+    remote: &RemoteSessionService,
     window_label: &str,
     message: &str,
     amend: bool,
@@ -88,7 +89,7 @@ pub(crate) async fn commit(
     if message.len() > MAX_GIT_COMMIT_MESSAGE_BYTES {
         return Err(git_commit_message_too_large());
     }
-    let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
+    let route = resolve_repo_route(trust, workspace, remote, window_label).await?;
 
     let mut args: Vec<String> = GIT_COMMIT_ARGS
         .iter()
@@ -98,19 +99,17 @@ pub(crate) async fn commit(
         args.push("--amend".to_owned());
     }
     let message_bytes = message.as_bytes().to_vec();
-    let repo_dir_for_spawn = repo_dir.clone();
-    let cancel = AtomicBool::new(false);
-    let output = tauri::async_runtime::spawn_blocking(move || {
-        run_git_with_stdin(
-            &repo_dir_for_spawn,
-            &args,
-            GitExecMode::Write,
-            &cancel,
-            &message_bytes,
-        )
-    })
-    .await
-    .map_err(|_| git_exec_unavailable())??;
+    let output = run_routed(
+        &route,
+        network,
+        remote,
+        window_label,
+        workspace.selected_root_id(),
+        RoutedGitMode::Write,
+        &args,
+        Some(&message_bytes),
+    )
+    .await?;
 
     if output.exit_code != 0 {
         let combined = format!(

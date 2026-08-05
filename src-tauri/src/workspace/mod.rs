@@ -179,6 +179,51 @@ pub(crate) fn stable_roots_identity(canonical_paths: &[PathBuf]) -> Option<Strin
 /// can never collide with a local root's even by construction accident.
 const REMOTE_ROOT_IDENTITY_DOMAIN: &[u8] = b"plain.workspace.roots-identity.remote-ssh.v1\0";
 
+/// Domain separator for [`stable_mixed_roots_identity`] — `F220` S6. Used
+/// only when the current root set contains at least one remote root; a
+/// workspace made entirely of local roots never reaches this domain at all
+/// (see [`WorkspaceScope::stable_identity`]), so this can never collide with
+/// [`ROOTS_IDENTITY_DOMAIN`]'s own local-only hashes even by construction
+/// accident. Distinct from [`REMOTE_ROOT_IDENTITY_DOMAIN`] too: that domain
+/// hashes one remote root's own `(fingerprint, path)` pair into a per-root
+/// digest; this domain hashes a whole *set* of already-computed per-root
+/// digest strings (each itself produced by [`stable_roots_identity`] or
+/// [`stable_remote_root_identity`]) into one combined identity.
+const ROOTS_IDENTITY_MIXED_DOMAIN: &[u8] = b"plain.workspace.roots-identity.mixed.v1\0";
+
+/// Hashes a set of already-computed per-root storage-identity digest strings
+/// (see [`WorkspaceScope::root_storage_identities`]) into one combined,
+/// order-independent [`WorkspaceRootsIdentity`] — `F220` S6's mixed-backend
+/// counterpart to [`stable_roots_identity`]. `None` for an empty set, exactly
+/// like that function. Sorting first (again mirroring [`stable_roots_identity`])
+/// makes the result independent of authorization order; each digest is a
+/// fixed 64-character lowercase-hex string (produced by either
+/// [`stable_roots_identity`] or [`stable_remote_root_identity`]), so the
+/// length-prefixing below is not strictly required to disambiguate one digest
+/// from the next the way it is for arbitrary-length paths — it is kept anyway
+/// so this function follows the exact same length-prefix discipline as every
+/// other hash construction in this file, rather than being a special case a
+/// future reader has to reason about differently.
+fn stable_mixed_roots_identity(digests: &[String]) -> Option<String> {
+    if digests.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<&str> = digests.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+
+    let mut hasher = Sha256::new();
+    hasher.update(ROOTS_IDENTITY_MIXED_DOMAIN);
+    let digest_count = u32::try_from(sorted.len()).unwrap_or(u32::MAX);
+    hasher.update(digest_count.to_be_bytes());
+    for digest in sorted {
+        let bytes = digest.as_bytes();
+        let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        hasher.update(length.to_be_bytes());
+        hasher.update(bytes);
+    }
+    Some(hex_encode(hasher.finalize().into()))
+}
+
 /// Hashes one remote root's stable identity — ADR 0007 §2's `(host-key
 /// fingerprint, canonical remote path)` pair — into the same lowercase hex
 /// SHA-256 shape [`stable_roots_identity`] produces for local roots, so
@@ -599,29 +644,62 @@ impl WorkspaceScope {
         self.workspace_id
     }
 
-    /// The stable identity of the currently authorized *local* root set (see
-    /// [`WorkspaceRootsIdentity`]); `None` when zero local roots are
-    /// authorized. Remote roots are deliberately excluded from this hash —
-    /// `F220` S2 does not yet wire any trust-gated domain (Git/PTY/DAP
-    /// spawning) to remote content, so keeping this identity purely
-    /// path-based means a workspace made entirely of local roots hashes
-    /// byte-for-byte the same as before this slice, and adding a remote root
-    /// alongside existing local roots never perturbs their already-granted
-    /// trust. See [`Self::root_storage_identities`] for the per-root digest
-    /// that *does* cover remote roots (the backup domain's key, not this
-    /// whole-set trust identity).
+    /// The stable identity of the currently authorized root set — local and
+    /// remote roots alike (see [`WorkspaceRootsIdentity`]); `None` when zero
+    /// roots of any backend are authorized.
+    ///
+    /// `F220` S6 (the trust domain's own gap this closes — see
+    /// `trust::service::TrustService`'s module doc): every Git/PTY/DAP
+    /// spawn-gating domain calls `TrustService::require_trusted`, which reads
+    /// this identity, so a workspace made *entirely* of remote roots must be
+    /// able to produce one too, or it could never be granted execution trust
+    /// at all. Two disjoint code paths, chosen by whether the current root
+    /// set contains at least one remote root:
+    ///
+    /// - **Zero remote roots** (including the empty-workspace case): this
+    ///   calls the exact same [`stable_roots_identity`] over the same sorted
+    ///   local canonical-path list `F220` S2 already computed here — **byte-
+    ///   for-byte identical output** to every release before this slice, so
+    ///   an already-granted local-only trust record on disk stays valid
+    ///   without any migration. This is verified directly by a fixed-input/
+    ///   fixed-output regression test (`workspace::tests`), not merely
+    ///   asserted from this doc comment.
+    /// - **One or more remote roots** (local roots may be zero, one, or
+    ///   many alongside them): switches to [`Self::root_storage_identities`]`()`'s
+    ///   own per-root digests (already backend-agnostic — a local root's
+    ///   digest is the same [`stable_roots_identity`] singleton form used
+    ///   above, a remote root's is [`stable_remote_root_identity`]) and folds
+    ///   the whole set into one order-independent digest via
+    ///   [`stable_mixed_roots_identity`]. The two digest functions differ in
+    ///   exactly one respect: [`Self::root_storage_identities`] returns one
+    ///   digest *per root* (the backup domain's own per-root storage key),
+    ///   while this method folds every one of those digests into a *single*
+    ///   whole-set digest (this trust domain's key) — same underlying
+    ///   per-root building blocks, different aggregation.
     pub(crate) fn stable_identity(&self) -> Option<WorkspaceRootsIdentity> {
-        let canonical_paths: Vec<PathBuf> = self
+        let has_remote_root = self
             .roots
             .values()
-            .filter_map(|root| {
-                root.backend
-                    .local_canonical_path()
-                    .ok()
-                    .map(Path::to_path_buf)
-            })
+            .any(|root| matches!(root.backend, RootBackend::RemoteSsh { .. }));
+        if !has_remote_root {
+            let canonical_paths: Vec<PathBuf> = self
+                .roots
+                .values()
+                .filter_map(|root| {
+                    root.backend
+                        .local_canonical_path()
+                        .ok()
+                        .map(Path::to_path_buf)
+                })
+                .collect();
+            return stable_roots_identity(&canonical_paths).map(WorkspaceRootsIdentity);
+        }
+        let digests: Vec<String> = self
+            .root_storage_identities()
+            .into_iter()
+            .map(|(_, identity)| identity.0)
             .collect();
-        stable_roots_identity(&canonical_paths).map(WorkspaceRootsIdentity)
+        stable_mixed_roots_identity(&digests).map(WorkspaceRootsIdentity)
     }
 
     pub(crate) fn root_ids(&self) -> Vec<RootId> {
@@ -730,15 +808,17 @@ impl WorkspaceScope {
     /// identity per root (rather than per current root set) is what lets
     /// hot-exit content survive add/remove/reorder topology changes without
     /// ever guessing which current root owns a backup.
-    /// Unlike [`Self::stable_identity`] (the whole-set, local-only trust
-    /// key), this covers *both* backends — ADR 0007 §2 explicitly wants the
-    /// remote per-root storage digest implemented alongside the local one in
-    /// this slice, even though `F220` S2 leaves the backup domain itself
-    /// wired to only ever observe local roots in production (no real remote
-    /// root can be authorized outside a test yet, so this branch is
-    /// currently reachable only from `F220` S2's own remote-identity tests;
-    /// `F220` S4 is what actually lets a live remote root reach the backup
-    /// domain).
+    /// Covers *both* backends — ADR 0007 §2 explicitly wants the remote
+    /// per-root storage digest implemented alongside the local one, and
+    /// `F220` S6's [`Self::stable_identity`] now reuses this method's own
+    /// output as the building blocks for its whole-set digest (see that
+    /// method's own doc comment). The distinction between the two is no
+    /// longer "local-only vs. both backends" (both cover both backends as of
+    /// `F220` S6) but purely one of aggregation: this method returns one
+    /// digest *per root*, independently addressable by [`RootId`] (the
+    /// backup domain's own per-root storage key); [`Self::stable_identity`]
+    /// folds every one of those same per-root digests into a *single*
+    /// whole-set digest (the trust domain's key).
     pub(crate) fn root_storage_identities(&self) -> Vec<(RootId, WorkspaceRootsIdentity)> {
         self.order
             .iter()

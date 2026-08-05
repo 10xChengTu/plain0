@@ -33,15 +33,17 @@
 //! [`merge_diff_files`].
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 use crate::error::CommandError;
+use crate::remote::session::RemoteSessionService;
 use crate::trust::service::TrustService;
 
 use super::exec::{run_git, GitExecMode};
 use super::git_exec_output_limit_exceeded;
 use super::git_exec_unavailable;
+use super::network::GitNetworkService;
+use super::remote_route::{resolve_repo_route, run_routed, RepoRoute, RoutedGitMode};
 use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
 use super::wire::{split_nul_records, GitPathBuf};
 
@@ -302,8 +304,13 @@ pub(crate) const GIT_DIFF_BASE_ARGS: &[&str] = &[
     "--no-ext-diff",
 ];
 
+#[allow(clippy::too_many_arguments)]
 async fn run_diff(
-    repo_dir: &Path,
+    route: &RepoRoute,
+    network: &GitNetworkService,
+    remote: &RemoteSessionService,
+    window_label: &str,
+    root_id: Option<crate::workspace::RootId>,
     cached: bool,
     format_flag: &'static str,
 ) -> Result<Vec<u8>, CommandError> {
@@ -315,28 +322,56 @@ async fn run_diff(
         args.push("--cached".to_owned());
     }
     args.push(format_flag.to_owned());
-    let repo_dir = repo_dir.to_path_buf();
-    let cancel = AtomicBool::new(false);
-    let output = tauri::async_runtime::spawn_blocking(move || {
-        run_git(&repo_dir, &args, GitExecMode::BackgroundRead, &cancel)
-    })
-    .await
-    .map_err(|_| git_exec_unavailable())??;
+    let output = run_routed(
+        route,
+        network,
+        remote,
+        window_label,
+        root_id,
+        RoutedGitMode::BackgroundRead,
+        &args,
+        None,
+    )
+    .await?;
     if output.exit_code != 0 {
         return Err(git_diff_failed());
     }
     Ok(output.stdout)
 }
 
+/// Resolves the current window's repository — local or remote, `F220` S6 —
+/// and runs two independent `git diff` invocations through the routed exec
+/// path; see [`super::remote_route`]'s own module doc.
 pub(crate) async fn diff_files(
     trust: &TrustService,
     workspace: &(impl GitRepositoryScope + ?Sized),
+    network: &GitNetworkService,
+    remote: &RemoteSessionService,
     window_label: &str,
     cached: bool,
 ) -> Result<Vec<DiffFileEntry>, CommandError> {
-    let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
-    let name_status_output = run_diff(&repo_dir, cached, "--name-status").await?;
-    let numstat_output = run_diff(&repo_dir, cached, "--numstat").await?;
+    let route = resolve_repo_route(trust, workspace, remote, window_label).await?;
+    let root_id = workspace.selected_root_id();
+    let name_status_output = run_diff(
+        &route,
+        network,
+        remote,
+        window_label,
+        root_id,
+        cached,
+        "--name-status",
+    )
+    .await?;
+    let numstat_output = run_diff(
+        &route,
+        network,
+        remote,
+        window_label,
+        root_id,
+        cached,
+        "--numstat",
+    )
+    .await?;
     let name_status_entries = parse_name_status(&name_status_output)?;
     let numstat_entries = parse_numstat(&numstat_output)?;
     Ok(merge_diff_files(name_status_entries, numstat_entries))

@@ -23,11 +23,14 @@ use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
 use crate::error::CommandError;
+use crate::remote::session::RemoteSessionService;
 use crate::trust::service::TrustService;
 
 use super::dto::is_valid_mutate_path;
 use super::exec::{run_git, run_git_with_stdin, GitExecMode};
 use super::git_exec_unavailable;
+use super::network::GitNetworkService;
+use super::remote_route::{resolve_repo_route, run_routed, RoutedGitMode};
 use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
 
 /// Mirrors `dto::MAX_GIT_STAGE_BLOB_BYTES` — see this module's own doc
@@ -95,14 +98,26 @@ fn validate_paths(paths: &[String]) -> Result<(), CommandError> {
 pub(crate) async fn stage_paths(
     trust: &TrustService,
     workspace: &(impl GitRepositoryScope + ?Sized),
+    network: &GitNetworkService,
+    remote: &RemoteSessionService,
     window_label: &str,
     paths: &[String],
 ) -> Result<(), CommandError> {
     validate_paths(paths)?;
-    let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
+    let route = resolve_repo_route(trust, workspace, remote, window_label).await?;
     let mut args: Vec<String> = vec!["add".to_owned(), "-A".to_owned(), "--".to_owned()];
     args.extend(paths.iter().cloned());
-    let output = run_write(&repo_dir, args).await?;
+    let output = run_routed(
+        &route,
+        network,
+        remote,
+        window_label,
+        workspace.selected_root_id(),
+        RoutedGitMode::Write,
+        &args,
+        None,
+    )
+    .await?;
     if output.exit_code != 0 {
         return Err(git_stage_failed());
     }
@@ -115,14 +130,26 @@ pub(crate) async fn stage_paths(
 pub(crate) async fn unstage_paths(
     trust: &TrustService,
     workspace: &(impl GitRepositoryScope + ?Sized),
+    network: &GitNetworkService,
+    remote: &RemoteSessionService,
     window_label: &str,
     paths: &[String],
 ) -> Result<(), CommandError> {
     validate_paths(paths)?;
-    let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
+    let route = resolve_repo_route(trust, workspace, remote, window_label).await?;
     let mut args: Vec<String> = vec!["reset".to_owned(), "-q".to_owned(), "--".to_owned()];
     args.extend(paths.iter().cloned());
-    let output = run_write(&repo_dir, args).await?;
+    let output = run_routed(
+        &route,
+        network,
+        remote,
+        window_label,
+        workspace.selected_root_id(),
+        RoutedGitMode::Write,
+        &args,
+        None,
+    )
+    .await?;
     if output.exit_code != 0 {
         return Err(git_unstage_failed());
     }

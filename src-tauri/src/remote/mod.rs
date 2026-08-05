@@ -37,8 +37,10 @@ pub mod commands;
 pub mod dto;
 pub(crate) mod known_hosts;
 pub(crate) mod remote_fs;
+pub(crate) mod remote_git;
 pub(crate) mod remote_terminal;
 pub mod session;
+pub(crate) mod shell_escape;
 #[cfg(test)]
 pub(crate) mod test_support;
 
@@ -356,15 +358,49 @@ pub(crate) fn remote_terminal_unavailable() -> CommandError {
     )
 }
 
+/// `F220` S6: [`shell_escape::encode_posix_command_line`]'s own fail-closed
+/// code — an empty argument list, an argument containing a NUL byte, or an
+/// encoded command line exceeding this domain's defensive length ceiling.
+/// See that function's own module doc for the full rationale of each case;
+/// they are folded into one code here because every one of them means the
+/// same thing to a caller — "this command cannot be safely sent to the
+/// remote shell at all" — with no actionable difference between the three
+/// for a user-facing message (mirrors `remote_sftp_unavailable`'s identical
+/// "fold every unrecoverable-differently case together" precedent).
+pub(crate) fn remote_shell_escape_invalid() -> CommandError {
+    CommandError::new(
+        "REMOTE_SHELL_ESCAPE_INVALID",
+        "The remote command could not be safely encoded (an empty argument list, a NUL byte in \
+         an argument, or the encoded command line exceeds the size limit).",
+    )
+}
+
+/// `F220` S6: folds every unrecoverable-differently failure of the exec
+/// channel `remote::remote_git` drives (channel-open rejected, the `exec`
+/// request's own `SSH_MSG_CHANNEL_FAILURE` reply, a malformed/absent reply)
+/// into one caller-facing code — mirrors `remote_terminal_unavailable`'s
+/// identical "fold every unrecoverable-differently case together" precedent
+/// for the sibling `pty-req`/`shell` transport. Never itself surfaced to the
+/// WebView: `git::remote_route`'s adapter layer translates this (and every
+/// other `remote::remote_git` transport failure) into the `git::` domain's
+/// own existing `GIT_EXEC_*` codes, so a caller cannot tell a local exec
+/// failure from a remote one — see that module's own doc comment.
+pub(crate) fn remote_git_exec_unavailable() -> CommandError {
+    CommandError::new(
+        "REMOTE_GIT_EXEC_UNAVAILABLE",
+        "The remote git exec channel is not available.",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         remote_agent_auth_rejected, remote_agent_no_identities, remote_agent_timed_out,
         remote_agent_unavailable, remote_connect_cancelled, remote_connect_failed,
-        remote_connect_timed_out, remote_host_key_changed, remote_host_key_store_unavailable,
-        remote_request_invalid, remote_root_identity_changed, remote_root_path_changed,
-        remote_session_disconnected, remote_session_limit_reached, remote_session_not_found,
-        remote_terminal_unavailable,
+        remote_connect_timed_out, remote_git_exec_unavailable, remote_host_key_changed,
+        remote_host_key_store_unavailable, remote_request_invalid, remote_root_identity_changed,
+        remote_root_path_changed, remote_session_disconnected, remote_session_limit_reached,
+        remote_session_not_found, remote_shell_escape_invalid, remote_terminal_unavailable,
     };
 
     #[test]
@@ -419,6 +455,14 @@ mod tests {
         assert_eq!(
             remote_terminal_unavailable().code(),
             "REMOTE_TERMINAL_UNAVAILABLE"
+        );
+        assert_eq!(
+            remote_shell_escape_invalid().code(),
+            "REMOTE_SHELL_ESCAPE_INVALID"
+        );
+        assert_eq!(
+            remote_git_exec_unavailable().code(),
+            "REMOTE_GIT_EXEC_UNAVAILABLE"
         );
     }
 

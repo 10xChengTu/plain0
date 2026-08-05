@@ -580,12 +580,11 @@ fn aggregate_local_root_lists_silently_exclude_remote_roots() {
     assert_eq!(history[0].0, temp.path().canonicalize().unwrap());
 }
 
-/// Unlike the whole-set trust identity, the *per-root* storage identity
-/// (`root_storage_identities`, the backup domain's key) covers both
-/// backends — ADR 0007 §2's own requirement that the remote digest be
-/// implemented, even though nothing outside this slice's tests can yet
-/// construct a live remote root to actually reach the backup domain with
-/// one.
+/// The *per-root* storage identity (`root_storage_identities`, the backup
+/// domain's key) covers both backends — ADR 0007 §2's own requirement that
+/// the remote digest be implemented — and, as of `F220` S6, is also the
+/// exact set of building blocks `stable_identity()`'s own mixed-backend path
+/// folds into one whole-set digest (see that method's own doc comment).
 #[test]
 fn root_storage_identities_produce_distinct_reproducible_digests_for_both_backends() {
     let temp = TempDir::new().unwrap();
@@ -646,6 +645,130 @@ fn root_backend_unsupported_has_a_stable_code() {
         super::root_backend_unsupported().code(),
         "ROOT_BACKEND_UNSUPPORTED"
     );
+}
+
+// --- `F220` S6: `stable_identity()` extended to cover remote roots --------
+
+/// `F220` S6 requirement 1: a purely-remote workspace (zero local roots) now
+/// produces a real identity instead of `None` — this is the exact gap the
+/// trust domain's own module doc previously recorded (`TrustService::grant`
+/// reported `TRUST_UNAVAILABLE` for such a workspace because `stable_identity`
+/// had nothing to hash). Covers zero local + one remote, and zero local +
+/// several remote, since neither count is special-cased in the implementation.
+#[test]
+fn stable_identity_is_some_for_a_purely_remote_workspace_with_one_or_many_roots() {
+    let mut single = WorkspaceScope::new();
+    single
+        .authorize_remote_root_for_test(
+            "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "/srv/project",
+            "Remote Project",
+        )
+        .expect("remote root authorizes");
+    let identity = single.stable_identity();
+    assert!(
+        identity.is_some(),
+        "a purely-remote workspace must now be able to produce a stable identity"
+    );
+    assert_eq!(identity.unwrap().as_dir_name().len(), 64);
+
+    let mut several = WorkspaceScope::new();
+    for index in 0..5 {
+        several
+            .authorize_remote_root_for_test(
+                "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                &format!("/srv/project-{index}"),
+                "Remote Project",
+            )
+            .expect("remote root authorizes");
+    }
+    assert!(several.stable_identity().is_some());
+}
+
+/// `F220` S6 requirement 2: the mixed-backend whole-set identity is
+/// order-independent, exactly like the pre-existing local-only path already
+/// is (`stable_identity_is_none_for_the_empty_scope_and_independent_of_
+/// authorization_order`, above).
+#[test]
+fn stable_identity_for_a_mixed_workspace_is_independent_of_authorization_order() {
+    let temp = TempDir::new().unwrap();
+    let local_a = temp.path().join("local-a");
+    let local_b = temp.path().join("local-b");
+    fs::create_dir(&local_a).unwrap();
+    fs::create_dir(&local_b).unwrap();
+    let remote_fingerprint_a = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    let remote_fingerprint_b = "SHA256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
+
+    let mut in_order = WorkspaceScope::new();
+    in_order.authorize_root(&local_a).unwrap();
+    in_order
+        .authorize_remote_root_for_test(remote_fingerprint_a, "/srv/one", "Remote One")
+        .unwrap();
+    in_order.authorize_root(&local_b).unwrap();
+    in_order
+        .authorize_remote_root_for_test(remote_fingerprint_b, "/srv/two", "Remote Two")
+        .unwrap();
+
+    let mut reverse_order = WorkspaceScope::new();
+    reverse_order
+        .authorize_remote_root_for_test(remote_fingerprint_b, "/srv/two", "Remote Two")
+        .unwrap();
+    reverse_order.authorize_root(&local_b).unwrap();
+    reverse_order
+        .authorize_remote_root_for_test(remote_fingerprint_a, "/srv/one", "Remote One")
+        .unwrap();
+    reverse_order.authorize_root(&local_a).unwrap();
+
+    assert_eq!(
+        in_order.stable_identity().unwrap().as_dir_name(),
+        reverse_order.stable_identity().unwrap().as_dir_name(),
+        "a mixed local+remote root set's identity must not depend on \
+         authorization order"
+    );
+}
+
+/// `F220` S6 requirement 3: the purely-local hash construction must be
+/// byte-for-byte unchanged by this slice — an already-granted local-only
+/// trust record on disk must stay valid. Pinned against a literal,
+/// hand-computed SHA-256 digest (domain separator `plain.workspace.roots-
+/// identity.v1\0`, big-endian u32 path count, then each path's big-endian u64
+/// byte length followed by its raw UTF-8 bytes) rather than merely comparing
+/// two calls to the function to each other, so an accidental change to the
+/// hash construction itself (not just a regression in order-independence)
+/// would fail this test.
+#[test]
+fn stable_roots_identity_pins_a_known_hash_for_a_fixed_single_path_input() {
+    let paths = vec![PathBuf::from("/plain/fixed/regression/path")];
+    let identity =
+        super::stable_roots_identity(&paths).expect("non-empty path set has an identity");
+    assert_eq!(
+        identity, "f4d90a9b8c00e7b42cc8579bceba8942109adbe11588ba6ae729a97de8278888",
+        "the local-only hash construction must never change without a deliberate migration"
+    );
+}
+
+/// `F220` S6: the new mixed-backend whole-set hash construction, pinned the
+/// same way as [`stable_roots_identity_pins_a_known_hash_for_a_fixed_single_path_input`]
+/// — a regression guard against an accidental change to
+/// [`super::stable_mixed_roots_identity`]'s own domain separator, length-
+/// prefixing, or sort order, computed independently (Python `hashlib`, not
+/// by calling the function under test) against the same fixed inputs
+/// [`root_storage_identities_produce_distinct_reproducible_digests_for_both_backends`]-style
+/// tests already use elsewhere in this file.
+#[test]
+fn stable_mixed_roots_identity_pins_a_known_hash_for_fixed_digest_inputs() {
+    let local_digest =
+        "f4d90a9b8c00e7b42cc8579bceba8942109adbe11588ba6ae729a97de8278888".to_owned();
+    let remote_digest =
+        "7df330225d5ca7de5ae2cde9cc708175d45c423661732664e728f37f56b9fc49".to_owned();
+    let mixed = super::stable_mixed_roots_identity(&[local_digest, remote_digest])
+        .expect("non-empty digest set has an identity");
+    assert_eq!(
+        mixed,
+        "d6a7f4dd737cdbdb507970ef329cc3ced95bfc48e999dac08cc5f4dc09070567"
+    );
+
+    assert!(super::stable_mixed_roots_identity(&[]).is_none());
 }
 
 fn read_resolved(scope: &WorkspaceScope, root_id: RootId, path: &RelativePath) -> Vec<u8> {

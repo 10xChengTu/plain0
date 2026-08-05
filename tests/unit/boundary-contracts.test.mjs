@@ -70,6 +70,7 @@ import {
 	validateDebugSpawnConstructionShape,
 	validateDebugFramingBounds,
 	validateRootBackendOwnershipBoundary,
+	validateShellEscapeSoleCallerBoundary,
 } from "../../scripts/plain/boundary-contracts.mjs";
 
 const baselineWindow = {
@@ -10675,8 +10676,8 @@ describe("Plain F080 S1 git command registration Harness", () => {
 			"src-tauri/src/git/commands.rs",
 			(source) =>
 				source.replace(
-					"status::git_status(trust.inner(), &scope, window.label())",
-					'status::git_status(trust.inner(), &scope, "main")',
+					"status::git_status(\n        trust.inner(),\n        &scope,\n        network_service.inner(),\n        remote.inner(),\n        window.label(),\n    )",
+					'status::git_status(trust.inner(), &scope, network_service.inner(), remote.inner(), "main")',
 				),
 		);
 		expect(validateGitCommandRegistration(rewired)).toContain(
@@ -10699,8 +10700,8 @@ describe("Plain F080 S1 git command registration Harness", () => {
 			"src-tauri/src/git/commands.rs",
 			(source) =>
 				source.replace(
-					"    let scope = SelectedGitRoot::new(workspace.inner(), root_id);\n    let result = status::git_status(trust.inner(), &scope, window.label()).await?;",
-					"    let result = status::git_status(trust.inner(), workspace.inner(), window.label()).await?;",
+					"    let scope = SelectedGitRoot::new(workspace.inner(), root_id);\n    let result = status::git_status(\n        trust.inner(),\n        &scope,\n        network_service.inner(),\n        remote.inner(),\n        window.label(),\n    )\n    .await?;",
+					"    let result = status::git_status(trust.inner(), workspace.inner(), network_service.inner(), remote.inner(), window.label()).await?;",
 				),
 		);
 		expect(validateGitCommandRegistration(rewired)).toContain(
@@ -14929,5 +14930,106 @@ fn bypass(root: &super::workspace::RootBackend) -> Option<&cap_std::fs::Dir> {
 				`${source}\n// Do not ever match on RootBackend here.\nconst NOTE: &str = "RootBackend";\n`,
 		);
 		expect(validateRootBackendOwnershipBoundary(commented)).toEqual([]);
+	});
+});
+
+describe("Plain F220 S6 shell_escape sole-caller boundary", () => {
+	const shellEscapeSources = [
+		{
+			relativePath: "src-tauri/src/remote/shell_escape.rs",
+			source: `
+pub(crate) fn encode_posix_command_line(argv: &[String]) -> Result<String, CommandError> {
+  Ok(argv.join(" "))
+}
+`,
+		},
+		{
+			relativePath: "src-tauri/src/remote/mod.rs",
+			source: `
+pub(crate) mod remote_git;
+pub(crate) mod shell_escape;
+`,
+		},
+		{
+			relativePath: "src-tauri/src/remote/remote_git.rs",
+			source: `
+use super::shell_escape::encode_posix_command_line;
+fn build(argv: &[String]) -> Result<String, CommandError> {
+  encode_posix_command_line(argv)
+}
+`,
+		},
+		{
+			relativePath: "src-tauri/src/remote/session.rs",
+			source: `
+pub(crate) async fn open_git_exec_channel(&self) -> Result<(), CommandError> {
+  Ok(())
+}
+`,
+		},
+	];
+
+	it("accepts the encoder confined to remote_git.rs, with mod.rs allowed only to declare the module", () => {
+		expect(validateShellEscapeSoleCallerBoundary(shellEscapeSources)).toEqual(
+			[],
+		);
+	});
+
+	it("rejects a second file calling encode_posix_command_line directly", () => {
+		const hostile = mutateWorkspaceSource(
+			shellEscapeSources,
+			"src-tauri/src/remote/session.rs",
+			(source) =>
+				`${source}
+use super::shell_escape::encode_posix_command_line;
+fn bypass(argv: &[String]) -> Result<String, CommandError> {
+  encode_posix_command_line(argv)
+}
+`,
+		);
+		const failures = validateShellEscapeSoleCallerBoundary(hostile);
+		expect(failures).toContain(
+			"src-tauri/src/remote/session.rs must not call encode_posix_command_line — every SSH exec command line must be built exclusively by src-tauri/src/remote/remote_git.rs",
+		);
+	});
+
+	it("rejects a third file merely referencing the shell_escape module path without calling the encoder", () => {
+		const hostile = mutateWorkspaceSource(
+			shellEscapeSources,
+			"src-tauri/src/remote/session.rs",
+			(source) => `${source}\nuse super::shell_escape;\n`,
+		);
+		const failures = validateShellEscapeSoleCallerBoundary(hostile);
+		expect(failures).toContain(
+			"src-tauri/src/remote/session.rs must not reference the shell_escape module — only src-tauri/src/remote/remote_git.rs may call into it",
+		);
+	});
+
+	it("rejects remote_git.rs itself if it stops calling the encoder", () => {
+		const hostile = mutateWorkspaceSource(
+			shellEscapeSources,
+			"src-tauri/src/remote/remote_git.rs",
+			(source) =>
+				source
+					.replaceAll("encode_posix_command_line", "hand_rolled_encoder")
+					.replace(
+						"use super::shell_escape::hand_rolled_encoder;",
+						'use super::shell_escape::hand_rolled_encoder;\nfn hand_rolled_encoder(argv: &[String]) -> Result<String, CommandError> { Ok(argv.join(" ")) }',
+					),
+		);
+		const failures = validateShellEscapeSoleCallerBoundary(hostile);
+		expect(failures).toContain(
+			"src-tauri/src/remote/remote_git.rs must call shell_escape::encode_posix_command_line — it is this crate's sole audited exec-command-line builder",
+		);
+	});
+
+	it("ignores encode_posix_command_line/shell_escape spelled out inside comments or string literals", () => {
+		const commented = mutateWorkspaceSource(
+			shellEscapeSources,
+			"src-tauri/src/remote/session.rs",
+			(source) =>
+				`${source}\n// Never call encode_posix_command_line or shell_escape here.\nconst NOTE: &str = "encode_posix_command_line and shell_escape";\n`,
+		);
+		expect(validateShellEscapeSoleCallerBoundary(commented)).toEqual([]);
 	});
 });

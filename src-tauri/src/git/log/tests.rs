@@ -17,6 +17,8 @@ use super::{
     file_history, line_history_detail, line_history_list, log_graph, parse_graph_entries,
     parse_history_entries, LineRange,
 };
+use crate::git::network::GitNetworkService;
+use crate::remote::session::RemoteSessionService;
 use crate::trust::service::TrustService;
 use crate::workspace::dto::WorkspacePickRootsMode;
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
@@ -991,7 +993,15 @@ fn log_graph_topo_orders_a_multi_branch_merge_dag_including_an_octopus_merge() {
 
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
-    let result = block_on(log_graph(&trust, &workspace, "main", 100)).expect("log_graph succeeds");
+    let result = block_on(log_graph(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        100,
+    ))
+    .expect("log_graph succeeds");
 
     assert_eq!(
         result.nodes.len(),
@@ -1075,7 +1085,15 @@ fn log_graph_excludes_a_commit_reachable_only_from_a_detached_head() {
 
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
-    let result = block_on(log_graph(&trust, &workspace, "main", 100)).expect("log_graph succeeds");
+    let result = block_on(log_graph(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        100,
+    ))
+    .expect("log_graph succeeds");
 
     let shas: Vec<&str> = result.nodes.iter().map(|node| node.sha.as_str()).collect();
     assert!(
@@ -1110,8 +1128,15 @@ fn log_graph_is_unaffected_by_a_real_non_ascii_branch_name_existing_in_the_repos
 
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
-    let result = block_on(log_graph(&trust, &workspace, "main", 100))
-        .expect("log_graph tolerates a real non-ASCII branch name existing in the repository");
+    let result = block_on(log_graph(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        100,
+    ))
+    .expect("log_graph tolerates a real non-ASCII branch name existing in the repository");
     assert_eq!(result.nodes.len(), 1);
     assert_eq!(result.nodes[0].sha, root_sha);
 }
@@ -1169,8 +1194,15 @@ fn log_graph_is_immune_to_a_hostile_subject_line_containing_a_unit_separator_byt
 
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
-    let result = block_on(log_graph(&trust, &workspace, "main", 10))
-        .expect("log_graph succeeds despite the hostile subject");
+    let result = block_on(log_graph(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        10,
+    ))
+    .expect("log_graph succeeds despite the hostile subject");
     assert_eq!(result.nodes.len(), 1);
     assert_eq!(result.nodes[0].sha, sha);
     assert_eq!(
@@ -1243,7 +1275,15 @@ fn log_graph_excludes_a_real_stash_entry() {
 
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
-    let result = block_on(log_graph(&trust, &workspace, "main", 100)).expect("log_graph succeeds");
+    let result = block_on(log_graph(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        100,
+    ))
+    .expect("log_graph succeeds");
     let shas: Vec<&str> = result.nodes.iter().map(|node| node.sha.as_str()).collect();
     assert!(
         !shas.contains(&stash_sha.as_str()),
@@ -1261,8 +1301,15 @@ fn log_graph_of_a_repository_with_zero_commits_is_an_empty_non_error_result() {
     let repo = init_repo();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
-    let result = block_on(log_graph(&trust, &workspace, "main", 100))
-        .expect("log_graph succeeds on a repository with zero commits");
+    let result = block_on(log_graph(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        100,
+    ))
+    .expect("log_graph succeeds on a repository with zero commits");
     assert!(result.nodes.is_empty());
     assert!(!result.truncated);
 }
@@ -1284,7 +1331,15 @@ fn log_graph_caps_at_the_callers_max_count_and_reports_truncated() {
 
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
-    let result = block_on(log_graph(&trust, &workspace, "main", 2)).expect("log_graph succeeds");
+    let result = block_on(log_graph(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        2,
+    ))
+    .expect("log_graph succeeds");
     assert_eq!(result.nodes.len(), 2);
     assert!(result.truncated);
     assert_eq!(result.nodes[0].sha, shas[2], "newest first");
@@ -1296,8 +1351,15 @@ fn log_graph_rejects_a_zero_max_count_before_ever_invoking_git() {
     let trust_base = TempDir::new().unwrap();
     let workspace = WorkspaceService::new();
     let trust = TrustService::new(trust_base.path().to_path_buf());
-    let error =
-        block_on(log_graph(&trust, &workspace, "main", 0)).expect_err("max_count=0 is rejected");
+    let error = block_on(log_graph(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        0,
+    ))
+    .expect_err("max_count=0 is rejected");
     assert_eq!(error.code(), "GIT_LOG_GRAPH_INVALID_REQUEST");
 }
 
@@ -1306,8 +1368,15 @@ fn log_graph_rejects_a_max_count_above_the_defensive_ceiling_before_ever_invokin
     let trust_base = TempDir::new().unwrap();
     let workspace = WorkspaceService::new();
     let trust = TrustService::new(trust_base.path().to_path_buf());
-    let error = block_on(log_graph(&trust, &workspace, "main", 5_001))
-        .expect_err("max_count above MAX_GRAPH_MAX_COUNT is rejected");
+    let error = block_on(log_graph(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        5_001,
+    ))
+    .expect_err("max_count above MAX_GRAPH_MAX_COUNT is rejected");
     assert_eq!(error.code(), "GIT_LOG_GRAPH_INVALID_REQUEST");
 }
 

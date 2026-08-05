@@ -4,6 +4,7 @@ import {
 	NETWORK_CONFIRM_PRIMARY_BUTTON,
 	networkConfirmationDetail,
 	networkConfirmationMessage,
+	REMOTE_NETWORK_DISABLED_TITLE,
 	resolveNetworkConfirmation,
 	type NetworkConfirmationPreview,
 	type NetworkConfirmDialogService,
@@ -122,5 +123,24 @@ describe("resolveNetworkConfirmation", () => {
 			NETWORK_CONFIRM_PRIMARY_BUTTON.forcePush,
 		);
 		expect(options.primaryButton).not.toBe(NETWORK_CONFIRM_PRIMARY_BUTTON.push);
+	});
+});
+
+describe("F220 S6 REMOTE_NETWORK_DISABLED_TITLE", () => {
+	it("is a non-empty, stable tooltip/notification string for a remote-backed root's disabled network controls", () => {
+		expect(REMOTE_NETWORK_DISABLED_TITLE.length).toBeGreaterThan(0);
+	});
+
+	it("names fetch, pull, and push explicitly, so the disabled reason is unambiguous", () => {
+		expect(REMOTE_NETWORK_DISABLED_TITLE).toContain("fetch");
+		expect(REMOTE_NETWORK_DISABLED_TITLE).toContain("pull");
+		expect(REMOTE_NETWORK_DISABLED_TITLE).toContain("push");
+	});
+
+	it("says the operation is unsupported for a remote repository, not merely unavailable right now (distinct from a transient-failure message)", () => {
+		expect(REMOTE_NETWORK_DISABLED_TITLE.toLowerCase()).toContain("remote");
+		expect(REMOTE_NETWORK_DISABLED_TITLE.toLowerCase()).toContain(
+			"not supported",
+		);
 	});
 });

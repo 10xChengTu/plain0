@@ -46,7 +46,7 @@ objc2-foundation = { version = "=0.3.2", default-features = false, features = ["
 
 [dev-dependencies]
 tempfile = "3.27.0"
-tokio = { version = "=1.53.0", default-features = false, features = ["fs"] }
+tokio = { version = "=1.53.0", default-features = false, features = ["fs", "process"] }
 tokio-stream = { version = "0.1.19", default-features = false, features = ["net"] }
 
 [profile.release]

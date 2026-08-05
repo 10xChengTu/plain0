@@ -82,17 +82,22 @@ let unlistenRemoteSessionEvents: (() => void | Promise<void>) | undefined;
 const knownRemoteRoots = new Map<string, KnownRemoteRootRecord>();
 
 /**
- * `F220` S5: the one place outside this module that needs to tell a remote
- * root apart from a local one — the terminal view's own future-tab-default
- * controls (profile/cwd), which must disable themselves and force the fixed
- * remote defaults for a remote root (see `plain-terminal-view.ts`'s own
- * `#currentRootIsRemote`/`REMOTE_TERMINAL_FUTURE_TAB_DEFAULTS` doc comments).
- * Deliberately a plain boolean query, not a snapshot of `knownRemoteRoots`
- * itself: `WorkspaceRootSnapshot` staying backend-opaque to the frontend
- * (see `knownRemoteRoots`'s own doc comment) is a real, intentional
- * boundary — this is the one narrow, read-only crack in it, kept as small
- * as a single "is this rootId one I authorized as remote" fact, not a
- * general-purpose accessor onto this module's own bookkeeping.
+ * `F220` S5: the narrow, read-only crack that lets a handful of other views
+ * tell a remote root apart from a local one without this module handing out
+ * a general-purpose accessor onto its own bookkeeping — `plain-terminal-view.ts`'s
+ * future-tab-default controls (profile/cwd), which must disable themselves
+ * and force the fixed remote defaults for a remote root (see that file's own
+ * `#currentRootIsRemote`/`REMOTE_TERMINAL_FUTURE_TAB_DEFAULTS` doc comments),
+ * and — as of `F220` S6 — `plain-scm-view.ts`'s own fetch/pull/push controls,
+ * which must disable themselves for a remote root (network operations are
+ * not part of this domain's remote core subset; see
+ * `git::git_remote_network_unsupported()`'s own doc comment on the Rust
+ * side). Deliberately a plain boolean query, not a snapshot of
+ * `knownRemoteRoots` itself: `WorkspaceRootSnapshot` staying backend-opaque
+ * to the frontend (see `knownRemoteRoots`'s own doc comment) is a real,
+ * intentional boundary — this stays the one narrow, read-only crack in it,
+ * kept as small as a single "is this rootId one I authorized as remote"
+ * fact.
  */
 export function isKnownRemoteRootId(rootId: string): boolean {
 	return knownRemoteRoots.has(rootId);

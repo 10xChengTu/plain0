@@ -3465,6 +3465,27 @@ async function installNativeIpcMock(
 						"The remote rejected the push (it has commits this branch does not).",
 				};
 			}
+			// `F220` S6: mirrors the real Rust `git::git_remote_network_unsupported()`
+			// constructor exactly (same code, same message) — see that function's
+			// own doc comment for why this is a distinct code from the generic
+			// `ROOT_BACKEND_UNSUPPORTED` every other out-of-scope command still
+			// falls back to.
+			function gitRemoteNetworkUnsupported() {
+				return {
+					code: "GIT_REMOTE_NETWORK_UNSUPPORTED",
+					message:
+						"Network operations (fetch, pull, push) are not supported for a remote repository.",
+				};
+			}
+			// `F220` S6: `git_network_preview`/`git_fetch`/`git_pull`/`git_push`'s
+			// own remote-root fail-closed check — a root present in
+			// `remoteRootTrees` (authorized via `remote_workspace_add_root`) is
+			// remote-backed; every other authorized root is local. Mirrors
+			// `browser-mock.ts`'s own `gitEffectiveNetworkRootIdForTest`/
+			// `remoteRootBindings.has(...)` check for the same real behavior.
+			function isMockGitRootRemote(rootId: unknown): boolean {
+				return typeof rootId === "string" && remoteRootTrees.has(rootId);
+			}
 			function findMockGitEntryIndex(path: string): number {
 				return mockGitEntries.findIndex(
 					(entry) =>
@@ -5865,6 +5886,9 @@ async function installNativeIpcMock(
 							if (!terminalTrusted) {
 								throw terminalNotTrusted();
 							}
+							if (isMockGitRootRemote(args.rootId)) {
+								throw gitRemoteNetworkUnsupported();
+							}
 							if (gitFixtureForTest.noRepositoryForTest === true) {
 								throw gitNoRepository();
 							}
@@ -5886,6 +5910,9 @@ async function installNativeIpcMock(
 							if (!terminalTrusted) {
 								throw terminalNotTrusted();
 							}
+							if (isMockGitRootRemote(args.rootId)) {
+								throw gitRemoteNetworkUnsupported();
+							}
 							if (gitFixtureForTest.noRepositoryForTest === true) {
 								throw gitNoRepository();
 							}
@@ -5905,6 +5932,9 @@ async function installNativeIpcMock(
 							if (!terminalTrusted) {
 								throw terminalNotTrusted();
 							}
+							if (isMockGitRootRemote(args.rootId)) {
+								throw gitRemoteNetworkUnsupported();
+							}
 							if (gitFixtureForTest.noRepositoryForTest === true) {
 								throw gitNoRepository();
 							}
@@ -5922,6 +5952,9 @@ async function installNativeIpcMock(
 						case "git_push": {
 							if (!terminalTrusted) {
 								throw terminalNotTrusted();
+							}
+							if (isMockGitRootRemote(args.rootId)) {
+								throw gitRemoteNetworkUnsupported();
 							}
 							if (gitFixtureForTest.noRepositoryForTest === true) {
 								throw gitNoRepository();
@@ -28099,6 +28132,381 @@ test("F220 S5: local terminal creation, echo, and exit banners are unaffected by
 	await emitTerminalProcessExit(page, 0);
 	await expect(pane).toHaveAttribute("data-terminal-exit-code", "0");
 	await expect(pane).not.toHaveAttribute("data-terminal-exit-signal");
+
+	expect(pageErrors).toEqual([]);
+});
+
+// ---------------------------------------------------------------------
+// `F220` S6 — remote git core subset (SSH `exec` channel). Mirrors the S5
+// remote-terminal section's own "open both the fixed native root *and* one
+// mock remote root in the same window" shape — see
+// `openMixedLocalAndRemoteWorkspaceForTerminal`'s own doc comment for the
+// mixed-workspace rationale; the Rust side additionally proves a *purely*
+// remote workspace can be granted trust too (`workspace::WorkspaceScope::
+// stable_identity`'s own doc comment), but the mixed shape stays the more
+// realistic one to exercise at this layer, and reuses the same established
+// SSH-connect/authorize helpers as the S5 section above.
+// ---------------------------------------------------------------------
+
+/** Opens the fixed native root, connects a mock SSH session, and authorizes
+ * one remote root through it — returns that remote root's own `rootId`, read
+ * back off the Source Control repository selector (the only place this
+ * mock's dynamically-issued remote root id is otherwise observable from the
+ * test side). Never itself selects a repository or waits on trust — callers
+ * decide both explicitly, since `terminalTrustedForTest` varies per
+ * scenario below. */
+async function openMixedLocalAndRemoteWorkspaceForGit(
+	page: Page,
+	init: {
+		readonly terminalTrustedForTest?: boolean;
+		readonly gitFixtureForTest?: TestGitFixture;
+		readonly gitNetworkFixtureForTest?: TestGitNetworkFixture;
+	} = {},
+): Promise<{ readonly body: Locator; readonly remoteRootId: string }> {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		init.terminalTrustedForTest ?? true,
+		init.gitFixtureForTest ?? {},
+		init.gitNetworkFixtureForTest ?? {},
+	);
+	await openNativeWorkspaceExplorer(page);
+	await connectMockSshSession(page, "example.com", "octocat");
+	await openRemoteFolderViaQuickPick(page, ["home", "octocat", "project"]);
+	// The "connected" notification toast is itself a `role="dialog"` element
+	// (mirrors the `F220` S3B report's own "`.monaco-dialog-box`, not a
+	// generic `role=dialog`" lesson) — cleared here so every scenario below
+	// can locate a real confirmation dialog unambiguously.
+	await clearAllToasts(page);
+
+	const body = await openScmView(page);
+	const selector = body.getByRole("combobox", {
+		name: "Source Control Repository",
+	});
+	await expect(selector).toBeEnabled();
+	const optionValues = await selector
+		.locator("option")
+		.evaluateAll((options) =>
+			options.map((option) => (option as HTMLOptionElement).value),
+		);
+	const remoteRootId = optionValues.find(
+		(value) => value.length > 0 && value !== nativeRootId,
+	);
+	if (remoteRootId === undefined) {
+		throw new Error(
+			"expected the Source Control repository selector to list the newly authorized remote root",
+		);
+	}
+
+	expect(pageErrors).toEqual([]);
+	return { body, remoteRootId };
+}
+
+test("F220 S6: a remote repository's status renders, and stage/commit route through the exact same UI and audited request shapes as a local root", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+
+	const { body, remoteRootId } = await openMixedLocalAndRemoteWorkspaceForGit(
+		page,
+		{
+			gitFixtureForTest: {
+				branch: { oid: "0".repeat(40), head: "main", upstream: null },
+				entries: [
+					{
+						type: "ordinary",
+						worktreeStatus: "M",
+						path: "src/remote-file.ts",
+					},
+				],
+			},
+		},
+	);
+
+	const selector = body.getByRole("combobox", {
+		name: "Source Control Repository",
+	});
+	await selector.selectOption(remoteRootId);
+
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_status")).length)
+		.toBe(1);
+	const [statusCall] = await terminalCallsFor(page, "git_status");
+	expect(statusCall?.args.rootId).toBe(remoteRootId);
+
+	const changes = body.locator(
+		".plain-scm-view-changes .plain-scm-view-resource",
+	);
+	await expect(changes).toHaveCount(1);
+	await expect(changes).toContainText("src/remote-file.ts");
+
+	// Stage — the exact same "Stage" button and `git_stage_paths` request
+	// shape a local root's own working-tree entry uses (see "Source Control
+	// requires an explicit repository in a multi-root workspace…", above).
+	await changes.getByRole("button", { name: "Stage", exact: true }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_stage_paths")).length)
+		.toBe(1);
+	const [stageCall] = await terminalCallsFor(page, "git_stage_paths");
+	expect(stageCall?.args.rootId).toBe(remoteRootId);
+	expect(stageCall?.args.request).toEqual({ paths: ["src/remote-file.ts"] });
+	await expect(changes).toHaveCount(0);
+	const staged = body.locator(
+		".plain-scm-view-staged .plain-scm-view-resource",
+	);
+	await expect(staged).toHaveCount(1);
+	await expect(staged).toContainText("src/remote-file.ts");
+
+	// Commit.
+	const input = body.locator(".plain-scm-view-input");
+	await input.fill("feat: a real remote commit message");
+	await body.getByRole("button", { name: "Commit", exact: true }).click();
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_commit")).length)
+		.toBe(1);
+	const [commitCall] = await terminalCallsFor(page, "git_commit");
+	expect(commitCall?.args.rootId).toBe(remoteRootId);
+	expect(commitCall?.args.request).toEqual({
+		message: "feat: a real remote commit message",
+		amend: false,
+	});
+	await expect(input).toHaveValue("");
+	await expect(staged).toHaveCount(0);
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
+test("F220 S6: git operations on an untrusted remote workspace fail closed with an accurate message and zero git_status calls, then recover once trust is granted", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	const { body, remoteRootId } = await openMixedLocalAndRemoteWorkspaceForGit(
+		page,
+		{
+			terminalTrustedForTest: false,
+			gitFixtureForTest: {
+				branch: { oid: "0".repeat(40), head: "main", upstream: null },
+				entries: [
+					{
+						type: "ordinary",
+						worktreeStatus: "M",
+						path: "src/remote-file.ts",
+					},
+				],
+			},
+		},
+	);
+
+	const selector = body.getByRole("combobox", {
+		name: "Source Control Repository",
+	});
+	await selector.selectOption(remoteRootId);
+
+	// Fail closed: an accurate, specific explanation — never a blank panel,
+	// a stuck spinner, or a generic/mismatched error — and zero attempted
+	// `git_status` calls (trust is checked before any exec of any kind).
+	await expect(page.locator(".plain-scm-view-message")).toHaveText(
+		/execution trust/,
+	);
+	await expect(
+		body.locator(".plain-scm-view-changes .plain-scm-view-resource"),
+	).toHaveCount(0);
+	expect(await terminalCallsFor(page, "git_status")).toEqual([]);
+
+	// Grant trust through the terminal panel's own prompt — `PlainScmView`
+	// never prompts for trust itself (see that file's own module doc
+	// comment); trust itself is workspace-wide (not per-root), exactly
+	// mirroring the terminal domain's own already-established flow.
+	// `createTerminal` alone is not enough in a still-ambiguous multi-root
+	// workspace — `PlainTerminalView.openNewTab` defers the actual trust
+	// check until a root is explicitly resolved (see that method's own doc
+	// comment) — so an explicit selection in the terminal panel's own root
+	// selector is what actually triggers it.
+	await createTerminal(page);
+	const terminalRootSelector = page.getByRole("combobox", {
+		name: "New Terminal Working Folder",
+	});
+	await expect(terminalRootSelector).toBeEnabled();
+	await terminalRootSelector.selectOption(remoteRootId);
+
+	const confirmDialog = page.getByRole("dialog");
+	await expect(confirmDialog).toBeVisible();
+	await confirmDialog
+		.getByRole("button", { name: "Trust & Continue", exact: true })
+		.click();
+	await expect(confirmDialog).toHaveCount(0);
+	await expect
+		.poll(
+			async () =>
+				(await terminalCallsFor(page, "workspace_trust_grant")).length,
+		)
+		.toBe(1);
+
+	// The SCM view does not auto-refresh on a trust change elsewhere in the
+	// Workbench (see `PlainScmView`'s own module doc comment) — "Plain:
+	// Refresh Source Control" is the documented recovery path.
+	await executePaletteCommand(
+		page,
+		"Refresh Source Control",
+		"Plain: Refresh Source Control",
+	);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_status")).length)
+		.toBe(1);
+	const [statusCall] = await terminalCallsFor(page, "git_status");
+	expect(statusCall?.args.rootId).toBe(remoteRootId);
+	await expect(
+		body.locator(".plain-scm-view-changes .plain-scm-view-resource"),
+	).toContainText("src/remote-file.ts");
+	await expect(page.locator(".plain-scm-view-message")).toHaveText("");
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("F220 S6: fetch/pull/push and the Force checkbox are precisely disabled with an explanatory tooltip for a remote repository, and re-enabled for the native root — no network IPC ever fires for the remote one", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	const { body, remoteRootId } = await openMixedLocalAndRemoteWorkspaceForGit(
+		page,
+		{
+			gitNetworkFixtureForTest: {
+				upstream: "origin/main",
+				ahead: 1,
+				behind: 0,
+			},
+		},
+	);
+
+	const selector = body.getByRole("combobox", {
+		name: "Source Control Repository",
+	});
+	const fetchButton = body.getByRole("button", { name: "Fetch", exact: true });
+	const pullButton = body.getByRole("button", { name: "Pull", exact: true });
+	const pushButton = body.getByRole("button", { name: "Push", exact: true });
+	const forceCheckbox = body.getByRole("checkbox", {
+		name: "Force Push (with lease)",
+	});
+
+	await selector.selectOption(remoteRootId);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_status")).length)
+		.toBe(1);
+
+	const disabledTitle =
+		"Network operations (fetch, pull, push) are not supported for a remote repository.";
+	await expect(fetchButton).toBeDisabled();
+	await expect(pullButton).toBeDisabled();
+	await expect(pushButton).toBeDisabled();
+	await expect(forceCheckbox).toBeDisabled();
+	await expect(fetchButton).toHaveAttribute("title", disabledTitle);
+	await expect(pullButton).toHaveAttribute("title", disabledTitle);
+	await expect(pushButton).toHaveAttribute("title", disabledTitle);
+	await expect(forceCheckbox).toHaveAttribute("title", disabledTitle);
+
+	// Defense in depth: even a forced click (bypassing the browser's own
+	// disabled-control click suppression) must never reach the bridge — see
+	// `PlainScmView.previewNetworkOperation`'s own early remote check.
+	await fetchButton.click({ force: true });
+	await pullButton.click({ force: true });
+	await pushButton.click({ force: true });
+	expect(await terminalCallsFor(page, "git_fetch")).toEqual([]);
+	expect(await terminalCallsFor(page, "git_pull")).toEqual([]);
+	expect(await terminalCallsFor(page, "git_push")).toEqual([]);
+	expect(await terminalCallsFor(page, "git_network_preview")).toEqual([]);
+
+	// Switching back to the native root re-enables every control, with no
+	// leftover tooltip.
+	await selector.selectOption(nativeRootId);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_status")).length)
+		.toBe(2);
+	await expect(fetchButton).toBeEnabled();
+	await expect(pullButton).toBeEnabled();
+	await expect(pushButton).toBeEnabled();
+	await expect(forceCheckbox).toBeEnabled();
+	await expect(fetchButton).not.toHaveAttribute("title");
+	await expect(pullButton).not.toHaveAttribute("title");
+	await expect(pushButton).not.toHaveAttribute("title");
+	await expect(forceCheckbox).not.toHaveAttribute("title");
+
+	// And a real fetch against the native root still works normally,
+	// confirming the disable is genuinely scoped to the remote root, not a
+	// global regression.
+	await fetchButton.click();
+	const dialog = page.getByRole("dialog");
+	await expect(dialog).toBeVisible();
+	await dialog.getByRole("button", { name: "Fetch", exact: true }).click();
+	await expect(dialog).toHaveCount(0);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "git_fetch")).length)
+		.toBe(1);
+	const [fetchCall] = await terminalCallsFor(page, "git_fetch");
+	expect(fetchCall?.args.rootId).toBe(nativeRootId);
+
+	expect(pageErrors).toEqual([]);
+});
+
+test("F220 S6: fetch/pull/push against a remote root are rejected server-side with the dedicated code even if a client-side check were bypassed", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+
+	const { remoteRootId } = await openMixedLocalAndRemoteWorkspaceForGit(page, {
+		gitNetworkFixtureForTest: { upstream: "origin/main", ahead: 0, behind: 0 },
+	});
+
+	// Bypasses the view entirely and invokes the native transport directly
+	// with the remote root's id — proves the mock's own fail-closed check
+	// (mirroring the real Rust `git::network::reject_remote_root`) is not
+	// merely a client-side UI nicety the view happens to also enforce.
+	const error = await page.evaluate(async (rootId) => {
+		try {
+			await (
+				window as unknown as {
+					__TAURI_INTERNALS__: {
+						invoke: (
+							command: string,
+							args: Record<string, unknown>,
+						) => Promise<unknown>;
+					};
+				}
+			).__TAURI_INTERNALS__.invoke("git_fetch", {
+				rootId,
+				request: {},
+			});
+			return null;
+		} catch (caught) {
+			return caught as { code?: string; message?: string };
+		}
+	}, remoteRootId);
+	expect(error?.code).toBe("GIT_REMOTE_NETWORK_UNSUPPORTED");
+	expect(error?.code).not.toBe("ROOT_BACKEND_UNSUPPORTED");
 
 	expect(pageErrors).toEqual([]);
 });

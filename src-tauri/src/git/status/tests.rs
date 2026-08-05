@@ -13,6 +13,8 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use super::{git_status, parse_porcelain_v2, BranchHead, BranchOid, RenameOrCopyKind, StatusEntry};
+use crate::git::network::GitNetworkService;
+use crate::remote::session::RemoteSessionService;
 use crate::trust::service::TrustService;
 use crate::workspace::dto::WorkspacePickRootsMode;
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
@@ -611,7 +613,14 @@ fn the_end_to_end_git_status_wrapper_resolves_the_repo_and_parses_a_real_invocat
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
 
-    let status = block_on(git_status(&trust, &workspace, "main")).expect("git_status succeeds");
+    let status = block_on(git_status(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+    ))
+    .expect("git_status succeeds");
     assert_eq!(status.entries.len(), 1);
     match &status.entries[0] {
         StatusEntry::Ordinary(entry) => assert_eq!(entry.path.to_wire_lossy(), "a.txt"),
@@ -631,7 +640,13 @@ fn the_end_to_end_git_status_wrapper_rejects_an_untrusted_workspace() {
         .expect("root authorizes");
     let trust = TrustService::new(trust_base.path().to_path_buf());
 
-    let error = block_on(git_status(&trust, &workspace, "main"))
-        .expect_err("an untrusted workspace must be rejected before spawning");
+    let error = block_on(git_status(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+    ))
+    .expect_err("an untrusted workspace must be rejected before spawning");
     assert_eq!(error.code(), "WORKSPACE_NOT_TRUSTED");
 }

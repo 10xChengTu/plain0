@@ -32,9 +32,11 @@ import type {
 	PlainBridge,
 } from "../../platform/tauri/contracts";
 import { normalizeCommandError } from "../../platform/tauri/errors";
+import { isKnownRemoteRootId } from "../remote/plain-remote-workspace-commands";
 import { resolveDiscardConfirmation } from "./plain-scm-discard";
 import {
 	resolveNetworkConfirmation,
+	REMOTE_NETWORK_DISABLED_TITLE,
 	type NetworkConfirmationKind,
 } from "./plain-scm-network";
 import { PlainScmProvider, PlainScmResource } from "./plain-scm-provider";
@@ -550,6 +552,19 @@ export class PlainScmView extends ViewPane {
 		}
 	}
 
+	/** `F220` S6: whether the currently *selected* root (not necessarily the
+	 * root whatever provider/status is currently rendered was fetched for —
+	 * `renderState()` is called from both `refresh()`, after `#rootId` has
+	 * already been updated, and from other UI-only re-renders where it has
+	 * not changed, so reading `#rootId` here is always the right, current
+	 * answer either way) is remote-backed — mirrors
+	 * `plain-terminal-view.ts`'s `#currentRootIsRemote`'s identical
+	 * `isKnownRemoteRootId` query for a different domain's own remote-aware
+	 * control gating. */
+	#currentRootIsRemote(): boolean {
+		return this.#rootId !== undefined && isKnownRemoteRootId(this.#rootId);
+	}
+
 	private teardownRepository(): void {
 		this.#repository?.dispose();
 		this.#repository = undefined;
@@ -647,6 +662,30 @@ export class PlainScmView extends ViewPane {
 		this.#pushButton.disabled = controlsDisabled;
 		this.#forcePushCheckbox.disabled = controlsDisabled;
 		this.#cancelNetworkButton.disabled = !this.#networkMutationInFlight;
+		// `F220` S6: a remote-backed selected root disables fetch/pull/push
+		// (and the force-push checkbox) outright, regardless of
+		// `controlsDisabled` — network operations are out of this domain's
+		// remote core subset, not merely "temporarily busy". The cancel
+		// button is left alone: it stays governed by `#networkMutationInFlight`
+		// exactly as before (a remote root can never have a network mutation
+		// in flight to begin with, since the buttons that would start one are
+		// disabled here).
+		const isRemote = this.#currentRootIsRemote();
+		if (isRemote) {
+			this.#fetchButton.disabled = true;
+			this.#pullButton.disabled = true;
+			this.#pushButton.disabled = true;
+			this.#forcePushCheckbox.disabled = true;
+			this.#fetchButton.title = REMOTE_NETWORK_DISABLED_TITLE;
+			this.#pullButton.title = REMOTE_NETWORK_DISABLED_TITLE;
+			this.#pushButton.title = REMOTE_NETWORK_DISABLED_TITLE;
+			this.#forcePushCheckbox.title = REMOTE_NETWORK_DISABLED_TITLE;
+		} else {
+			this.#fetchButton.removeAttribute("title");
+			this.#pullButton.removeAttribute("title");
+			this.#pushButton.removeAttribute("title");
+			this.#forcePushCheckbox.removeAttribute("title");
+		}
 		if (this.#repository !== undefined) {
 			this.#inputElement.value = this.#repository.input.value;
 		}
@@ -823,6 +862,16 @@ export class PlainScmView extends ViewPane {
 	): Promise<GitNetworkPreviewResult | undefined> {
 		const bridge = this.#rootedBridge;
 		if (bridge === undefined) {
+			return undefined;
+		}
+		// `F220` S6: defense in depth alongside `renderState()`'s own disabled
+		// buttons — a click that raced a root switch (disabled just after the
+		// click dispatched, before this async handler ran) must not still
+		// reach `gitNetworkPreview` and surface the Rust-side
+		// `GIT_REMOTE_NETWORK_UNSUPPORTED` round trip; this reports the exact
+		// same accurate copy immediately instead.
+		if (this.#currentRootIsRemote()) {
+			this.notificationService.error(REMOTE_NETWORK_DISABLED_TITLE);
 			return undefined;
 		}
 		const operation: GitNetworkOperation = kind === "forcePush" ? "push" : kind;

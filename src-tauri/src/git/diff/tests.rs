@@ -12,6 +12,8 @@ use super::{
     diff_files, is_missing_blob_stderr, merge_diff_files, parse_name_status, parse_numstat,
     show_blob, DiffStatusKind, GitBlobRev,
 };
+use crate::git::network::GitNetworkService;
+use crate::remote::session::RemoteSessionService;
 use crate::trust::service::TrustService;
 use crate::workspace::dto::WorkspacePickRootsMode;
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
@@ -350,10 +352,24 @@ fn the_end_to_end_diff_files_wrapper_reports_cached_and_worktree_changes_indepen
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", root.path(), trust_base.path());
 
-    let cached =
-        block_on(diff_files(&trust, &workspace, "main", true)).expect("diff_files succeeds");
-    let worktree =
-        block_on(diff_files(&trust, &workspace, "main", false)).expect("diff_files succeeds");
+    let cached = block_on(diff_files(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        true,
+    ))
+    .expect("diff_files succeeds");
+    let worktree = block_on(diff_files(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        false,
+    ))
+    .expect("diff_files succeeds");
     assert_eq!(cached.len(), 1);
     assert_eq!(cached[0].added, Some(1));
     assert_eq!(worktree.len(), 1);

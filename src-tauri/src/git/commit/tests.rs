@@ -11,6 +11,8 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use super::commit;
+use crate::git::network::GitNetworkService;
+use crate::remote::session::RemoteSessionService;
 use crate::trust::service::TrustService;
 use crate::workspace::dto::WorkspacePickRootsMode;
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
@@ -107,6 +109,8 @@ fn commit_writes_a_message_supplied_over_stdin() {
     block_on(commit(
         &trust,
         &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
         "main",
         "-not-a-flag: message via stdin",
         false,
@@ -139,8 +143,16 @@ fn commit_amend_replaces_the_previous_message() {
 
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
-    block_on(commit(&trust, &workspace, "main", "amended message", true))
-        .expect("amend commit succeeds");
+    block_on(commit(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        "amended message",
+        true,
+    ))
+    .expect("amend commit succeeds");
 
     assert_eq!(last_commit_message(repo.path()), "amended message");
     let amended_head = raw_git(repo.path(), &["rev-parse", "HEAD"]);
@@ -164,8 +176,16 @@ fn commit_rejects_an_empty_message() {
     let repo = init_repo();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
-    let error = block_on(commit(&trust, &workspace, "main", "   ", false))
-        .expect_err("a whitespace-only message must be rejected");
+    let error = block_on(commit(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        "   ",
+        false,
+    ))
+    .expect_err("a whitespace-only message must be rejected");
     assert_eq!(error.code(), "GIT_COMMIT_EMPTY_MESSAGE");
 }
 
@@ -182,8 +202,16 @@ fn commit_reports_nothing_to_commit_when_no_changes_are_staged() {
     );
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
-    let error = block_on(commit(&trust, &workspace, "main", "nothing staged", false))
-        .expect_err("commit with nothing staged must fail");
+    let error = block_on(commit(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        "nothing staged",
+        false,
+    ))
+    .expect_err("commit with nothing staged must fail");
     assert_eq!(error.code(), "GIT_COMMIT_NOTHING_TO_COMMIT");
 }
 
@@ -225,8 +253,16 @@ fn commit_runs_the_repositorys_own_pre_commit_hook() {
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
     assert!(!marker_path.exists());
-    block_on(commit(&trust, &workspace, "main", "hook test", false))
-        .expect("commit succeeds with a well-behaved pre-commit hook");
+    block_on(commit(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        "hook test",
+        false,
+    ))
+    .expect("commit succeeds with a well-behaved pre-commit hook");
     assert!(
         marker_path.exists(),
         "GitExecMode::Write must run the repository's own pre-commit hook"
@@ -262,6 +298,8 @@ fn a_failing_pre_commit_hook_blocks_the_commit() {
     let error = block_on(commit(
         &trust,
         &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
         "main",
         "should be blocked",
         false,
@@ -288,7 +326,15 @@ fn commit_rejects_when_workspace_is_not_trusted() {
         .expect("root authorizes");
     let trust = TrustService::new(trust_base.path().to_path_buf());
 
-    let error = block_on(commit(&trust, &workspace, "main", "message", false))
-        .expect_err("untrusted workspace must reject commit");
+    let error = block_on(commit(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        "message",
+        false,
+    ))
+    .expect_err("untrusted workspace must reject commit");
     assert_eq!(error.code(), "WORKSPACE_NOT_TRUSTED");
 }

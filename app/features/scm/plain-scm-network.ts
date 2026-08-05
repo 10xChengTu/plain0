@@ -96,6 +96,20 @@ export const NETWORK_CONFIRM_PRIMARY_BUTTON: Readonly<
 	forcePush: "Force Push",
 });
 
+/** `F220` S6: `title`/notification copy for the disabled fetch/pull/push
+ * controls (and the force-push checkbox) when the currently selected root is
+ * remote-backed — kept here, in this DOM/service-free module, rather than
+ * inline in `plain-scm-view.ts` itself, mirroring
+ * `plain-terminal-defaults.ts`'s own "control copy lives in a testable,
+ * DOM-free module" precedent for the sibling terminal domain's remote-aware
+ * controls. Network/credential operations against a remote repository are
+ * explicitly out of this domain's `F220` S6 core subset
+ * (`git::git_remote_network_unsupported()` on the Rust side) — this is not a
+ * bug or a missing feature, and the copy says so plainly rather than leaving
+ * the control looking merely broken. */
+export const REMOTE_NETWORK_DISABLED_TITLE =
+	"Network operations (fetch, pull, push) are not supported for a remote repository.";
+
 /** The two outcomes `resolveNetworkConfirmation` can reach — unlike
  * `resolveDiscardConfirmation`'s three-way split, there is no `"no-op"` case
  * here: a fetch/pull/push/force-push is always a real, meaningful action to

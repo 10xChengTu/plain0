@@ -43,6 +43,7 @@ import {
 	validateRemoteCommandRegistration,
 	validateRemoteSshLibraryOwnershipBoundary,
 	validateRootBackendOwnershipBoundary,
+	validateShellEscapeSoleCallerBoundary,
 	validateSearchCommandRegistration,
 	validateSearchExpandReplacementsCommandRegistration,
 	validateSearchFileBudgetConstants,
@@ -974,6 +975,9 @@ for (const failure of validateRemoteCommandRegistration(rustSources)) {
 	fail(failure);
 }
 for (const failure of validateRootBackendOwnershipBoundary(rustSources)) {
+	fail(failure);
+}
+for (const failure of validateShellEscapeSoleCallerBoundary(rustSources)) {
 	fail(failure);
 }
 

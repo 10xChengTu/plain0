@@ -100,6 +100,7 @@ pub(crate) mod network;
 pub(crate) mod reflog;
 pub(crate) mod refs;
 pub(crate) mod remote;
+pub(crate) mod remote_route;
 pub(crate) mod repo;
 pub(crate) mod show_commit;
 pub(crate) mod stage;
@@ -195,12 +196,33 @@ pub(crate) fn git_repository_outside_root() -> CommandError {
     )
 }
 
+/// `F220` S6: returned by [`network::preview`]/[`network::fetch`]/
+/// [`network::pull`]/[`network::push`] the instant the selected root is
+/// remote-backed — checked *before* any repository resolution or exec
+/// attempt, never by falling through to [`repo::resolve_repo_toplevel`]'s
+/// generic `ROOT_BACKEND_UNSUPPORTED` fallback. Deliberately a distinct code
+/// from that one: `ROOT_BACKEND_UNSUPPORTED` means "this domain does not yet
+/// implement anything for this backend" (the honest story for every
+/// out-of-scope command this slice leaves alone — branch/tag/stash/worktree/
+/// history-rewrite/etc.), whereas this code means "this domain *does* now
+/// support this backend for git in general (`F220` S6's core subset), but
+/// network/credential operations specifically remain unimplemented for it, on
+/// purpose" — the frontend needs to tell these two apart to show accurate
+/// copy ("fetch/pull/push are not supported for a remote repository yet" vs.
+/// a generic "not supported" for, say, stash on a remote root).
+pub(crate) fn git_remote_network_unsupported() -> CommandError {
+    CommandError::new(
+        "GIT_REMOTE_NETWORK_UNSUPPORTED",
+        "Network operations (fetch, pull, push) are not supported for a remote repository.",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         git_cwd_invalid, git_exec_cancelled, git_exec_filter_discovery_failed,
         git_exec_output_limit_exceeded, git_exec_timeout, git_exec_unavailable, git_no_repository,
-        git_repository_outside_root, git_root_required,
+        git_remote_network_unsupported, git_repository_outside_root, git_root_required,
     };
 
     #[test]
@@ -222,6 +244,10 @@ mod tests {
         assert_eq!(
             git_exec_filter_discovery_failed().code(),
             "GIT_EXEC_FILTER_DISCOVERY_FAILED"
+        );
+        assert_eq!(
+            git_remote_network_unsupported().code(),
+            "GIT_REMOTE_NETWORK_UNSUPPORTED"
         );
     }
 }

@@ -169,22 +169,22 @@ fn wait_for_rendered_text(
 /// live `RemoteSessionService` session against it, a trusted workspace with
 /// one remote root bound to that live session, and a fresh `TerminalService`.
 ///
-/// **Known, documented scope boundary** (not something this slice fixes):
+/// **Historical scope boundary, closed by `F220` S6** (kept here, unchanged
+/// in shape, as the realistic "mixed local+remote workspace" case —
+/// [`purely_remote_workspace_can_grant_trust_and_start_a_remote_terminal`],
+/// below, is the dedicated test for the *zero*-local-root case this doc
+/// comment used to describe as unreachable): at S5 time,
 /// `trust::service::TrustService::grant`'s stable identity
-/// (`WorkspaceScope::stable_identity`) is computed from *local* root
-/// canonical paths only — it predates `F220` entirely and was never widened
-/// for a remote-only workspace (no earlier `F220` slice needed
-/// `require_trusted` to work for one at all: `remote_fs` operations never
-/// gate on execution trust in the first place — only process-spawning
-/// domains do, and this S5 terminal slice is the first of those to reach a
-/// remote root). A workspace with *zero* local roots therefore cannot be
-/// granted trust today, and so cannot start a remote terminal either — this
-/// harness works around that by keeping this window's pre-existing local
-/// root too, exactly like `trusted_local_workspace`'s own local-only sibling,
-/// so trust can actually be granted; this is the realistic "mixed
-/// local+remote workspace" shape besides. Widening `stable_identity` itself
-/// to also fold in remote roots is out of this vertical slice's scope
-/// (recorded in `progress.md`'s own S5 收窄 list).
+/// (`WorkspaceScope::stable_identity`) was computed from *local* root
+/// canonical paths only, so a workspace with zero local roots could not be
+/// granted trust at all, and so could not start a remote terminal either —
+/// this harness worked around that by keeping this window's pre-existing
+/// local root too, exactly like `trusted_local_workspace`'s own local-only
+/// sibling. `F220` S6 widened `stable_identity` to also fold in remote roots
+/// (see `workspace::WorkspaceScope::stable_identity`'s own doc comment), so
+/// this workaround is no longer load-bearing for *this* harness's own tests
+/// — it is kept anyway because a mixed workspace is itself a realistic,
+/// worth-covering shape, distinct from the purely-remote one.
 struct RemoteHarness {
     _local_root: TempDir,
     _remote_base: TempDir,
@@ -535,4 +535,120 @@ fn the_session_limit_is_shared_between_local_and_remote_sessions() {
     for session_id in local_sessions {
         block_on(harness.terminal.kill("main", session_id, true)).unwrap();
     }
+}
+
+// --- `F220` S6: the purely-remote trust gap [`RemoteHarness`]'s own doc
+// comment used to describe is now closed --------------------------------
+
+/// A [`RemoteHarness`]-shaped bundle with **zero local roots** — the exact
+/// shape [`RemoteHarness`]'s own doc comment says used to be unable to reach
+/// a granted trust state at all. Deliberately not a variant of
+/// [`remote_harness`] itself (that function's own local-root authorization
+/// is load-bearing for its *other* callers, which intentionally want the
+/// realistic mixed-workspace shape) — this is an independent, minimal
+/// construction proving the zero-local-root case specifically.
+struct PurelyRemoteHarness {
+    _remote_base: TempDir,
+    _trust_base: TempDir,
+    _terminal_base: TempDir,
+    fixture: TerminalFixture,
+    remote: RemoteSessionService,
+    workspace: WorkspaceService,
+    trust: TrustService,
+    terminal: TerminalService,
+    root_id: RootId,
+}
+
+fn purely_remote_harness(window_label: &str) -> PurelyRemoteHarness {
+    block_on(async {
+        let workspace = WorkspaceService::new();
+        // No local root is ever authorized for this workspace — proving the
+        // chain below works from a workspace whose *only* root, of any kind,
+        // is this one remote root.
+
+        let remote_base = TempDir::new().unwrap();
+        let remote = RemoteSessionService::new(remote_base.path().to_path_buf());
+        let identity = test_support::generate_key();
+        let fixture = test_support::start_terminal_fixture(&identity).await;
+        let session_id =
+            test_support::connect_terminal_test_session(&remote, window_label, &fixture).await;
+        let fingerprint = remote
+            .session_host_key_fingerprint(window_label, session_id)
+            .expect("live session reports its own pinned fingerprint");
+
+        let (root_id, _snapshot) = workspace
+            .authorize_remote_root(
+                window_label,
+                session_id,
+                &fingerprint,
+                "/srv/purely-remote-terminal-test",
+                "Purely Remote Terminal Test",
+            )
+            .expect("remote root authorizes");
+        let trust_base = TempDir::new().unwrap();
+        let trust = TrustService::new(trust_base.path().to_path_buf());
+
+        let terminal_base = TempDir::new().unwrap();
+        let terminal = TerminalService::new(terminal_base.path().to_path_buf());
+
+        PurelyRemoteHarness {
+            _remote_base: remote_base,
+            _trust_base: trust_base,
+            _terminal_base: terminal_base,
+            fixture,
+            remote,
+            workspace,
+            trust,
+            terminal,
+            root_id,
+        }
+    })
+}
+
+/// Proves, end to end and without any local-root workaround, that `F220` S5's
+/// disclosed trust gap is now closed: a workspace whose only root is remote
+/// can be granted execution trust (`TrustService::grant` no longer reports
+/// `TRUST_UNAVAILABLE`), and a real remote terminal session can then be
+/// started against it through production `TerminalService::start`/
+/// `start_remote` — the identical call this file's other tests already make
+/// against [`RemoteHarness`]'s mixed local+remote workspace, now proven to
+/// also work with zero local roots. Before `F220` S6, granting trust here
+/// would have failed with `TRUST_UNAVAILABLE` and this test could not have
+/// been written at all (there would have been nothing to grant).
+#[test]
+fn purely_remote_workspace_can_grant_trust_and_start_a_remote_terminal() {
+    let window_label = "main";
+    let harness = purely_remote_harness(window_label);
+
+    assert!(!block_on(harness.trust.is_trusted(&harness.workspace, window_label)).unwrap());
+    block_on(harness.trust.grant(&harness.workspace, window_label))
+        .expect("granting trust to a workspace whose only root is remote must succeed");
+    assert!(block_on(harness.trust.is_trusted(&harness.workspace, window_label)).unwrap());
+
+    let sink = RecordingSink::new();
+    let (session_id, shell_integration) = block_on(harness.terminal.start(
+        &harness.trust,
+        &harness.workspace,
+        &harness.remote,
+        window_label,
+        harness.root_id,
+        "systemDefault".to_owned(),
+        None,
+        80,
+        24,
+        sink,
+    ))
+    .expect("a remote terminal starts against a purely-remote, now-trusted workspace");
+    assert_eq!(
+        shell_integration,
+        crate::terminal::shell_integration::ShellIntegrationStatus::Unsupported
+    );
+
+    block_on(harness.terminal.kill(window_label, session_id, true)).unwrap();
+    // `fixture` itself is never otherwise read in this test (unlike the
+    // resize/exit/disconnect tests above, which call real methods on it) —
+    // this keeps it alive for the fixture's own Drop (shutting down the
+    // fixture sshd/agent tasks) without triggering a dead-code warning for
+    // an entirely unread struct field.
+    let _ = &harness.fixture;
 }

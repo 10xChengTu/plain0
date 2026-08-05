@@ -35,6 +35,7 @@ use russh::server::{
 use russh::{Channel, ChannelId};
 use russh_sftp::protocol::{FileAttributes, Handle, Name, OpenFlags, Status, StatusCode};
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -1087,6 +1088,394 @@ pub(crate) async fn connect_terminal_test_session(
 ) -> RemoteSessionId {
     let sink: Arc<dyn RemoteSessionEventSink> = Arc::new(NullRemoteSessionEventSink);
     let target = terminal_connect_target(fixture, "octocat");
+    let pending = service
+        .connect(
+            window_label,
+            target.clone(),
+            &fixture.agent_socket_path,
+            Arc::clone(&sink),
+        )
+        .await
+        .expect("connect call itself succeeds for an unknown host");
+    let (algorithm, sha256_fingerprint) = match pending {
+        RemoteSessionConnectResult::HostKeyPendingConfirmation {
+            algorithm,
+            sha256_fingerprint,
+            ..
+        } => (algorithm, sha256_fingerprint),
+        other => panic!("expected pending confirmation, got {other:?}"),
+    };
+    let confirmed = service
+        .confirm_host_key(
+            window_label,
+            RemoteHostKeyConfirmParts {
+                target,
+                algorithm,
+                sha256_fingerprint,
+            },
+            &fixture.agent_socket_path,
+            sink,
+        )
+        .await
+        .expect("confirm_host_key succeeds");
+    match confirmed {
+        RemoteSessionConnectResult::Connected { session_id } => session_id,
+        other => panic!("expected connected, got {other:?}"),
+    }
+}
+
+// -----------------------------------------------------------------------
+// `F220` S6's own hermetic `exec`-serving test fixture — see
+// `remote::remote_git`'s own module doc for what this exercises. A
+// deliberately separate handler/server/fixture triple from the two above
+// (mirroring this file's own established precedent), but — unlike either —
+// its `exec_request` handler genuinely forwards the received command string
+// to a **real** `sh -c "<command>"` child process rather than simulating a
+// fixed response: `remote_git::run_remote_git` always sends a real,
+// `shell_escape`-encoded POSIX command line, so the most direct way to
+// verify the whole pipeline end to end (encoder → SSH `exec` wire format →
+// a real shell's own parser → a real `git` binary) is to actually let a real
+// shell parse and run it, exactly as a real `sshd` would.
+// -----------------------------------------------------------------------
+
+/// One live `exec` channel's accumulated request state — populated across
+/// two independent `Handler` callbacks (`exec_request` for the command
+/// string, `data` for stdin bytes) before `channel_eof` signals "the client
+/// is done sending input, run it now".
+#[derive(Default)]
+struct GitExecChannelState {
+    command: Option<Vec<u8>>,
+    stdin: Vec<u8>,
+}
+
+/// Real server-side `exec` handling: `exec_request` records the command
+/// string and replies success; `data` accumulates stdin bytes; `channel_eof`
+/// — signaling the client has finished writing stdin, exactly what
+/// `remote_git::run_remote_git` always sends immediately after any stdin
+/// payload (or immediately, for the no-stdin case) — is what actually spawns
+/// `sh -c "<command>"` and streams its stdout/stderr/exit-status back over
+/// the channel. Deliberately waits for `channel_eof` rather than spawning
+/// eagerly inside `exec_request`: this fixture's whole point is exercising
+/// `remote_git`'s exact real protocol sequence (exec → optional stdin data →
+/// eof → read stdout/stderr/exit-status → channel close), and every one of
+/// this domain's six routed commands sends stdin (if any) fully before ever
+/// starting to read a reply, so there is no scenario this ordering fails to
+/// cover.
+#[derive(Clone)]
+struct GitExecTestSshHandler {
+    accepted_key: Option<russh::keys::ssh_key::PublicKey>,
+    kill_switch: Arc<AsyncMutex<Option<ServerHandle>>>,
+    channels: Arc<AsyncMutex<HashMap<ChannelId, GitExecChannelState>>>,
+    /// Artificial delay [`run_exec_and_stream`] sleeps before spawning the
+    /// real child process — the sole knob `remote_git::tests`' timeout/
+    /// cancellation tests need (a real `git` invocation against a tiny test
+    /// repository returns far too quickly on its own to exercise either
+    /// path): configured once at fixture construction, shared by every
+    /// channel this one connection ever opens.
+    artificial_delay: Duration,
+}
+
+impl ServerHandler for GitExecTestSshHandler {
+    type Error = russh::Error;
+
+    async fn auth_publickey(
+        &mut self,
+        _user: &str,
+        public_key: &russh::keys::ssh_key::PublicKey,
+    ) -> Result<Auth, Self::Error> {
+        let accepted = self
+            .accepted_key
+            .as_ref()
+            .is_some_and(|accepted| accepted == public_key);
+        Ok(if accepted {
+            Auth::Accept
+        } else {
+            Auth::reject()
+        })
+    }
+
+    async fn auth_succeeded(&mut self, session: &mut Session) -> Result<(), Self::Error> {
+        *self.kill_switch.lock().await = Some(session.handle());
+        Ok(())
+    }
+
+    async fn channel_open_session(
+        &mut self,
+        channel: Channel<Msg>,
+        reply: ChannelOpenHandle,
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        self.channels
+            .lock()
+            .await
+            .insert(channel.id(), GitExecChannelState::default());
+        reply.accept().await;
+        Ok(())
+    }
+
+    async fn exec_request(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if let Some(state) = self.channels.lock().await.get_mut(&channel) {
+            state.command = Some(data.to_vec());
+        }
+        session.channel_success(channel)?;
+        Ok(())
+    }
+
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        _session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        if let Some(state) = self.channels.lock().await.get_mut(&channel) {
+            state.stdin.extend_from_slice(data);
+        }
+        Ok(())
+    }
+
+    async fn channel_eof(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+    ) -> Result<(), Self::Error> {
+        let Some(state) = self.channels.lock().await.remove(&channel) else {
+            return Ok(());
+        };
+        let Some(command) = state.command else {
+            // EOF arrived before (or without) any exec request — nothing to
+            // run; not exercised by any real `remote_git` call, kept
+            // fail-soft rather than panicking the fixture's own event loop.
+            return Ok(());
+        };
+        let handle = session.handle();
+        let delay = self.artificial_delay;
+        tokio::spawn(async move {
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            run_exec_and_stream(handle, channel, command, state.stdin).await;
+        });
+        Ok(())
+    }
+}
+
+/// Spawns `sh -c "<command>"` (`command` is exactly the bytes the client's
+/// `channel.exec(..)` sent — this fixture performs no decoding of its own;
+/// see the section-level doc comment above for why forwarding to a real
+/// shell, rather than reverse-parsing `shell_escape`'s own encoding, is this
+/// fixture's chosen verification strategy), writes `stdin` to the child's
+/// stdin then closes it, streams stdout as channel `Data` and stderr as
+/// channel `ExtendedData` (stream 1) concurrently, then reports the real
+/// exit code via `exit-status` followed by `eof`/`close` — the same trailing
+/// sequence [`TerminalFixture::exit_normally`] already uses for the sibling
+/// pty fixture.
+async fn run_exec_and_stream(
+    handle: ServerHandle,
+    channel: ChannelId,
+    command: Vec<u8>,
+    stdin: Vec<u8>,
+) {
+    let Ok(command_text) = String::from_utf8(command) else {
+        let _ = handle.exit_status_request(channel, 127).await;
+        let _ = handle.eof(channel).await;
+        let _ = handle.close(channel).await;
+        return;
+    };
+
+    let mut child = match tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(&command_text)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => {
+            let _ = handle.exit_status_request(channel, 127).await;
+            let _ = handle.eof(channel).await;
+            let _ = handle.close(channel).await;
+            return;
+        }
+    };
+
+    if let Some(mut child_stdin) = child.stdin.take() {
+        let _ = child_stdin.write_all(&stdin).await;
+        // Dropping the handle closes the write end, signaling EOF to the
+        // child — required for anything reading stdin to completion (e.g.
+        // `git commit --file -`) to actually see the end of input.
+        drop(child_stdin);
+    }
+
+    let mut stdout = child.stdout.take().expect("stdout is always piped here");
+    let mut stderr = child.stderr.take().expect("stderr is always piped here");
+
+    let stdout_handle = handle.clone();
+    let stdout_task = tokio::spawn(async move {
+        let mut buffer = [0_u8; 32 * 1024];
+        loop {
+            match stdout.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if stdout_handle
+                        .data(channel, buffer[..read].to_vec())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    let stderr_handle = handle.clone();
+    let stderr_task = tokio::spawn(async move {
+        let mut buffer = [0_u8; 32 * 1024];
+        loop {
+            match stderr.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if stderr_handle
+                        .extended_data(channel, 1, buffer[..read].to_vec())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+
+    let _ = stdout_task.await;
+    let _ = stderr_task.await;
+    let status = child.wait().await;
+    let code = status.ok().and_then(|status| status.code()).unwrap_or(-1);
+    let _ = handle.exit_status_request(channel, code as u32).await;
+    let _ = handle.eof(channel).await;
+    let _ = handle.close(channel).await;
+}
+
+struct GitExecTestSshServer {
+    accepted_key: Option<russh::keys::ssh_key::PublicKey>,
+    kill_switch: Arc<AsyncMutex<Option<ServerHandle>>>,
+    artificial_delay: Duration,
+}
+
+impl ServerTrait for GitExecTestSshServer {
+    type Handler = GitExecTestSshHandler;
+
+    fn new_client(&mut self, _peer_addr: Option<SocketAddr>) -> GitExecTestSshHandler {
+        GitExecTestSshHandler {
+            accepted_key: self.accepted_key.clone(),
+            kill_switch: Arc::clone(&self.kill_switch),
+            channels: Arc::new(AsyncMutex::new(HashMap::new())),
+            artificial_delay: self.artificial_delay,
+        }
+    }
+}
+
+pub(crate) struct GitExecFixture {
+    pub(crate) address: SocketAddr,
+    pub(crate) agent_socket_path: PathBuf,
+    /// A real, empty local directory the test itself populates with a real
+    /// git repository (`std::process::Command`-driven, exactly like
+    /// `git::status::tests`' own `init_repo`/`raw_git_ok` fixture helpers) —
+    /// this fixture serves it only in the sense that `sh -c "git -C
+    /// <this path> …"` is what every routed invocation ultimately runs
+    /// against.
+    pub(crate) repo_dir: TempDir,
+    _agent_temp: TempDir,
+    _server_task: tokio::task::JoinHandle<()>,
+    _agent_task: tokio::task::JoinHandle<()>,
+}
+
+/// Starts a loopback sshd serving real `exec` requests (see
+/// [`GitExecTestSshHandler`]'s own doc comment) plus a real agent server
+/// offering `identity`. `artificial_delay`, when nonzero, is
+/// [`run_exec_and_stream`]'s own injected startup delay — `Duration::ZERO`
+/// for every ordinary test; a real, human-perceptible-but-test-bounded value
+/// (a few hundred milliseconds) for the timeout/cancellation tests, which
+/// also inject a much smaller client-side timeout via
+/// `remote_git::run_remote_git_for_test` so the two race deterministically
+/// without either side needing to wait out this domain's real 60-second
+/// production ceiling.
+pub(crate) async fn start_git_exec_fixture(
+    identity: &PrivateKey,
+    artificial_delay: Duration,
+) -> GitExecFixture {
+    let agent_temp = TempDir::new().expect("tempdir creates");
+    let repo_dir = TempDir::new().expect("tempdir creates");
+
+    let host_key = generate_key();
+    let config = Arc::new(russh::server::Config {
+        keys: vec![host_key],
+        ..Default::default()
+    });
+
+    let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .expect("bind loopback");
+    let address = listener.local_addr().expect("local addr");
+
+    let kill_switch: Arc<AsyncMutex<Option<ServerHandle>>> = Arc::new(AsyncMutex::new(None));
+    let mut server = GitExecTestSshServer {
+        accepted_key: Some(identity.public_key().clone()),
+        kill_switch: Arc::clone(&kill_switch),
+        artificial_delay,
+    };
+    let server_task = tokio::spawn(async move {
+        let running = server.run_on_socket(config, &listener);
+        let _ = running.await;
+    });
+
+    let agent_socket_path = agent_temp.path().join("agent.sock");
+    let listener = UnixListener::bind(&agent_socket_path).expect("bind agent socket");
+    let stream = tokio_stream::wrappers::UnixListenerStream::new(listener);
+    let agent_task = tokio::spawn(async move {
+        let _ = agent_server::serve(stream, ()).await;
+    });
+    let mut loader = AgentClient::connect_uds(&agent_socket_path)
+        .await
+        .expect("connect to test agent");
+    loader
+        .add_identity(identity, &[])
+        .await
+        .expect("load identity into test agent");
+
+    GitExecFixture {
+        address,
+        agent_socket_path,
+        repo_dir,
+        _agent_temp: agent_temp,
+        _server_task: server_task,
+        _agent_task: agent_task,
+    }
+}
+
+fn git_exec_connect_target(fixture: &GitExecFixture, user: &str) -> RemoteConnectTarget {
+    RemoteConnectTarget {
+        host: fixture.address.ip().to_string(),
+        port: fixture.address.port(),
+        user: user.to_owned(),
+    }
+}
+
+/// [`connect_test_session`]'s twin for [`GitExecFixture`] — see that
+/// function's own doc comment for the full two-phase-connect rationale this
+/// drives identically.
+pub(crate) async fn connect_git_exec_test_session(
+    service: &RemoteSessionService,
+    window_label: &str,
+    fixture: &GitExecFixture,
+) -> RemoteSessionId {
+    let sink: Arc<dyn RemoteSessionEventSink> = Arc::new(NullRemoteSessionEventSink);
+    let target = git_exec_connect_target(fixture, "octocat");
     let pending = service
         .connect(
             window_label,

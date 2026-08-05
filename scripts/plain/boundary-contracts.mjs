@@ -7958,17 +7958,17 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 		file: "src-tauri/src/git/commands.rs",
 		name: "git_status",
 		parameters:
-			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStatusRequest",
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,network_service:State<'_,GitNetworkService>,remote:State<'_,RemoteSessionService>,request:GitStatusRequest",
 		returnType: "->Result<GitStatusResult,CommandError>",
-		body: "request.validate();letresult=status::git_status(trust.inner(),workspace.inner(),window.label()).await?;Ok(GitStatusResult::from(result))",
+		body: "request.validate();letresult=status::git_status(trust.inner(),workspace.inner(),network_service.inner(),remote.inner(),window.label()).await?;Ok(GitStatusResult::from(result))",
 	},
 	{
 		file: "src-tauri/src/git/commands.rs",
 		name: "git_diff_files",
 		parameters:
-			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitDiffFilesRequest",
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,network_service:State<'_,GitNetworkService>,remote:State<'_,RemoteSessionService>,request:GitDiffFilesRequest",
 		returnType: "->Result<GitDiffFilesResult,CommandError>",
-		body: "letcached=request.into_parts();letentries=diff::diff_files(trust.inner(),workspace.inner(),window.label(),cached).await?;Ok(GitDiffFilesResult::new(entries))",
+		body: "letcached=request.into_parts();letentries=diff::diff_files(trust.inner(),workspace.inner(),network_service.inner(),remote.inner(),window.label(),cached).await?;Ok(GitDiffFilesResult::new(entries))",
 	},
 	{
 		file: "src-tauri/src/git/commands.rs",
@@ -7982,17 +7982,17 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 		file: "src-tauri/src/git/commands.rs",
 		name: "git_stage_paths",
 		parameters:
-			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitStagePathsRequest",
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,network_service:State<'_,GitNetworkService>,remote:State<'_,RemoteSessionService>,request:GitStagePathsRequest",
 		returnType: "->Result<(),CommandError>",
-		body: "letpaths=request.into_parts()?;stage::stage_paths(trust.inner(),workspace.inner(),window.label(),&paths).await",
+		body: "letpaths=request.into_parts()?;stage::stage_paths(trust.inner(),workspace.inner(),network_service.inner(),remote.inner(),window.label(),&paths).await",
 	},
 	{
 		file: "src-tauri/src/git/commands.rs",
 		name: "git_unstage_paths",
 		parameters:
-			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitUnstagePathsRequest",
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,network_service:State<'_,GitNetworkService>,remote:State<'_,RemoteSessionService>,request:GitUnstagePathsRequest",
 		returnType: "->Result<(),CommandError>",
-		body: "letpaths=request.into_parts()?;stage::unstage_paths(trust.inner(),workspace.inner(),window.label(),&paths).await",
+		body: "letpaths=request.into_parts()?;stage::unstage_paths(trust.inner(),workspace.inner(),network_service.inner(),remote.inner(),window.label(),&paths).await",
 	},
 	{
 		file: "src-tauri/src/git/commands.rs",
@@ -8006,9 +8006,9 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 		file: "src-tauri/src/git/commands.rs",
 		name: "git_commit",
 		parameters:
-			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitCommitRequest",
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,network_service:State<'_,GitNetworkService>,remote:State<'_,RemoteSessionService>,request:GitCommitRequest",
 		returnType: "->Result<(),CommandError>",
-		body: "let(message,amend)=request.into_parts()?;commit::commit(trust.inner(),workspace.inner(),window.label(),&message,amend,).await",
+		body: "let(message,amend)=request.into_parts()?;commit::commit(trust.inner(),workspace.inner(),network_service.inner(),remote.inner(),window.label(),&message,amend).await",
 	},
 	{
 		file: "src-tauri/src/git/commands.rs",
@@ -8118,9 +8118,9 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 		file: "src-tauri/src/git/commands.rs",
 		name: "git_log_graph",
 		parameters:
-			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitLogGraphRequest",
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,network_service:State<'_,GitNetworkService>,remote:State<'_,RemoteSessionService>,request:GitLogGraphRequest",
 		returnType: "->Result<GitLogGraphResultWire,CommandError>",
-		body: "letmax_count=request.into_parts()?;letresult=log::log_graph(trust.inner(),workspace.inner(),window.label(),max_count).await?;Ok(GitLogGraphResultWire::from(result))",
+		body: "letmax_count=request.into_parts()?;letresult=log::log_graph(trust.inner(),workspace.inner(),network_service.inner(),remote.inner(),window.label(),max_count).await?;Ok(GitLogGraphResultWire::from(result))",
 	},
 	{
 		file: "src-tauri/src/git/commands.rs",
@@ -11744,6 +11744,7 @@ function validateNetworkConfirmationModuleFace(source) {
 			"resolveNetworkConfirmation",
 			{ kind: "function", exported: true, async: true },
 		],
+		["REMOTE_NETWORK_DISABLED_TITLE", { kind: "variable", exported: true }],
 	]);
 	const topLevelCounts = new Map(
 		[...expectedTopLevel].map(([name]) => [name, 0]),
@@ -25354,6 +25355,84 @@ export function validateRemoteCommandRegistration(rustSources) {
 		if (registrations.length !== 1 || !registeredInHandler) {
 			failures.push(
 				`src-tauri/src/lib.rs must register remote::commands::${name} exactly once in generate_handler`,
+			);
+		}
+	}
+
+	return failures;
+}
+
+/**
+ * `F220` S6 (`docs/decisions/0006-ssh-remote-workspace-trust.md`'s "启动子
+ * 进程必须使用参数数组，禁止拼接 shell 字符串" boundary, extended to the one
+ * place this codebase is forced to produce a shell-syntax *string* at all —
+ * SSH's `exec` request has no argv-array wire framing, see
+ * `remote::remote_git`'s own module doc): mirrors
+ * `validateRemoteSshLibraryOwnershipBoundary`'s identical "single-owner
+ * token" discipline, applied to `shell_escape::encode_posix_command_line`
+ * (and the `shell_escape` module path itself) instead of `russh`. Only
+ * `remote/remote_git.rs` may call the encoder or reference the module by
+ * path — every other file in the crate, *including* every other file inside
+ * `remote/` itself (the SFTP/terminal/session machinery has no business
+ * building a shell command line at all), is mechanically forbidden from
+ * doing either. This is what stands between "an argv array" and "a
+ * hand-rolled shell string built by whichever file feels like it" — without
+ * this guard, a future edit could add a second, unaudited call site that
+ * concatenates a caller-supplied string into a command line without ever
+ * routing it through the one audited, hostile-matrix-tested encoder.
+ */
+export function validateShellEscapeSoleCallerBoundary(rustSources) {
+	const failures = [];
+	const soleCallerPath = "src-tauri/src/remote/remote_git.rs";
+	const soleOwnerPath = "src-tauri/src/remote/shell_escape.rs";
+	// The encoder's own hostile-matrix test file, `shell_escape/tests.rs` —
+	// calling `encode_posix_command_line` directly is the entire point of
+	// that file (it is the function under test), so it is exempted exactly
+	// like `soleOwnerPath` itself, not treated as a second "caller".
+	const soleOwnerTestPath = "src-tauri/src/remote/shell_escape/tests.rs";
+	// The one other file allowed to *mention* the module path at all — it
+	// must declare `pub(crate) mod shell_escape;` for the module to exist —
+	// but, like every other non-owner/non-caller file, is never allowed to
+	// call the encoder itself.
+	const moduleDeclaringPath = "src-tauri/src/remote/mod.rs";
+	const encodeCallPattern =
+		/(?<![A-Za-z0-9_])encode_posix_command_line(?![A-Za-z0-9_])/;
+	const modulePathPattern = /(?<![A-Za-z0-9_])shell_escape(?![A-Za-z0-9_])/;
+
+	for (const { relativePath, source } of rustSources) {
+		const normalizedPath = relativePath.replaceAll("\\", "/");
+		if (
+			normalizedPath === soleOwnerPath ||
+			normalizedPath === soleOwnerTestPath
+		) {
+			continue;
+		}
+		const executable = stripRustCommentsAndLiterals(source);
+		const referencesEncoder = encodeCallPattern.test(executable);
+
+		if (normalizedPath === soleCallerPath) {
+			if (!referencesEncoder) {
+				failures.push(
+					`${soleCallerPath} must call shell_escape::encode_posix_command_line — it is this crate's sole audited exec-command-line builder`,
+				);
+			}
+			continue;
+		}
+		if (referencesEncoder) {
+			failures.push(
+				`${normalizedPath} must not call encode_posix_command_line — every SSH exec command line must be built exclusively by ${soleCallerPath}`,
+			);
+			continue;
+		}
+		if (normalizedPath === moduleDeclaringPath) {
+			// Allowed: `pub(crate) mod shell_escape;` — the module
+			// declaration itself, never a call to the encoder (already ruled
+			// out above).
+			continue;
+		}
+		if (modulePathPattern.test(executable)) {
+			failures.push(
+				`${normalizedPath} must not reference the shell_escape module — only ${soleCallerPath} may call into it`,
 			);
 		}
 	}

@@ -267,7 +267,7 @@ use super::diff::{merge_diff_files, parse_name_status, parse_numstat, DiffFileEn
 use super::exec::{run_git, GitExecMode, GitExecOutput};
 use super::git_exec_unavailable;
 use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
-use super::status::{git_status, StatusEntry};
+use super::status::{git_status_failed, parse_porcelain_v2, StatusEntry, GIT_STATUS_ARGS};
 use super::wire::{split_nul_records, GitPathBuf};
 
 /// Mirrors `log::is_lowercase_hex40`/`refs::is_lowercase_hex40` — this
@@ -797,15 +797,39 @@ pub(crate) async fn push_stash(
 
 /// Re-reads `git status` and extracts every currently-unmerged path — shared
 /// by [`apply_stash`]/[`pop_stash`]'s own conflict reporting. Reuses
-/// `super::status`'s already-audited porcelain-v2 parser rather than trying
-/// to scrape a path list out of `apply`/`pop`'s own free-text conflict
-/// output.
+/// `super::status`'s already-audited porcelain-v2 parser (`parse_porcelain_v2`/
+/// `GIT_STATUS_ARGS`) rather than trying to scrape a path list out of
+/// `apply`/`pop`'s own free-text conflict output.
+///
+/// Deliberately calls [`resolve_repo_toplevel`]/[`run_git`] directly here
+/// rather than `status::git_status` (`F220` S6 routes that entry point
+/// through `remote_route` for a remote-backed root) — every caller of this
+/// function has already resolved locally via its own, unrouted
+/// `resolve_repo_toplevel` call (stash stays out of `F220` S6's routed
+/// scope entirely, by design), so a second, independent local-only
+/// resolution here is both correct and avoids threading
+/// `GitNetworkService`/`RemoteSessionService` references through a code path
+/// that can never actually reach a remote root.
 async fn conflicted_paths_from_status(
     trust: &TrustService,
     workspace: &(impl GitRepositoryScope + ?Sized),
     window_label: &str,
 ) -> Result<Vec<GitPathBuf>, CommandError> {
-    let status = git_status(trust, workspace, window_label).await?;
+    let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
+    let args: Vec<String> = GIT_STATUS_ARGS
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .collect();
+    let cancel = AtomicBool::new(false);
+    let output = tauri::async_runtime::spawn_blocking(move || {
+        run_git(&repo_dir, &args, GitExecMode::BackgroundRead, &cancel)
+    })
+    .await
+    .map_err(|_| git_exec_unavailable())??;
+    if output.exit_code != 0 {
+        return Err(git_status_failed());
+    }
+    let status = parse_porcelain_v2(&output.stdout)?;
     Ok(status
         .entries
         .into_iter()

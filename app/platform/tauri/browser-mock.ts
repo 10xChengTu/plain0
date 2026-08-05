@@ -7063,6 +7063,39 @@ export function createBrowserMockBridge(
 		);
 	}
 
+	/** `F220` S6: `gitNetworkPreview`/`gitFetch`/`gitPull`/`gitPush`'s own
+	 * fail-closed code for a remote-backed root — mirrors the real
+	 * `git::git_remote_network_unsupported()` Rust error constructor exactly
+	 * (same code, same message), distinct from the generic
+	 * `ROOT_BACKEND_UNSUPPORTED` every other out-of-scope command still
+	 * falls back to (see that Rust function's own doc comment for why the
+	 * distinction matters to the frontend). */
+	function gitRemoteNetworkUnsupported(): CommandError {
+		return commandError(
+			"GIT_REMOTE_NETWORK_UNSUPPORTED",
+			"Network operations (fetch, pull, push) are not supported for a remote repository.",
+		);
+	}
+
+	/** Resolves which authorized root a network call effectively targets —
+	 * mirrors `gitMutateUnavailable`'s own explicit-`rootId`-or-sole-root
+	 * resolution, kept as an independent, additive helper (not a change to
+	 * `gitMutateUnavailable` itself) so this new remote-network check cannot
+	 * perturb any of `gitMutateUnavailable`'s other, already-covered call
+	 * sites. `undefined` means "no single root can be resolved" (an empty or
+	 * ambiguous multi-root workspace with no explicit `rootId`) — the caller
+	 * treats that as "not identifiably remote", exactly like production's own
+	 * `git::network::reject_remote_root` only checks the *explicit*
+	 * `scope.selected_root_id()` case (see that function's own doc comment). */
+	function gitEffectiveNetworkRootIdForTest(
+		rootId_?: string,
+	): string | undefined {
+		if (rootId_ !== undefined) {
+			return frozenGitRootId(rootId_);
+		}
+		return roots.size === 1 ? [...roots.keys()][0] : undefined;
+	}
+
 	function gitDiscardFailed(): CommandError {
 		return commandError(
 			"GIT_DISCARD_FAILED",
@@ -9057,6 +9090,13 @@ export function createBrowserMockBridge(
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
+			const effectiveRootId = gitEffectiveNetworkRootIdForTest(rootId_);
+			if (
+				effectiveRootId !== undefined &&
+				remoteRootBindings.has(effectiveRootId)
+			) {
+				throw gitRemoteNetworkUnsupported();
+			}
 			if (gitNetworkUpstream === null) {
 				if (request.operation === "fetch") {
 					return Object.freeze({
@@ -9078,6 +9118,13 @@ export function createBrowserMockBridge(
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
+			const effectiveRootId = gitEffectiveNetworkRootIdForTest(rootId_);
+			if (
+				effectiveRootId !== undefined &&
+				remoteRootBindings.has(effectiveRootId)
+			) {
+				throw gitRemoteNetworkUnsupported();
+			}
 			// A real fetch only updates the remote-tracking ref, never the
 			// local branch/ahead-behind-vs-HEAD numbers this simulation
 			// tracks — see `BrowserMockGitNetworkFixtureForTest`'s own doc
@@ -9089,6 +9136,13 @@ export function createBrowserMockBridge(
 			if (unavailable !== undefined) {
 				throw unavailable;
 			}
+			const effectiveRootId = gitEffectiveNetworkRootIdForTest(rootId_);
+			if (
+				effectiveRootId !== undefined &&
+				remoteRootBindings.has(effectiveRootId)
+			) {
+				throw gitRemoteNetworkUnsupported();
+			}
 			if (gitNetworkUpstream === null) {
 				throw gitNetworkNoUpstream();
 			}
@@ -9099,6 +9153,13 @@ export function createBrowserMockBridge(
 			const unavailable = gitMutateUnavailable(rootId_);
 			if (unavailable !== undefined) {
 				throw unavailable;
+			}
+			const effectiveRootId = gitEffectiveNetworkRootIdForTest(rootId_);
+			if (
+				effectiveRootId !== undefined &&
+				remoteRootBindings.has(effectiveRootId)
+			) {
+				throw gitRemoteNetworkUnsupported();
 			}
 			if (gitNetworkUpstream === null) {
 				throw gitNetworkNoUpstream();

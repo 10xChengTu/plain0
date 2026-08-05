@@ -168,11 +168,14 @@
 use std::sync::atomic::AtomicBool;
 
 use crate::error::CommandError;
+use crate::remote::session::RemoteSessionService;
 use crate::trust::service::TrustService;
 
 use super::dto::is_valid_mutate_path;
 use super::exec::{run_git, GitExecMode};
 use super::git_exec_unavailable;
+use super::network::GitNetworkService;
+use super::remote_route::{resolve_repo_route, run_routed, RoutedGitMode};
 use super::repo::{resolve_repo_toplevel, GitRepositoryScope};
 use super::wire::split_nul_records;
 
@@ -692,25 +695,32 @@ fn parse_graph_entries(output: &[u8], max_nodes: usize) -> Result<GraphList, Com
 pub(crate) async fn log_graph(
     trust: &TrustService,
     workspace: &(impl GitRepositoryScope + ?Sized),
+    network: &GitNetworkService,
+    remote: &RemoteSessionService,
     window_label: &str,
     max_count: u32,
 ) -> Result<GraphList, CommandError> {
     if max_count == 0 || max_count > MAX_GRAPH_MAX_COUNT {
         return Err(git_log_graph_invalid_request());
     }
-    let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
+    let route = resolve_repo_route(trust, workspace, remote, window_label).await?;
     let mut args: Vec<String> = GIT_LOG_GRAPH_ARGS
         .iter()
         .map(|arg| (*arg).to_owned())
         .collect();
     args.push(format!("--max-count={}", u64::from(max_count) + 1));
 
-    let cancel = AtomicBool::new(false);
-    let output = tauri::async_runtime::spawn_blocking(move || {
-        run_git(&repo_dir, &args, GitExecMode::BackgroundRead, &cancel)
-    })
-    .await
-    .map_err(|_| git_exec_unavailable())??;
+    let output = run_routed(
+        &route,
+        network,
+        remote,
+        window_label,
+        workspace.selected_root_id(),
+        RoutedGitMode::BackgroundRead,
+        &args,
+        None,
+    )
+    .await?;
 
     if output.exit_code != 0 {
         return Err(git_log_graph_failed());

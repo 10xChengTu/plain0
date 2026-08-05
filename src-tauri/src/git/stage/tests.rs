@@ -13,6 +13,8 @@ use std::process::Command;
 use tempfile::TempDir;
 
 use super::{stage_blob, stage_paths, unstage_paths};
+use crate::git::network::GitNetworkService;
+use crate::remote::session::RemoteSessionService;
 use crate::trust::service::TrustService;
 use crate::workspace::dto::WorkspacePickRootsMode;
 use crate::workspace::picker::{DirectoryPicker, DirectoryPickerFuture, DirectoryPickerResult};
@@ -113,6 +115,8 @@ fn stage_paths_stages_a_modified_file() {
     block_on(stage_paths(
         &trust,
         &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
         "main",
         &["a.txt".to_owned()],
     ))
@@ -144,6 +148,8 @@ fn unstage_paths_reverses_a_staged_addition() {
     block_on(unstage_paths(
         &trust,
         &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
         "main",
         &["new.txt".to_owned()],
     ))
@@ -161,8 +167,15 @@ fn stage_paths_rejects_an_empty_path_list() {
     let repo = init_repo();
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
-    let error = block_on(stage_paths(&trust, &workspace, "main", &[]))
-        .expect_err("empty path list must be rejected");
+    let error = block_on(stage_paths(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        &[],
+    ))
+    .expect_err("empty path list must be rejected");
     assert_eq!(error.code(), "GIT_MUTATE_PATHS_INVALID_REQUEST");
 }
 
@@ -174,6 +187,8 @@ fn stage_paths_rejects_a_path_traversal_segment() {
     let error = block_on(stage_paths(
         &trust,
         &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
         "main",
         &["../outside.txt".to_owned()],
     ))
@@ -189,6 +204,8 @@ fn stage_paths_rejects_an_absolute_path() {
     let error = block_on(stage_paths(
         &trust,
         &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
         "main",
         &["/etc/passwd".to_owned()],
     ))
@@ -215,8 +232,15 @@ fn stage_paths_stages_paths_with_spaces_non_ascii_and_a_leading_dash() {
     let trust_base = TempDir::new().unwrap();
     let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
     let path_args: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
-    block_on(stage_paths(&trust, &workspace, "main", &path_args))
-        .expect("stage_paths succeeds for all three paths");
+    block_on(stage_paths(
+        &trust,
+        &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
+        "main",
+        &path_args,
+    ))
+    .expect("stage_paths succeeds for all three paths");
 
     let status = porcelain_status(repo.path());
     for name in names {
@@ -262,6 +286,8 @@ fn stage_paths_stages_only_the_literal_glob_named_file_not_wildcard_siblings() {
     block_on(stage_paths(
         &trust,
         &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
         "main",
         &["a*.txt".to_owned()],
     ))
@@ -304,6 +330,8 @@ fn unstage_paths_unstages_only_the_literal_glob_named_file_not_wildcard_siblings
     block_on(unstage_paths(
         &trust,
         &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
         "main",
         &["a*.txt".to_owned()],
     ))
@@ -587,6 +615,8 @@ fn stage_and_unstage_reject_when_workspace_is_not_trusted() {
     let stage_error = block_on(stage_paths(
         &trust,
         &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
         "main",
         &["a.txt".to_owned()],
     ))
@@ -596,6 +626,8 @@ fn stage_and_unstage_reject_when_workspace_is_not_trusted() {
     let unstage_error = block_on(unstage_paths(
         &trust,
         &workspace,
+        &GitNetworkService::new(),
+        &RemoteSessionService::new(std::env::temp_dir()),
         "main",
         &["a.txt".to_owned()],
     ))
