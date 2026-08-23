@@ -625,7 +625,7 @@ Close Folder 时序：主窗口在执行 `Cmd+K F` 前把 primary 最后一个 r
 
 ### E2E-025 · F190 完整终端工作流真实桌面矩阵（profile/cwd 持久化、OSC 注入、split、查找、live scrollback、退出/不可恢复、SSH agent、进程清理）
 
-状态：**待执行**（按用户 2026-08-04 指示暂缓，与 `E2E-026`/`E2E-027`/`E2E-028` 攒批统一执行）。本条覆盖 `F190` S1–S6 全部六个切片累计的真实桌面面——Browser mock 已逐切片验证协议/状态机正确性，但 zsh/bash/fish 启动注入、真实链接 opener、`SSH_AUTH_SOCK` 继承与真实进程退出/信号只能在真实 shell 子进程上验证。`F190` 已按用户指示例外收账转 `complete`（同 `F200`/`F210`/`F220` 模式）：不代表桌面验收已通过，本条通过后再回写 `features.json` F190 的 `evidence`（`nativeScenarios`/`platformGaps`/`acceptanceResults`）补齐桌面证据。
+状态：**部分完成（2026-08-24）**。真实 Tauri/WKWebView、PTY、shell、持久化、split/find/scrollback、退出/崩溃、SSH agent 与进程清理矩阵均已执行；真实 OSC 8 链接已渲染，但当前 Computer Use 驱动器无法跨“键盘修饰键”和“鼠标点击”两个独立动作保持 Cmd 按下，因此物理 Cmd+Click 仍保留为唯一未执行子步，未冒充通过。`F190` 仍为 `complete`，该限制已同步写入其 `platformGaps`。
 
 前置条件：
 
@@ -652,6 +652,13 @@ fixture（本条专用临时目录，不使用真实开发仓库或用户密钥�
 10. **正常显式关闭对照**：新建终端后用 pane/tab 关闭按钮显式关闭（不使用 Cmd+Q），确认无 banner；随后正常 `Cmd+Q` 退出、重新启动并重新授权同一 workspace 后新终端 view 不显示不可恢复说明（marker 已被正常关闭归零，不应残留）。
 11. **`SSH_AUTH_SOCK` 继承**：新建终端后执行真实 `ssh-add -l`（或 `test -S "$SSH_AUTH_SOCK" && echo SOCKET_VISIBLE`），确认能看到与启动 Plain 的登录会话中一致的 agent 身份列表（或至少确认 socket 可见/可连接），证明继承的是父进程既有 agent 而非 Plain 自行寻找/启动/保存了任何 agent 或凭据。
 12. **退出后零残留进程**：完成以上全部步骤后 `Cmd+Q`，用 `ps`/`pgrep` 精确核对没有残留的 Plain 进程、shell 子进程（含步骤 8/9 中已"退出"但如果实现有误可能仍在等待的进程）或本条产生的任何后台进程。
+
+执行结果（2026-08-24）：
+
+- 新构建的绝对路径 `Plain.app` 通过 `codesign --verify --deep --strict`。显式 `zsh` 与 `subdir` 经真实 `Cmd+Q` 冷启动保留；新 PTY 的 `pwd` 精确为 fixture 子目录。真实 `cd`/OSC 7 更新、OSC 8 `PLAIN_LINK` 渲染、`sh-3.2$` 不支持 shell 降级及注入目录临时 `chmod 000` 时 zsh 仍可用均已观察，临时权限随后恢复。
+- 递归交替 right/down split 达到精确 8 pane 后，两按钮同时 disabled 并显示 `This tab has reached its 8-pane split limit.`；命令面板再次执行 split 前后子进程均为 1 个旧 zsh + 8 个 sh，没有第 9 个 spawn。真实 `seq 1 300` 后查找 `299` 显示 1/1；`yes LIVE` 在 history 视图持续刷新但不强制跳底，Ctrl+C 返回 live。
+- 自然 `exit` 按当时真实 shell 状态显示 code 130，外部 `kill -9` 显示 `Killed: 9`，两者均保留 pane 且不泄路径。Plain 带 3 个 zsh 时被 `kill -9`，四个 PID 随即全消失；重启只显示一次 `3 previous terminal sessions...could not be restored`，Dismiss 后显式关闭新终端并正常退出，再次重启无该说明。
+- Plain 用本轮临时 `ssh-agent` 启动，终端内 `ssh-add -l` 返回与外部一致的 `SHA256:wkvgv9Jgqh4P3o2V1udwY43Q8SB15y4+2B9Zcb/2IY8 plain-e2e (ED25519)`。真实 OSC 8 链接已经进入 WKWebView cell metadata 并渲染为 `PLAIN_LINK`；但 Computer Use API 没有 modifier-down/up，无法完成物理 Cmd+Click，未将自动化已有证据冒充为桌面点击证据。
 
 证据要求：每一步除 UI 观察外，需要至少一项 shell 层可核验证据（真实 `pwd`/`ps`/`ssh-add -l`/退出码等），不得仅凭 UI 文案判定通过；发现的任何真实缺陷需按既有条目先修复代码、补自动化回归，再重跑受影响步骤，不得带着已知缺陷标记通过。
 

@@ -1066,10 +1066,10 @@
 				],
 				"nativeScenarios": [
 					"E2E-007 and E2E-016 remain the completed real-desktop evidence for the underlying PTY, shell/cwd, resize, throughput, tab/split and multi-root freezing behaviours that F190 builds on.",
-					"E2E-025 is registered in docs/e2e-handover.md as the pending real Tauri matrix for the new F190 surfaces (profile/cwd cold-start persistence, real OSC injection and degradation, link opener, split ceiling, find, live scrollback, real exit/signal banners, non-restorable notice after abnormal kill, SSH_AUTH_SOCK inheritance, zero residual processes). By explicit user decision on 2026-08-04 it is deferred and will be executed together with later feature matrices; this completion is an exception-close and the desktop evidence will be backfilled."
+					"E2E-025 was executed on 2026-08-24 against the newly built and ad-hoc-signed absolute Plain.app. Explicit zsh plus root-relative subdir persisted across Cmd+Q; real pwd and OSC 7 followed the exact fixture path; an OSC 8 link rendered; an unsupported sh and an intentionally unwritable integration directory both left usable real shells; recursive right/down split reached exactly eight panes, disabled both split buttons, announced the ceiling and did not spawn a ninth shell through the command palette; terminal find reported 1/1 for real scrollback; a yes process proved anchored history while live output continued and Ctrl+C returned to live; natural exit reported code 130 and external SIGKILL reported Killed: 9 without a native path; killing Plain with three zsh children left zero child processes and produced one path-free three-session non-restorable notice on restart, while explicit close plus normal quit produced none; ssh-add -l inside the real terminal saw the exact one-time ED25519 fixture identity. The only unexecuted substep is the physical Cmd+Click itself because the available Computer Use driver cannot hold a modifier across a separate mouse action; renderer/IPC/opener behavior remains covered by the automated tiers."
 				],
 				"platformGaps": [
-					"The E2E-025 real desktop matrix is deferred by user decision and has not run yet; feature closure rests on the two automated tiers plus previously completed E2E-007/E2E-016 desktop evidence.",
+					"E2E-025 rendered a genuine OSC 8 http(s) link in the real WKWebView, but its final physical Cmd+Click could not be synthesized because the available Computer Use driver exposes modifier key presses and mouse clicks only as separate non-overlapping actions. The exact metaKey gate, single IPC call and OS opener remain covered by Browser/Rust tests rather than a real modified click.",
 					"Scrollback rows intentionally do not carry hyperlink or semantic metadata, so prompt navigation and clickable links operate on the live viewport only.",
 					"Shell integration injects OSC 133 A/C/D without the B prompt-end marker, and the external link opener is implemented for macOS/Unix only; non-Unix platforms fail closed.",
 					"Windows and Linux packaging, release signing and notarization remain outside this non-release completion phase."
@@ -1077,7 +1077,7 @@
 				"acceptanceResults": [
 					{
 						"acceptance": "Terminal find profile shell and cwd selection are fully interactive and persisted",
-						"result": "Achieved in the automated tiers. Rust owns a bounded profile snapshot with strict start-id revalidation and root-relative cwd containment; the tab strip exposes profile and cwd controls persisted via plain.terminal.defaultProfile and plain.terminal.cwd in the existing user settings, affecting future tabs only while running panes stay frozen; bounded find covers 10,000 retained rows plus the viewport with explicit truncation states. Real desktop confirmation is part of the deferred E2E-025."
+						"result": "Achieved. In addition to the automated tiers, E2E-025 proved an explicit zsh profile and root-relative subdir survive a real Cmd+Q cold start, the next real PTY starts in that exact directory, terminal find reports the exact 1/1 match over real scrollback, and the split ceiling is visible and spawn-free."
 					},
 					{
 						"acceptance": "Shell integration links recursive splits and live scrollback preserve bounded terminal semantics",
@@ -1089,7 +1089,7 @@
 					},
 					{
 						"acceptance": "SSH agent inheritance and real shell terminal E2E pass under the audited environment policy",
-						"result": "Partially achieved pending E2E-025. SSH_AUTH_SOCK is the audited single-item allowlist extension locked by hostile architecture tests, and Browser plus Rust tiers cover the environment contract; the real ssh-add/socket visibility run is registered in the deferred E2E-025 matrix per the explicit user decision and will be backfilled."
+						"result": "Achieved. E2E-025 launched Plain with a one-time ssh-agent socket and ED25519 fixture identity, then proved ssh-add -l inside the real zsh PTY returned the exact same fingerprint; final process checks after normal quit and kill -9 found no Plain or shell children."
 					}
 				]
 			}
