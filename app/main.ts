@@ -333,6 +333,7 @@ async function bootstrap(): Promise<void> {
 		setSideBarPositionContext: (position) =>
 			sideBarPositionContext.set(position),
 	});
+	await layoutStorageService.applyCurrentWorkspaceRuntime();
 	registerPlainBuiltinThemeResources();
 	registerPlainBuiltinGrammarResources(await getService(ILanguageService));
 	await workspaceTopologyCoordinator.completeInitial();

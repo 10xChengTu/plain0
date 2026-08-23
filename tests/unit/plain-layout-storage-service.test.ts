@@ -186,12 +186,43 @@ describe("PlainLayoutStorageService", () => {
 		const workspaceRuntime = runtime();
 		service.configureWorkspaceRuntime(workspaceRuntime.value);
 
+		await service.applyCurrentWorkspaceRuntime();
 		await service.switchWorkspacePartition();
 
 		expect(bridge.layoutRead).toHaveBeenCalledOnce();
 		expect(
 			workspaceRuntime.layoutService.setSideBarPosition,
 		).not.toHaveBeenCalled();
+		service.dispose();
+	});
+
+	it("reapplies the hydrated active container after built-mode initialization", async () => {
+		const service = new PlainLayoutStorageService(
+			{
+				layoutRead: vi.fn(),
+				layoutWrite: vi.fn(async () => undefined),
+			},
+			snapshot([
+				{
+					scope: "workspace",
+					key: "workbench.sidebar.activeviewletid",
+					value: "workbench.view.search",
+				},
+			]),
+		);
+		const workspaceRuntime = runtime();
+		service.configureWorkspaceRuntime(workspaceRuntime.value);
+
+		await service.applyCurrentWorkspaceRuntime();
+
+		expect(
+			workspaceRuntime.paneCompositePartService.openPaneComposite,
+		).toHaveBeenNthCalledWith(
+			1,
+			"workbench.view.search",
+			VIEW_LOCATION_SIDEBAR,
+			false,
+		);
 		service.dispose();
 	});
 

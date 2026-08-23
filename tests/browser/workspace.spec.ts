@@ -13128,6 +13128,7 @@ test("restores audited Workbench layout across reload and flushes the final stat
 		"View: Toggle Primary Side Bar Position",
 	);
 	await expectSideBarPosition("right");
+	await page.getByRole("tab", { name: "Search", exact: true }).click();
 	await executePaletteCommand(
 		page,
 		"Toggle Primary Side Bar Visibility",
@@ -13199,6 +13200,9 @@ test("restores audited Workbench layout across reload and flushes the final stat
 	);
 	await expect(page.locator(".part.sidebar")).toBeVisible();
 	await expectSideBarPosition("right");
+	await expect(
+		page.getByRole("tab", { name: "Search", exact: true }),
+	).toHaveAttribute("aria-selected", "true");
 	await executePaletteCommand(
 		page,
 		"Toggle Primary Side Bar Position",

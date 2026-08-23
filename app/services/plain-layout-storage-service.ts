@@ -299,6 +299,7 @@ export class PlainLayoutStorageService extends InMemoryStorageService {
 	#flushTimer: ReturnType<typeof setTimeout> | undefined;
 	#seeding = false;
 	#workspaceRuntime: PlainWorkspaceLayoutRuntime | undefined;
+	#currentSnapshot: LayoutStorageSnapshot;
 
 	constructor(
 		bridge: Pick<PlainBridge, "layoutRead" | "layoutWrite">,
@@ -307,6 +308,7 @@ export class PlainLayoutStorageService extends InMemoryStorageService {
 		super();
 		this.#bridge = bridge;
 		this.#workspaceAvailable = snapshot.workspaceAvailable;
+		this.#currentSnapshot = snapshot;
 		this.#seed(snapshot, true, true);
 	}
 
@@ -395,6 +397,7 @@ export class PlainLayoutStorageService extends InMemoryStorageService {
 		const previousWorkspaceAvailable = this.#workspaceAvailable;
 		const snapshot = await this.#bridge.layoutRead();
 		this.#workspaceAvailable = snapshot.workspaceAvailable;
+		this.#currentSnapshot = snapshot;
 		this.#seed(snapshot, false, true);
 		if (
 			this.#workspaceRuntime !== undefined &&
@@ -408,6 +411,15 @@ export class PlainLayoutStorageService extends InMemoryStorageService {
 
 	configureWorkspaceRuntime(runtime: PlainWorkspaceLayoutRuntime): void {
 		this.#workspaceRuntime = runtime;
+	}
+
+	async applyCurrentWorkspaceRuntime(): Promise<void> {
+		if (!this.#workspaceAvailable || this.#workspaceRuntime === undefined)
+			return;
+		await applyPlainWorkspaceLayoutRuntime(
+			this.#currentSnapshot,
+			this.#workspaceRuntime,
+		);
 	}
 
 	override dispose(): void {
