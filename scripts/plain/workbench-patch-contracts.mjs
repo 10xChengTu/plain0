@@ -82,7 +82,7 @@ const PATCH_CONTRACTS = Object.freeze([
 		// `scripts/plain/missing-services-patch-contract.mjs`'s own S6
 		// paragraph and `docs/bundle-baseline.json`'s per-category
 		// `categoryNotes` for the full per-file accounting.
-		sha256: "bae37ebab7aa701f8c832e9d68b03a654fe9aa61a508e52c9f0824655a76b2fc",
+		sha256: "7298079a565ff5737f3dae664ff98c1c6facc488262bd1745d2965a227e6b079",
 		integrity:
 			"sha512-pJMSRMI0m5Mvx54u6iBGh+iad9KqfICnwAcjswNJOO7Xt1OXm5xILcM32VkMe4UX0YmrGAvYc0WVKWL8I9O4ng==",
 		directImporter: true,
@@ -239,6 +239,19 @@ const PATCH_CONTRACTS = Object.freeze([
 			"@@ -648,7 +716,7 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel",
 			"@@ -671,11 +739,18 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel",
 			"@@ -687,9 +762,13 @@ let TextFileEditorModel = class TextFileEditorModel extends BaseTextEditorModel",
+			"diff --git a/vscode/src/vs/workbench/browser/actions/layoutActions.js b/vscode/src/vs/workbench/browser/actions/layoutActions.js",
+			"@@ -80,7 +80,11 @@",
+			"@@ -90,12 +94,11 @@",
+			"@@ -138,10 +141,9 @@",
+			"@@ -161,7 +163,7 @@",
+			"@@ -175,7 +177,7 @@",
+			"@@ -189,7 +191,7 @@",
+			"@@ -203,7 +205,7 @@",
+			"@@ -216,7 +218,7 @@",
+			"@@ -225,7 +227,7 @@",
+			"@@ -325,7 +327,7 @@",
+			"@@ -341,7 +343,7 @@",
+			"@@ -1223,20 +1225,20 @@",
 			"diff --git a/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js b/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js",
 			"@@ -3,7 +3,7 @@ import { __decorate, __param } from '../../../../../../../external/tslib/tslib.e",
 			"@@ -30,6 +30,101 @@ import { IProgressService } from '../../../../platform/progress/common/progress.",
@@ -462,6 +475,23 @@ const PATCH_CONTRACTS = Object.freeze([
 			"@@ -631,7 +623,7 @@ let BrowserTitlebarPart = class BrowserTitlebarPart extends Part {",
 		]),
 	}),
+	Object.freeze({
+		packageName: "@codingame/monaco-vscode-workbench-service-override@35.0.1",
+		patchPath:
+			"patches/@codingame__monaco-vscode-workbench-service-override@35.0.1.patch",
+		sha256: "4bd7198ed1c8c7387aa6beb6800f0ee419cd51e66bb1c94ad7c173730f7dbe69",
+		integrity:
+			"sha512-9KnyoG1L1vE/H1WpxD0n6BSro7Vw+BHRXfabmUNp2OQxyj2ihTcnoblGS50gX1aLfSIfz111llD2d8zMtocaBQ==",
+		directImporter: true,
+		snapshotEdgeCount: 0,
+		shape: Object.freeze([
+			"diff --git a/vscode/src/vs/workbench/browser/layout.js b/vscode/src/vs/workbench/browser/layout.js",
+			"@@ -2362,11 +2362,6 @@",
+			"@@ -2381,8 +2376,6 @@",
+			"@@ -2401,9 +2394,6 @@",
+			"@@ -2538,12 +2528,6 @@",
+		]),
+	}),
 ]);
 
 function patchShape(source) {
@@ -647,7 +677,7 @@ function exactMappingLines(source, expected, label, failures) {
 	).filter((line) => line.trim().length > 0);
 	if (JSON.stringify(actual) !== JSON.stringify(expected)) {
 		failures.push(
-			`${label} top-level patchedDependencies must be the exact audited ten-entry closed set`,
+			`${label} top-level patchedDependencies must be the exact audited ${PATCH_CONTRACTS.length}-entry closed set`,
 		);
 	}
 	return actual;

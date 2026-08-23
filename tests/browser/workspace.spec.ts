@@ -13109,7 +13109,25 @@ test("restores audited Workbench layout across reload and flushes the final stat
 	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
 	await page.getByRole("tab", { name: /^Explorer / }).click();
 	const sideBar = page.locator(".part.sidebar");
+	const editorPart = page.locator(".part.editor");
 	await expect(sideBar).toBeVisible();
+	const expectSideBarPosition = async (position: "left" | "right") => {
+		await expect
+			.poll(async () => {
+				const sideBarBox = await sideBar.boundingBox();
+				const editorBox = await editorPart.boundingBox();
+				if (sideBarBox === null || editorBox === null) return undefined;
+				return sideBarBox.x < editorBox.x ? "left" : "right";
+			})
+			.toBe(position);
+	};
+	await expectSideBarPosition("left");
+	await executePaletteCommand(
+		page,
+		"Toggle Primary Side Bar Position",
+		"View: Toggle Primary Side Bar Position",
+	);
+	await expectSideBarPosition("right");
 	await executePaletteCommand(
 		page,
 		"Toggle Primary Side Bar Visibility",
@@ -13159,6 +13177,11 @@ test("restores audited Workbench layout across reload and flushes the final stat
 				key: "workbench.sideBar.hidden",
 				value: "true",
 			}),
+			expect.objectContaining({
+				scope: "workspace",
+				key: "workbench.sideBar.position",
+				value: "1",
+			}),
 		]),
 	);
 
@@ -13175,6 +13198,13 @@ test("restores audited Workbench layout across reload and flushes the final stat
 		"View: Toggle Primary Side Bar Visibility",
 	);
 	await expect(page.locator(".part.sidebar")).toBeVisible();
+	await expectSideBarPosition("right");
+	await executePaletteCommand(
+		page,
+		"Toggle Primary Side Bar Position",
+		"View: Toggle Primary Side Bar Position",
+	);
+	await expectSideBarPosition("left");
 
 	await page.evaluate(() => {
 		(
@@ -13218,6 +13248,11 @@ test("restores audited Workbench layout across reload and flushes the final stat
 				key: "workbench.sideBar.hidden",
 				value: "false",
 			}),
+			expect.objectContaining({
+				scope: "workspace",
+				key: "workbench.sideBar.position",
+				value: "0",
+			}),
 		]),
 	);
 
@@ -13228,6 +13263,7 @@ test("restores audited Workbench layout across reload and flushes the final stat
 		{ timeout: 60_000 },
 	);
 	await expect(page.locator(".part.sidebar")).toBeVisible();
+	await expectSideBarPosition("left");
 	expect(errors).toEqual([]);
 });
 

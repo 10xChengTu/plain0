@@ -1,0 +1,47 @@
+diff --git a/vscode/src/vs/workbench/browser/layout.js b/vscode/src/vs/workbench/browser/layout.js
+--- a/vscode/src/vs/workbench/browser/layout.js
++++ b/vscode/src/vs/workbench/browser/layout.js
+@@ -2362,11 +2362,6 @@
+                 LayoutStateKeys.STATUSBAR_HIDDEN,
+                 !this.configurationService.getValue(LegacyWorkbenchLayoutSettings.STATUSBAR_VISIBLE)
+             );
+-        }
+-        if (configurationChangeEvent.affectsConfiguration(LegacyWorkbenchLayoutSettings.SIDEBAR_POSITION)) {
+-            this.setRuntimeValueAndFire(LayoutStateKeys.SIDEBAR_POSITON, positionFromString(
+-                this.configurationService.getValue(LegacyWorkbenchLayoutSettings.SIDEBAR_POSITION) ?? "left"
+-            ));
+         }
+     }
+     updateLegacySettingsFromState(key, value) {
+@@ -2381,8 +2376,6 @@
+             );
+         } else if (key === LayoutStateKeys.STATUSBAR_HIDDEN) {
+             this.configurationService.updateValue(LegacyWorkbenchLayoutSettings.STATUSBAR_VISIBLE, !value);
+-        } else if (key === LayoutStateKeys.SIDEBAR_POSITON) {
+-            this.configurationService.updateValue(LegacyWorkbenchLayoutSettings.SIDEBAR_POSITION, positionToString(value));
+         }
+     }
+     load(configuration) {
+@@ -2401,9 +2394,6 @@
+             LayoutStateKeys.STATUSBAR_HIDDEN.name,
+             !this.configurationService.getValue(LegacyWorkbenchLayoutSettings.STATUSBAR_VISIBLE)
+         );
+-        this.stateCache.set(LayoutStateKeys.SIDEBAR_POSITON.name, positionFromString(
+-            this.configurationService.getValue(LegacyWorkbenchLayoutSettings.SIDEBAR_POSITION) ?? "left"
+-        ));
+         const auxiliaryBarForceMaximized = this.configurationService.getValue(WorkbenchLayoutSettings.AUXILIARYBAR_FORCE_MAXIMIZED);
+         const workbenchState = this.contextService.getWorkbenchState();
+         const mainContainerDimension = configuration.mainContainerDimension;
+@@ -2538,12 +2528,6 @@
+                     !this.configurationService.getValue(LegacyWorkbenchLayoutSettings.STATUSBAR_VISIBLE)
+                 );
+                 break;
+-            case LayoutStateKeys.SIDEBAR_POSITON:
+-                this.stateCache.set(
+-                    key.name,
+-                    this.configurationService.getValue(LegacyWorkbenchLayoutSettings.SIDEBAR_POSITION) ?? "left"
+-                );
+-                break;
+             }
+         }
+         return this.stateCache.get(key.name);

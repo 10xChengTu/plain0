@@ -7298,6 +7298,147 @@ index e743e309f1b308aebcb4559a12d9591bd0d49701..3d4bda71433542a808b6827671788e05
              this.lastResolvedFileStat = newFileStat;
          }
          else if (this.lastResolvedFileStat.mtime <= newFileStat.mtime) {
+diff --git a/vscode/src/vs/workbench/browser/actions/layoutActions.js b/vscode/src/vs/workbench/browser/actions/layoutActions.js
+--- a/vscode/src/vs/workbench/browser/actions/layoutActions.js
++++ b/vscode/src/vs/workbench/browser/actions/layoutActions.js
+@@ -80,7 +80,11 @@
+         editorGroupService.activeGroup.focus();
+     }
+ });
+-const sidebarPositionConfigurationKey = "workbench.sideBar.location";
++const plainSidebarPositionContextKey = "plain.workbench.sideBarPosition";
++function setPlainSidebarPosition(accessor, layoutService, position) {
++    layoutService.setSideBarPosition(position);
++    accessor.get(IContextKeyService).createKey(plainSidebarPositionContextKey, "left").set(positionToString(position));
++}
+ class MoveSidebarPositionAction extends Action2 {
+     constructor(id, title, position) {
+         super({
+@@ -90,12 +94,11 @@
+         });
+         this.position = position;
+     }
+-    async run(accessor) {
++    run(accessor) {
+         const layoutService = accessor.get(IWorkbenchLayoutService);
+-        const configurationService = accessor.get(IConfigurationService);
+         const position = layoutService.getSideBarPosition();
+         if (position !== this.position) {
+-            return configurationService.updateValue(sidebarPositionConfigurationKey, positionToString(this.position));
++            setPlainSidebarPosition(accessor, layoutService, this.position);
+         }
+     }
+ }
+@@ -138,10 +141,9 @@
+     }
+     run(accessor) {
+         const layoutService = accessor.get(IWorkbenchLayoutService);
+-        const configurationService = accessor.get(IConfigurationService);
+         const position = layoutService.getSideBarPosition();
+-        const newPositionValue = (position === Position.LEFT) ? "right" : "left";
+-        return configurationService.updateValue(sidebarPositionConfigurationKey, newPositionValue);
++        const newPosition = (position === Position.LEFT) ? Position.RIGHT : Position.LEFT;
++        setPlainSidebarPosition(accessor, layoutService, newPosition);
+     }
+ }
+ registerAction2(ToggleSidebarPositionAction);
+@@ -161,7 +163,7 @@
+             id: ToggleSidebarPositionAction.ID,
+             title: ( localize(3052, "Move Primary Side Bar Right"))
+         },
+-        when: ( ContextKeyExpr.and(( ContextKeyExpr.notEquals("config.workbench.sideBar.location", "right")), ( ContextKeyExpr.equals(
++        when: ( ContextKeyExpr.and(( ContextKeyExpr.notEquals(plainSidebarPositionContextKey, "right")), ( ContextKeyExpr.equals(
+             "viewContainerLocation",
+             ViewContainerLocationToString(ViewContainerLocation.Sidebar)
+         )))),
+@@ -175,7 +177,7 @@
+             id: ToggleSidebarPositionAction.ID,
+             title: ( localize(3053, "Move Primary Side Bar Left"))
+         },
+-        when: ( ContextKeyExpr.and(( ContextKeyExpr.equals("config.workbench.sideBar.location", "right")), ( ContextKeyExpr.equals(
++        when: ( ContextKeyExpr.and(( ContextKeyExpr.equals(plainSidebarPositionContextKey, "right")), ( ContextKeyExpr.equals(
+             "viewContainerLocation",
+             ViewContainerLocationToString(ViewContainerLocation.Sidebar)
+         )))),
+@@ -189,7 +191,7 @@
+             id: ToggleSidebarPositionAction.ID,
+             title: ( localize(3054, "Move Secondary Side Bar Left"))
+         },
+-        when: ( ContextKeyExpr.and(( ContextKeyExpr.notEquals("config.workbench.sideBar.location", "right")), ( ContextKeyExpr.equals(
++        when: ( ContextKeyExpr.and(( ContextKeyExpr.notEquals(plainSidebarPositionContextKey, "right")), ( ContextKeyExpr.equals(
+             "viewContainerLocation",
+             ViewContainerLocationToString(ViewContainerLocation.AuxiliaryBar)
+         )))),
+@@ -203,7 +205,7 @@
+             id: ToggleSidebarPositionAction.ID,
+             title: ( localize(3055, "Move Secondary Side Bar Right"))
+         },
+-        when: ( ContextKeyExpr.and(( ContextKeyExpr.equals("config.workbench.sideBar.location", "right")), ( ContextKeyExpr.equals(
++        when: ( ContextKeyExpr.and(( ContextKeyExpr.equals(plainSidebarPositionContextKey, "right")), ( ContextKeyExpr.equals(
+             "viewContainerLocation",
+             ViewContainerLocationToString(ViewContainerLocation.AuxiliaryBar)
+         )))),
+@@ -216,7 +218,7 @@
+         id: ToggleSidebarPositionAction.ID,
+         title: ( localize(3056, "&&Move Primary Side Bar Right"))
+     },
+-    when: ( ContextKeyExpr.and(( ContextKeyExpr.notEquals("config.workbench.sideBar.location", "right")), ( IsSessionsWindowContext.negate()))),
++    when: ( ContextKeyExpr.and(( ContextKeyExpr.notEquals(plainSidebarPositionContextKey, "right")), ( IsSessionsWindowContext.negate()))),
+     order: 2
+ });
+ MenuRegistry.appendMenuItem(MenuId.MenubarAppearanceMenu, {
+@@ -225,7 +227,7 @@
+         id: ToggleSidebarPositionAction.ID,
+         title: ( localize(3057, "&&Move Primary Side Bar Left"))
+     },
+-    when: ( ContextKeyExpr.and(( ContextKeyExpr.equals("config.workbench.sideBar.location", "right")), ( IsSessionsWindowContext.negate()))),
++    when: ( ContextKeyExpr.and(( ContextKeyExpr.equals(plainSidebarPositionContextKey, "right")), ( IsSessionsWindowContext.negate()))),
+     order: 2
+ });
+ registerAction2(class extends Action2 {
+@@ -325,7 +327,7 @@
+                 icon: panelLeftIcon
+             }
+         },
+-        when: ( ContextKeyExpr.and(( IsAuxiliaryWindowContext.negate()), ( ContextKeyExpr.or(( ContextKeyExpr.equals("config.workbench.layoutControl.type", "toggles")), ( ContextKeyExpr.equals("config.workbench.layoutControl.type", "both")))), ( ContextKeyExpr.equals("config.workbench.sideBar.location", "left")))),
++        when: ( ContextKeyExpr.and(( IsAuxiliaryWindowContext.negate()), ( ContextKeyExpr.or(( ContextKeyExpr.equals("config.workbench.layoutControl.type", "toggles")), ( ContextKeyExpr.equals("config.workbench.layoutControl.type", "both")))), ( ContextKeyExpr.equals(plainSidebarPositionContextKey, "left")))),
+         order: 0
+     }
+ }, {
+@@ -341,7 +343,7 @@
+                 icon: panelRightIcon
+             }
+         },
+-        when: ( ContextKeyExpr.and(( IsAuxiliaryWindowContext.negate()), ( ContextKeyExpr.or(( ContextKeyExpr.equals("config.workbench.layoutControl.type", "toggles")), ( ContextKeyExpr.equals("config.workbench.layoutControl.type", "both")))), ( ContextKeyExpr.equals("config.workbench.sideBar.location", "right")))),
++        when: ( ContextKeyExpr.and(( IsAuxiliaryWindowContext.negate()), ( ContextKeyExpr.or(( ContextKeyExpr.equals("config.workbench.layoutControl.type", "toggles")), ( ContextKeyExpr.equals("config.workbench.layoutControl.type", "both")))), ( ContextKeyExpr.equals(plainSidebarPositionContextKey, "right")))),
+         order: 2
+     }
+ }]);
+@@ -1223,20 +1225,20 @@
+ }
+ ToggleVisibilityActions.push(
+     ...[CreateToggleLayoutItem(ToggleActivityBarVisibilityActionId, ( ContextKeyExpr.notEquals("config.workbench.activityBar.location", "hidden")), ( localize(3131, "Activity Bar")), {
+-        whenA: ( ContextKeyExpr.equals("config.workbench.sideBar.location", "left")),
++        whenA: ( ContextKeyExpr.equals(plainSidebarPositionContextKey, "left")),
+         iconA: activityBarLeftIcon,
+         iconB: activityBarRightIcon
+     }), CreateToggleLayoutItem(ToggleSidebarVisibilityAction.ID, SideBarVisibleContext, ( localize(3132, "Primary Side Bar")), {
+-        whenA: ( ContextKeyExpr.equals("config.workbench.sideBar.location", "left")),
++        whenA: ( ContextKeyExpr.equals(plainSidebarPositionContextKey, "left")),
+         iconA: panelLeftIcon,
+         iconB: panelRightIcon
+     }), CreateToggleLayoutItem(ToggleAuxiliaryBarAction.ID, AuxiliaryBarVisibleContext, ( localize(3116, "Secondary Side Bar")), {
+-        whenA: ( ContextKeyExpr.equals("config.workbench.sideBar.location", "left")),
++        whenA: ( ContextKeyExpr.equals(plainSidebarPositionContextKey, "left")),
+         iconA: panelRightIcon,
+         iconB: panelLeftIcon
+     }), CreateToggleLayoutItem(TogglePanelAction.ID, PanelVisibleContext, ( localize(3115, "Panel")), panelIcon), CreateToggleLayoutItem(ToggleStatusbarVisibilityAction.ID, ( ContextKeyExpr.equals("config.workbench.statusBar.visible", true)), ( localize(3133, "Status Bar")), statusBarIcon)]
+ );
+-const MoveSideBarActions = [CreateOptionLayoutItem(MoveSidebarLeftAction.ID, ( ContextKeyExpr.equals("config.workbench.sideBar.location", "left")), ( localize(3134, "Left")), panelLeftIcon), CreateOptionLayoutItem(MoveSidebarRightAction.ID, ( ContextKeyExpr.equals("config.workbench.sideBar.location", "right")), ( localize(3135, "Right")), panelRightIcon)];
++const MoveSideBarActions = [CreateOptionLayoutItem(MoveSidebarLeftAction.ID, ( ContextKeyExpr.equals(plainSidebarPositionContextKey, "left")), ( localize(3134, "Left")), panelLeftIcon), CreateOptionLayoutItem(MoveSidebarRightAction.ID, ( ContextKeyExpr.equals(plainSidebarPositionContextKey, "right")), ( localize(3135, "Right")), panelRightIcon)];
+ const AlignPanelActions = [CreateOptionLayoutItem("workbench.action.alignPanelLeft", ( PanelAlignmentContext.isEqualTo("left")), ( localize(3136, "Left")), panelAlignmentLeftIcon), CreateOptionLayoutItem("workbench.action.alignPanelRight", ( PanelAlignmentContext.isEqualTo("right")), ( localize(3137, "Right")), panelAlignmentRightIcon), CreateOptionLayoutItem("workbench.action.alignPanelCenter", ( PanelAlignmentContext.isEqualTo("center")), ( localize(3138, "Center")), panelAlignmentCenterIcon), CreateOptionLayoutItem("workbench.action.alignPanelJustify", ( PanelAlignmentContext.isEqualTo("justify")), ( localize(3139, "Justify")), panelAlignmentJustifyIcon)];
+ const QuickInputActions = [
+     CreateOptionLayoutItem("workbench.action.alignQuickInputTop", ( QuickInputAlignmentContextKey.isEqualTo("top")), ( localize(3140, "Top")), quickInputAlignmentTopIcon),
 diff --git a/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js b/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js
 index 0a769e25cf6030e9aa17ae5ec845795f964e5017..0ca61d77c1a1dccfdc383e4c1faec37a5fe54953 100644
 --- a/vscode/src/vs/workbench/services/workingCopy/common/storedFileWorkingCopy.js

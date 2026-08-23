@@ -34,8 +34,34 @@ async function baseline() {
 }
 
 describe("exact Workbench patch contracts", () => {
-	it("accepts only the checked-in ten-package patch and lock graph", async () => {
+	it("accepts only the checked-in eleven-package patch and lock graph", async () => {
 		expect(validateWorkbenchPatchSet(await baseline())).toEqual([]);
+	});
+
+	it("keeps primary-side-bar position workspace-owned instead of global-setting-owned", async () => {
+		const input = await baseline();
+		const apiPatch = input.patchSources.get(
+			"patches/@codingame__monaco-vscode-api@35.0.1.patch",
+		);
+		const workbenchPatch = input.patchSources.get(
+			"patches/@codingame__monaco-vscode-workbench-service-override@35.0.1.patch",
+		);
+
+		expect(apiPatch).toContain(
+			'+const plainSidebarPositionContextKey = "plain.workbench.sideBarPosition";',
+		);
+		expect(apiPatch).toContain(
+			"+    layoutService.setSideBarPosition(position);",
+		);
+		expect(apiPatch).toContain(
+			"-            return configurationService.updateValue(sidebarPositionConfigurationKey, positionToString(this.position));",
+		);
+		expect(workbenchPatch).toContain(
+			"-        this.stateCache.set(LayoutStateKeys.SIDEBAR_POSITON.name, positionFromString(",
+		);
+		expect(workbenchPatch).toContain(
+			"-        if (configurationChangeEvent.affectsConfiguration(LegacyWorkbenchLayoutSettings.SIDEBAR_POSITION)) {",
+		);
 	});
 
 	it("pins both Plain no-cache schemes and removes direct file/workspace open surfaces", async () => {
@@ -449,7 +475,7 @@ describe("exact Workbench patch contracts", () => {
 			"patchedDependencies:\n  '@example/extra@1.0.0': patches/extra.patch\n",
 		);
 		expect(validateWorkbenchPatchSet(manifestExtra)).toContain(
-			"pnpm-workspace.yaml top-level patchedDependencies must be the exact audited ten-entry closed set",
+			"pnpm-workspace.yaml top-level patchedDependencies must be the exact audited 11-entry closed set",
 		);
 
 		const lockExtra = await baseline();
@@ -458,7 +484,7 @@ describe("exact Workbench patch contracts", () => {
 			`patchedDependencies:\n  '@example/extra@1.0.0': ${"f".repeat(64)}\n`,
 		);
 		expect(validateWorkbenchPatchSet(lockExtra)).toContain(
-			"pnpm-lock.yaml top-level patchedDependencies must be the exact audited ten-entry closed set",
+			"pnpm-lock.yaml top-level patchedDependencies must be the exact audited 11-entry closed set",
 		);
 	});
 
@@ -478,7 +504,7 @@ describe("exact Workbench patch contracts", () => {
 
 	it("rejects bare importer and snapshot edges even when comments repeat the hash", async () => {
 		const apiHash =
-			"bae37ebab7aa701f8c832e9d68b03a654fe9aa61a508e52c9f0824655a76b2fc";
+			"7298079a565ff5737f3dae664ff98c1c6facc488262bd1745d2965a227e6b079";
 		const importerBare = await baseline();
 		importerBare.lockfile = `${importerBare.lockfile.replace(
 			`        version: 35.0.1(patch_hash=${apiHash})`,

@@ -21,6 +21,8 @@ import { IFileService } from "@codingame/monaco-vscode-api/vscode/vs/platform/fi
 import { IDialogService } from "@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service";
 import { IQuickInputService } from "@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service";
 import { LifecyclePhase } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle";
+import { positionToString } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/layout/browser/layoutService";
+import { IWorkbenchLayoutService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/layout/browser/layoutService.service";
 import { IWorkbenchThemeService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service";
 import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service";
 import { ITextEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/textfile/common/textEditorService.service";
@@ -307,6 +309,15 @@ async function bootstrap(): Promise<void> {
 		enableWorkspaceTrust: false,
 		workspaceProvider: initialWorkspace.provider,
 	});
+	// Plain owns the primary-side-bar position per stable workspace root set.
+	// The paired audited vendor patch makes the layout actions update the
+	// Workbench runtime state directly instead of persisting VS Code's legacy
+	// global `workbench.sideBar.location` setting. Seed its menu/context state
+	// from the position restored out of PlainLayoutStorageService.
+	const workbenchLayoutService = await getService(IWorkbenchLayoutService);
+	(await getService(IContextKeyService))
+		.createKey<string>("plain.workbench.sideBarPosition", "left")
+		.set(positionToString(workbenchLayoutService.getSideBarPosition()));
 	registerPlainBuiltinThemeResources();
 	registerPlainBuiltinGrammarResources(await getService(ILanguageService));
 	await workspaceTopologyCoordinator.completeInitial();
