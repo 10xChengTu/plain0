@@ -1,7 +1,7 @@
 {
 	"schemaVersion": 3,
-	"updatedAt": "2026-08-02",
-	"currentPhase": 6,
+	"updatedAt": "2026-08-24",
+	"currentPhase": 7,
 	"wipLimit": 1,
 	"features": [
 		{
@@ -304,7 +304,7 @@
 					"A persisted selection.plain.json file is a plain, non-package sibling directly under the theme library root, so once a selection has ever been written, Rust's own theme_list enumeration counts it toward its existing skipped tally (the same tolerance record::list_theme_packages already extends to a leftover staging directory) -- a benign accounting fact, covered by a dedicated Rust test, not a functional gap.",
 					"Windows and Linux native packaging remains F120.",
 					"Zeroing the monaco-vscode-api bundle migration debt remains F110.",
-					"The built-in, audited static TextMate grammar package product-scope.md:32 and ADR 0002:18 promise as the tokenization input for syntax coloring is not bundled: package.json carries no language-grammar default-extension package (only the textmate service override and theme-defaults-default-extension), the resources/grammars/ directory docs/architecture.md:80 plans for does not exist, and the editor performs no TextMate tokenization today — built-in and imported theme colors apply only to whatever the vendored default tokenizer already produces, never to grammar-scoped tokens. No feature (F001-F230) covers this; it is left for a future, independently scoped feature. Recorded per the F230 S1 completion audit (docs/completion-audit.md)."
+					"Closed by F240: the completion audit originally found that the product-scope.md:32 and ADR 0002:18 built-in static TextMate grammar promise was not bundled. F240 now pins and audits 11 same-version declarative language packages, registers 28 grammar resources without an Extension Host, and proves real TypeScript/Rust model scopes in Browser Workbench. The original finding remains recorded in docs/completion-audit.md for provenance."
 				],
 				"acceptanceResults": [
 					{
@@ -1288,6 +1288,53 @@
 					{
 						"acceptance": "The repository is clean and every completed work item is independently committed",
 						"result": "Achieved. The integrity domain verified a clean working tree, resolved every slice commit hash recorded in progress.md from F140 onward against git history with matching subjects, and confirmed the machine-checked feature contract passes with complete evidence on every closed feature."
+					}
+				]
+			}
+		},
+		{
+			"id": "F240",
+			"name": "Built-in TextMate grammar tokenization",
+			"phase": 7,
+			"status": "complete",
+			"acceptance": [
+				"A curated audited set of static TextMate grammars is bundled without an Extension Host",
+				"Language ids and file associations are registered before grammar contributions are dispatched",
+				"Real editor models tokenize representative source files with grammar-scoped tokens",
+				"Architecture bundle notices and Browser gates prove the language packages stay declarative and bounded"
+			],
+			"evidence": {
+				"commands": [
+					"pnpm check",
+					"pnpm check:notices",
+					"pnpm exec playwright test tests/browser/foundation.spec.ts tests/browser/workspace.spec.ts --grep \"boots the allowlisted Workbench|tokenizes real TypeScript and Rust\""
+				],
+				"results": [
+					"Pinned 11 @codingame/monaco-vscode-*-default-extension packages at the exact Workbench version 35.0.1 and audited 28 referenced TextMate grammars plus their language configuration files. Plain synthesizes one runtime manifest containing only languages and grammars, exposes every byte through the existing read-only extension-file provider, and never imports a default extension side-effect entrypoint or enables any Extension Host.",
+					"Plain registers the audited language ids, filename associations and configuration URIs directly with ILanguageService before dispatching the grammar extension point, matching the inert PlainNullExtensionService architecture. Contract tests pin every dependency/resource and reject runtime main, browser, activation event, lifecycle install script and Extension Host markers.",
+					"A real Workbench Browser scenario opens TypeScript and Rust workspace models and asks the actual ITextMateTokenizationService to tokenize source lines; both return multi-token results containing source.ts/source.rust and nested grammar scopes. The allowlisted Workbench bootstrap scenario passes alongside it with no page or console errors.",
+					"Final gates: pnpm check passed 118 frontend test files/2328 tests, a 2258-module production build, architecture over 126 app and 210 Rust sources with 28 pinned runtime dependencies, the 2022-source bundle audit with 53 tracked transitional debt sources, Rust fmt/clippy and 1562/1562 Rust tests. ThirdPartyNotices.txt is fresh at 46 production JS packages, 544 Rust crates and 128 notice blocks."
+				],
+				"nativeScenarios": [
+					"No standalone F240 desktop-only contract is required: the acceptance concerns the real Workbench editor model and TextMate service, both exercised without substitution in the Browser Workbench scenario. The later batched real-desktop pass will still observe normal source rendering while closing the pre-existing E2E-025 through E2E-027 handover items."
+				],
+				"platformGaps": [],
+				"acceptanceResults": [
+					{
+						"acceptance": "A curated audited set of static TextMate grammars is bundled without an Extension Host",
+						"result": "Achieved. resources/grammars/audit-manifest.json freezes 11 MIT same-version sources and 28 grammar files; the synthesized built-in manifest and read-only resource registry include only static language and grammar data, while architecture and bundle guards continue to reject every Extension Host entrypoint."
+					},
+					{
+						"acceptance": "Language ids and file associations are registered before grammar contributions are dispatched",
+						"result": "Achieved. registerPlainBuiltinGrammarResources first registers every audited ILanguageExtensionPoint with configuration URIs on ILanguageService, then dispatches grammarsExtPoint; the order is pinned by a source contract and the live Workbench bootstrap accepts every grammar without unknown-language validation errors."
+					},
+					{
+						"acceptance": "Real editor models tokenize representative source files with grammar-scoped tokens",
+						"result": "Achieved. The Browser Workbench test opens real plain-workspace TypeScript and Rust models and verifies the actual TextMate tokenizer returns multiple scope-bearing tokens rooted at source.ts and source.rust."
+					},
+					{
+						"acceptance": "Architecture bundle notices and Browser gates prove the language packages stay declarative and bounded",
+						"result": "Achieved. Exact dependency/import/resource contracts, architecture and bundle guards, refreshed third-party notices, full pnpm check, and the two-scenario Browser bootstrap/tokenization run all pass; no executable language extension or host surface was introduced."
 					}
 				]
 			}

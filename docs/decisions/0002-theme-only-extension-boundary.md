@@ -16,6 +16,7 @@
 - 文件：JSON/JSONC、`.tmTheme` plist、被引用的字体/图片/SVG。
 - 忽略且绝不执行：`main`、`browser`、`activationEvents`、scripts、commands 和任何其他 contribution。
 - 使用 Monaco + vscode-textmate + vscode-oniguruma 和静态内置 grammar。
+- 内置 grammar 只从精确版本、经审计的默认语言包复制 `languages`/`grammars` 声明和被引用的静态资源；Plain 自行合成无 `main`、`browser`、`activationEvents`、scripts 的运行时 manifest，并在 language id/文件关联登记完成后投递 grammar contribution。
 - 首阶段不从 Microsoft Marketplace 自动下载；用户本地导入不意味着项目可重新分发主题资产。
 
 ## 安全要求

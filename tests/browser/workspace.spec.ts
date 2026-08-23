@@ -16120,6 +16120,107 @@ async function workbenchThemeState(
 	});
 }
 
+test("tokenizes real TypeScript and Rust editor models with bundled TextMate grammar scopes", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"sample.rs": 'fn main() { println!("plain"); }\n',
+	});
+	const explorer = await openNativeWorkspaceExplorer(page);
+
+	const src = explorer.getByRole("treeitem", { name: "src", exact: true });
+	if ((await src.getAttribute("aria-expanded")) !== "true") {
+		await src.click();
+	}
+	await expect(src).toHaveAttribute("aria-expanded", "true");
+	await explorer
+		.getByRole("treeitem", { name: "main.ts", exact: true })
+		.dblclick();
+	await expect(
+		page.getByRole("code").filter({ hasText: "export const plain = true;" }),
+	).toBeVisible();
+
+	const typescript = await page.evaluate(
+		async ({ rootId }) => {
+			const tokenize = (window as unknown as Record<string, unknown>)
+				.__PLAIN_TEST_TOKENIZE_WORKSPACE_LINE__;
+			if (typeof tokenize !== "function") {
+				throw new Error("Plain TextMate diagnostic hook is missing");
+			}
+			return (
+				tokenize as (
+					rootId: string,
+					path: string,
+					line: number,
+				) => Promise<{
+					languageId: string;
+					tokens: readonly { scopes: readonly string[] }[];
+				} | null>
+			)(rootId, "src/main.ts", 1);
+		},
+		{ rootId: nativeRootId },
+	);
+	expect(typescript?.languageId).toBe("typescript");
+	expect(typescript?.tokens.length).toBeGreaterThan(2);
+	expect(typescript?.tokens.flatMap(({ scopes }) => scopes)).toEqual(
+		expect.arrayContaining(["source.ts"]),
+	);
+	expect(
+		typescript?.tokens.some(({ scopes }) =>
+			scopes.some((scope) => scope !== "source.ts" && scope.endsWith(".ts")),
+		),
+	).toBe(true);
+
+	await explorer
+		.getByRole("treeitem", { name: "sample.rs", exact: true })
+		.dblclick();
+	await expect(
+		page
+			.getByRole("code")
+			.filter({ hasText: 'fn main() { println!("plain"); }' }),
+	).toBeVisible();
+	const rust = await page.evaluate(
+		async ({ rootId }) => {
+			const tokenize = (window as unknown as Record<string, unknown>)
+				.__PLAIN_TEST_TOKENIZE_WORKSPACE_LINE__;
+			return (
+				tokenize as (
+					rootId: string,
+					path: string,
+					line: number,
+				) => Promise<{
+					languageId: string;
+					tokens: readonly { scopes: readonly string[] }[];
+				} | null>
+			)(rootId, "sample.rs", 1);
+		},
+		{ rootId: nativeRootId },
+	);
+	expect(rust?.languageId).toBe("rust");
+	expect(rust?.tokens.length).toBeGreaterThan(2);
+	expect(rust?.tokens.flatMap(({ scopes }) => scopes)).toEqual(
+		expect.arrayContaining(["source.rust"]),
+	);
+	expect(
+		rust?.tokens.some(({ scopes }) =>
+			scopes.some(
+				(scope) => scope !== "source.rust" && scope.endsWith(".rust"),
+			),
+		),
+	).toBe(true);
+
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
 // The 10 built-in theme-defaults themes' real, upstream-translated labels
 // (see app/features/themes/plain-theme-registry.ts's own doc comment on why
 // the raw manifest.contributes.themes[].label only ever holds an untranslated

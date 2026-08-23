@@ -86,7 +86,11 @@ const PATCH_CONTRACTS = Object.freeze([
 		integrity:
 			"sha512-pJMSRMI0m5Mvx54u6iBGh+iad9KqfICnwAcjswNJOO7Xt1OXm5xILcM32VkMe4UX0YmrGAvYc0WVKWL8I9O4ng==",
 		directImporter: true,
-		// 27, not 26: `F080` S2 installs
+		// 38, not 27: F240 adds eleven audited, static default-language
+		// packages. Each has one exact dependency edge to this same patched API;
+		// their manifests and grammar bytes are consumed as data only by Plain's
+		// own declarative registry and never enable an Extension Host.
+		// The earlier 27 count came from `F080` S2 installing
 		// `@codingame/monaco-vscode-scm-service-override@35.0.1`, whose own
 		// pnpm-lock.yaml snapshot block depends on this exact patched
 		// `@codingame/monaco-vscode-api` — one more edge, same audited patch
@@ -99,7 +103,7 @@ const PATCH_CONTRACTS = Object.freeze([
 		// 35.0.1(patch_hash=184ceed9...)`, the identical audited hash every
 		// other edge here already shares — not a second, divergent patch
 		// variant).
-		snapshotEdgeCount: 27,
+		snapshotEdgeCount: 38,
 		shape: Object.freeze([
 			"diff --git a/missing-services.js b/missing-services.js",
 			"@@ -3,7 +3,6 @@ import { __decorate, __param } from './external/tslib/tslib.es6.js';",

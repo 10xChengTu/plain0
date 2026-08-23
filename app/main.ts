@@ -1,4 +1,5 @@
 import { registerPlainBuiltinThemeResources } from "./features/themes/plain-builtin-theme-extension";
+import { registerPlainBuiltinGrammarResources } from "./features/themes/plain-builtin-grammar-extension";
 
 import {
 	getService,
@@ -12,6 +13,7 @@ import { reinitializeWorkspace } from "@codingame/monaco-vscode-configuration-se
 import { registerCustomProvider } from "@codingame/monaco-vscode-files-service-override";
 import { ICodeEditorService } from "@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/codeEditorService.service";
 import { IModelService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/services/model.service";
+import { ILanguageService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/languages/language.service";
 import { ITextModelService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/services/resolverService.service";
 import { ILanguageFeaturesService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/services/languageFeatures.service";
 import { IMultiDiffSourceResolverService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/multiDiffEditor/browser/multiDiffSourceResolverService.service";
@@ -24,6 +26,7 @@ import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench
 import { ITextEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/textfile/common/textEditorService.service";
 import { IUntitledTextEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/untitled/common/untitledTextEditorService.service";
 import { IWorkingCopyBackupService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyBackup.service";
+import { ITextMateTokenizationService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/textMate/browser/textMateTokenizationFeature.service";
 
 import { EXCLUDED_SURFACE_GUARD_MARKER } from "./excluded-surface-policy";
 import { enforceExcludedWorkbenchSurfaces } from "./excluded-surfaces";
@@ -299,6 +302,7 @@ async function bootstrap(): Promise<void> {
 		workspaceProvider: initialWorkspace.provider,
 	});
 	registerPlainBuiltinThemeResources();
+	registerPlainBuiltinGrammarResources(await getService(ILanguageService));
 	await workspaceTopologyCoordinator.completeInitial();
 	workspaceCommands = registerWorkspaceCommands(
 		bridge,
@@ -439,6 +443,61 @@ async function bootstrap(): Promise<void> {
 			} finally {
 				reference.dispose();
 			}
+		};
+		(
+			window as unknown as Record<string, unknown>
+		).__PLAIN_TEST_TOKENIZE_WORKSPACE_LINE__ = async (
+			rootId: string,
+			relativePath: string,
+			lineNumber = 1,
+		): Promise<Readonly<{
+			languageId: string;
+			tokens: readonly Readonly<{
+				startIndex: number;
+				endIndex: number;
+				scopes: readonly string[];
+			}>[];
+		}> | null> => {
+			const model = modelServiceForGitContent
+				.getModels()
+				.find(
+					(candidate) =>
+						candidate.uri.scheme === "plain-workspace" &&
+						candidate.uri.authority === rootId &&
+						candidate.uri.path === `/${relativePath}`,
+				);
+			if (
+				model === undefined ||
+				lineNumber < 1 ||
+				lineNumber > model.getLineCount()
+			) {
+				return null;
+			}
+			const languageId = model.getLanguageId();
+			const grammar = await (
+				await getService(ITextMateTokenizationService)
+			).createTokenizer(languageId);
+			if (grammar === null) {
+				return null;
+			}
+			const line = model.getLineContent(lineNumber);
+			const tokens = grammar
+				.tokenizeLine(line, null)
+				.tokens.map(
+					(token: {
+						readonly startIndex: number;
+						readonly endIndex: number;
+						readonly scopes: readonly string[];
+					}) => ({
+						startIndex: token.startIndex,
+						endIndex: token.endIndex,
+						scopes: Object.freeze([...token.scopes]),
+					}),
+				);
+			return Object.freeze({
+				languageId,
+				tokens: Object.freeze(tokens),
+			});
 		};
 	}
 

@@ -1,0 +1,19 @@
+{
+	"schemaVersion": 1,
+	"source": "Code OSS 1.128.1 static default extensions via @codingame/monaco-vscode-* 35.0.1",
+	"license": "MIT",
+	"runtimeContributionAllowlist": ["languages", "grammars"],
+	"packages": [
+		"css",
+		"html",
+		"javascript",
+		"json",
+		"markdown-basics",
+		"python",
+		"rust",
+		"shellscript",
+		"typescript-basics",
+		"xml",
+		"yaml"
+	]
+}
