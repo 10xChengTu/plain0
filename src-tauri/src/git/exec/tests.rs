@@ -1416,17 +1416,22 @@ mod hostile_fixtures {
                 )
             });
             let marker_wait_start = std::time::Instant::now();
-            while !process_ids_path.exists()
-                && marker_wait_start.elapsed() < Duration::from_secs(15)
-            {
+            let mut descendant_process_ids = Vec::new();
+            while marker_wait_start.elapsed() < Duration::from_secs(15) {
+                if let Ok(contents) = std::fs::read_to_string(&process_ids_path) {
+                    if let Ok(process_ids) = contents
+                        .split_whitespace()
+                        .map(str::parse::<libc::pid_t>)
+                        .collect::<Result<Vec<_>, _>>()
+                    {
+                        if process_ids.len() == 2 {
+                            descendant_process_ids = process_ids;
+                            break;
+                        }
+                    }
+                }
                 std::thread::sleep(Duration::from_millis(10));
             }
-            let descendant_process_ids: Vec<libc::pid_t> =
-                std::fs::read_to_string(&process_ids_path)
-                    .expect("the hostile external diff and its sleep child both started")
-                    .split_whitespace()
-                    .map(|value| value.parse().expect("fixture records numeric process IDs"))
-                    .collect();
             assert_eq!(
                 descendant_process_ids.len(),
                 2,

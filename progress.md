@@ -5,8 +5,9 @@
 ## 当前状态
 
 - 阶段：7 — 审计缺口闭合与真实桌面验收。
-- WIP：无。
-- 当前最小工作项：无。下一工作项开始前先把 WIP 切到 E2E-025；E2E-028 Remote SSH 继续明确跳过。
+- WIP：`F290` Remaining native acceptance and validation closure。
+- 当前最小工作项：无（`F290` S0 已完成；下一项为 E2E-025 Terminal，开始前先更新本行）。发布与 E2E-028 Remote SSH 明确不进入本轮。
+- [x] `F290` S0 完整门禁稳健性：修复 Git cancellation 敌意 fixture 的 PID 文件“存在但尚未写完”竞态，改为等待内容完整解析为外部 diff shell 与 sleep child 两个 PID 后才触发取消；目标测试连续 5/5 通过。最终 `pnpm check` 全绿：前端 120 文件/2359 项、2261-module 生产构建、architecture 128 app/215 Rust/28 pinned、bundle 2025 sources/53 既有 debt、Rust fmt/clippy 与 1575/1575 测试通过。
 - [x] `F280` S0 Monaco 编辑基线验收：新增真实 Workbench Browser 场景，逐项通过编辑器内 find/replace、Select All Occurrences 多光标、undo/redo、TypeScript 自动缩进、精确 Go to Bracket、Fold 与保存后模型断言；第二场景用真实 Windows-1252 字节证明自动识别、无 U+FFFD 与原编码精确保存。首轮验收发现 F240 只登记 configuration URI、但 NullExtensionService 不会加载配置的真实缺陷；现以 Monaco 自带严格提取器把同一批审计静态 JSON 直接登记到 `ILanguageConfigurationService`，未引入扩展宿主、activation event 或语言运行时。聚焦 Browser 2/2、grammar/topology 合同、typecheck 与 architecture guard 通过；F030 的 Monaco 基础能力 platform gap 与完成度审计矩阵同步闭合。
 - [x] `F270` S0 DAP threads：新增固定 `debug_threads` command、4096 项/唯一 id Rust parser、严格 own-data TypeScript decoder/native/browser bridge 与 live-session controller；Call Stack 在 stopped 后展示 adapter thread id/name，默认读取 stopped thread，点击其他线程才惰性发其 stackTrace，浏览不改写执行控制目标，continued/terminated/session-ended 清理线程/帧/frame selection，thread exited 不再保留失效 Pause target。Rust parser 2/2、debug codec/controller 71/71、architecture 543/543、真实 Workbench 双线程/切栈/continued 场景 1/1 通过；F100 threads platform gap 与完成度审计矩阵同步闭合。
 - [x] `F260` S0 Git history commit search：新增 root-scoped `git_history_search`，message/author 采用 256-byte 上限、无控制字符、固定 literal case-insensitive 参数和 500 条结果预算，SHA 只接受 4–40 位 hex 并经固定 `rev-parse --verify <sha>^{commit}` 解析；严格 Rust DTO、TypeScript codec/native/PlainBridge、root facade 与自建 History view 搜索 UI 完整接线，多根只查询显式选中仓库。真实 Apple Git fixture 6/6、聚焦前端 639/639、architecture 541/541、typecheck/lint/architecture 和两条真实 Workbench Browser 场景 2/2 通过；F090 的历史搜索 platform gap 与完成度审计矩阵同步闭合。

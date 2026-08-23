@@ -1527,6 +1527,19 @@
 					}
 				]
 			}
+		},
+		{
+			"id": "F290",
+			"name": "Remaining native acceptance and validation closure",
+			"phase": 7,
+			"status": "in_progress",
+			"acceptance": [
+				"The complete pnpm check gate passes without timing or process-fixture races",
+				"E2E-025 validates the real local terminal lifecycle and bounded output path",
+				"E2E-026 validates real search replace cancellation and file effects",
+				"E2E-027 validates a real local DAP adapter session including multi-thread state",
+				"Release workflows and E2E-028 Remote SSH remain explicitly outside this run"
+			]
 		}
 	]
 }
