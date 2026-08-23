@@ -23,6 +23,7 @@ import { IQuickInputService } from "@codingame/monaco-vscode-api/vscode/vs/platf
 import { LifecyclePhase } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle";
 import { positionToString } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/layout/browser/layoutService";
 import { IWorkbenchLayoutService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/layout/browser/layoutService.service";
+import { IPaneCompositePartService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/panecomposite/browser/panecomposite.service";
 import { IWorkbenchThemeService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service";
 import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service";
 import { ITextEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/textfile/common/textEditorService.service";
@@ -320,9 +321,18 @@ async function bootstrap(): Promise<void> {
 	// global `workbench.sideBar.location` setting. Seed its menu/context state
 	// from the position restored out of PlainLayoutStorageService.
 	const workbenchLayoutService = await getService(IWorkbenchLayoutService);
-	(await getService(IContextKeyService))
-		.createKey<string>("plain.workbench.sideBarPosition", "left")
-		.set(positionToString(workbenchLayoutService.getSideBarPosition()));
+	const sideBarPositionContext = (
+		await getService(IContextKeyService)
+	).createKey<string>("plain.workbench.sideBarPosition", "left");
+	sideBarPositionContext.set(
+		positionToString(workbenchLayoutService.getSideBarPosition()),
+	);
+	layoutStorageService.configureWorkspaceRuntime({
+		layoutService: workbenchLayoutService,
+		paneCompositePartService: await getService(IPaneCompositePartService),
+		setSideBarPositionContext: (position) =>
+			sideBarPositionContext.set(position),
+	});
 	registerPlainBuiltinThemeResources();
 	registerPlainBuiltinGrammarResources(await getService(ILanguageService));
 	await workspaceTopologyCoordinator.completeInitial();

@@ -66,6 +66,7 @@ F170 开始前的真实产品状态与“打开文件、最近项目、本地设
 - `IStorageService` 继续向 Workbench 提供同步读写语义，但 Plain 只把布局尺寸、栏位可见性/位置、active container、pins/placeholders 和固定 view state 的精确 allowlist 交给 Rust；历史、认证、编辑内容、扩展状态及任意未知 key 不得进入本域。
 - profile 状态保存到 app-local-data 的单一全局文件；workspace 状态按 Rust `WorkspaceRootsIdentity` 的稳定 root-set digest 分区。digest 和原生路径都不进入 IPC，空 workspace 不接收任何 workspace entry。
 - 初始快照必须在 `initialize()` 前完成严格 DTO 解码并同步 seed；root topology 变化只有在 Workbench 已采用并通过 id/configPath/root URI 核对后才切换 layout 分区，失败进入现有永久 reload boundary，不能继续使用旧分区。
+- 运行中的 topology adoption 不会重建 Workbench layout/view 实例；分区 seed 后必须把该 workspace 的审计快照投影到既有 part/pane runtime。新空分区固定回到左侧 Explorer、隐藏 panel，既有分区恢复自己的位置、可见性与 active container；profile 尺寸和 pins 仍按合同共享。runtime 投影失败与 storage 分区失败同样进入 reload boundary。
 - Primary Side Bar 的左右位置以 workspace storage 为唯一权威；固定 vendor patch 禁止 `workbench.sideBar.location` 这一旧全局 setting 在加载或运行时覆盖该状态，并让既有布局命令直接更新 Workbench runtime state 与 Plain 专用 context key。新 root-set 因而从左侧默认值开始，既有 root-set 只恢复自己的位置。
 - 普通变更可有界 debounce，但原生关闭必须先触发 Workbench `onWillSaveState`、再等待 Rust 原子发布，最后才回 lifecycle allow。`window.confirmBeforeClose` 固定为 `never`，避免 WebView 的重复通用确认先于 Plain 原生 veto 拦截关闭；dirty working-copy 等真正数据风险仍由原生生命周期处理。Rust 采用 create-new stage、sync、回读摘要和 rename；损坏文件 quarantine，symlink/超限/未知字段 fail closed。
 

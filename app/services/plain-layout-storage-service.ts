@@ -6,6 +6,13 @@ import {
 	StorageTarget,
 	WillSaveStateReason,
 } from "@codingame/monaco-vscode-api/vscode/vs/platform/storage/common/storage";
+import type {
+	Parts,
+	Position,
+} from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/layout/browser/layoutService";
+import type { IWorkbenchLayoutService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/layout/browser/layoutService.service";
+import type { IPaneCompositePartService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/panecomposite/browser/panecomposite.service";
+import type { ViewContainerLocation } from "@codingame/monaco-vscode-api/vscode/vs/workbench/common/views";
 
 import type {
 	LayoutStorageEntry,
@@ -65,6 +72,190 @@ const VIEW_STORAGE_IDS = Object.freeze([
 ]);
 
 const AUTO_FLUSH_DELAY_MS = 750;
+const POSITION_LEFT = 0 as Position;
+const POSITION_RIGHT = 1 as Position;
+const POSITION_BOTTOM = 2 as Position;
+const POSITION_TOP = 3 as Position;
+const VIEW_LOCATION_SIDEBAR = 0 as ViewContainerLocation;
+const VIEW_LOCATION_PANEL = 1 as ViewContainerLocation;
+const PART_ACTIVITYBAR = "workbench.parts.activitybar" as Parts;
+const PART_SIDEBAR = "workbench.parts.sidebar" as Parts;
+const PART_PANEL = "workbench.parts.panel" as Parts;
+const PART_AUXILIARYBAR = "workbench.parts.auxiliarybar" as Parts;
+const PART_EDITOR = "workbench.parts.editor" as Parts;
+const PART_STATUSBAR = "workbench.parts.statusbar" as Parts;
+
+const DEFAULT_SIDEBAR_CONTAINER = "workbench.view.explorer";
+const DEFAULT_PANEL_CONTAINER = "plain.workbench.viewContainer.debugConsole";
+const SIDEBAR_CONTAINERS = new Set([
+	DEFAULT_SIDEBAR_CONTAINER,
+	"workbench.view.search",
+	"plain.workbench.viewContainer.scm",
+	"plain.workbench.viewContainer.debug",
+]);
+const PANEL_CONTAINERS = new Set([
+	"plain.workbench.viewContainer.terminal",
+	DEFAULT_PANEL_CONTAINER,
+]);
+
+type WorkspaceLayoutService = Pick<
+	IWorkbenchLayoutService,
+	| "centerMainEditorLayout"
+	| "getPanelPosition"
+	| "getSideBarPosition"
+	| "isPanelMaximized"
+	| "isAuxiliaryBarMaximized"
+	| "setAuxiliaryBarMaximized"
+	| "setPanelPosition"
+	| "setPartHidden"
+	| "toggleMaximizedPanel"
+	| "toggleZenMode"
+> & {
+	readonly isZenModeActive: () => boolean;
+	readonly setSideBarPosition: (position: Position) => void;
+};
+
+export interface PlainWorkspaceLayoutRuntime {
+	readonly layoutService: IWorkbenchLayoutService;
+	readonly paneCompositePartService: Pick<
+		IPaneCompositePartService,
+		"openPaneComposite"
+	>;
+	readonly setSideBarPositionContext: (position: "left" | "right") => void;
+}
+
+function workspaceEntryMap(
+	snapshot: LayoutStorageSnapshot,
+): ReadonlyMap<string, string> {
+	return new Map(
+		snapshot.entries
+			.filter((entry) => entry.scope === "workspace")
+			.map((entry) => [entry.key, entry.value]),
+	);
+}
+
+function booleanEntry(
+	entries: ReadonlyMap<string, string>,
+	key: string,
+	fallback: boolean,
+): boolean {
+	const value = entries.get(key);
+	if (value === "true") return true;
+	if (value === "false") return false;
+	return fallback;
+}
+
+function positionEntry(
+	entries: ReadonlyMap<string, string>,
+	key: string,
+	allowed: ReadonlySet<Position>,
+	fallback: Position,
+): Position {
+	const value = Number(entries.get(key));
+	return Number.isInteger(value) && allowed.has(value as Position)
+		? (value as Position)
+		: fallback;
+}
+
+function containerEntry(
+	entries: ReadonlyMap<string, string>,
+	key: string,
+	allowed: ReadonlySet<string>,
+	fallback: string,
+): string {
+	const value = entries.get(key);
+	return value !== undefined && allowed.has(value) ? value : fallback;
+}
+
+/**
+ * Projects the newly seeded workspace partition into the already-constructed
+ * Workbench runtime. `reinitializeWorkspace()` only updates configuration and
+ * folder context; without this projection, a fresh root set inherits the
+ * previous workspace's live side bar, panel, and active containers even though
+ * its Rust storage partition is empty.
+ */
+export async function applyPlainWorkspaceLayoutRuntime(
+	snapshot: LayoutStorageSnapshot,
+	runtime: PlainWorkspaceLayoutRuntime,
+): Promise<void> {
+	const layoutService =
+		runtime.layoutService as unknown as WorkspaceLayoutService;
+	const entries = workspaceEntryMap(snapshot);
+	const sideBarPosition = positionEntry(
+		entries,
+		"workbench.sideBar.position",
+		new Set([POSITION_LEFT, POSITION_RIGHT]),
+		POSITION_LEFT,
+	);
+	const panelPosition = positionEntry(
+		entries,
+		"workbench.panel.position",
+		new Set([POSITION_LEFT, POSITION_RIGHT, POSITION_BOTTOM, POSITION_TOP]),
+		POSITION_BOTTOM,
+	);
+	const sideBarContainer = containerEntry(
+		entries,
+		"workbench.sidebar.activeviewletid",
+		SIDEBAR_CONTAINERS,
+		DEFAULT_SIDEBAR_CONTAINER,
+	);
+	const panelContainer = containerEntry(
+		entries,
+		"workbench.panelpart.activepanelid",
+		PANEL_CONTAINERS,
+		DEFAULT_PANEL_CONTAINER,
+	);
+	const desiredZenMode = booleanEntry(
+		entries,
+		"workbench.zenMode.active",
+		false,
+	);
+
+	if (layoutService.isZenModeActive()) {
+		layoutService.toggleZenMode();
+	}
+	layoutService.setSideBarPosition(sideBarPosition);
+	runtime.setSideBarPositionContext(
+		sideBarPosition === POSITION_RIGHT ? "right" : "left",
+	);
+	layoutService.setPanelPosition(panelPosition);
+	await runtime.paneCompositePartService.openPaneComposite(
+		sideBarContainer,
+		VIEW_LOCATION_SIDEBAR,
+		false,
+	);
+	await runtime.paneCompositePartService.openPaneComposite(
+		panelContainer,
+		VIEW_LOCATION_PANEL,
+		false,
+	);
+
+	for (const [part, hidden, fallback] of [
+		[PART_ACTIVITYBAR, "workbench.activityBar.hidden", false],
+		[PART_SIDEBAR, "workbench.sideBar.hidden", false],
+		[PART_PANEL, "workbench.panel.hidden", true],
+		[PART_AUXILIARYBAR, "workbench.auxiliaryBar.hidden", true],
+		[PART_EDITOR, "workbench.editor.hidden", false],
+		[PART_STATUSBAR, "workbench.statusBar.hidden", false],
+	] as const) {
+		layoutService.setPartHidden(booleanEntry(entries, hidden, fallback), part);
+	}
+	layoutService.centerMainEditorLayout(
+		booleanEntry(entries, "workbench.editor.centered", false),
+	);
+	const panelMaximized = booleanEntry(
+		entries,
+		"workbench.panel.wasLastMaximized",
+		false,
+	);
+	if (layoutService.isPanelMaximized() !== panelMaximized) {
+		layoutService.toggleMaximizedPanel();
+	}
+	layoutService.setAuxiliaryBarMaximized(
+		booleanEntry(entries, "workbench.auxiliaryBar.wasLastMaximized", false),
+	);
+	if (desiredZenMode) layoutService.toggleZenMode();
+}
 
 function wireScope(scope: StorageScope): LayoutStorageScope | undefined {
 	if (scope === StorageScope.PROFILE) return "profile";
@@ -107,6 +298,7 @@ export class PlainLayoutStorageService extends InMemoryStorageService {
 	#writeTail: Promise<void> = Promise.resolve();
 	#flushTimer: ReturnType<typeof setTimeout> | undefined;
 	#seeding = false;
+	#workspaceRuntime: PlainWorkspaceLayoutRuntime | undefined;
 
 	constructor(
 		bridge: Pick<PlainBridge, "layoutRead" | "layoutWrite">,
@@ -200,11 +392,22 @@ export class PlainLayoutStorageService extends InMemoryStorageService {
 			clearTimeout(this.#flushTimer);
 			this.#flushTimer = undefined;
 		}
+		const previousWorkspaceAvailable = this.#workspaceAvailable;
 		const snapshot = await this.#bridge.layoutRead();
 		this.#workspaceAvailable = snapshot.workspaceAvailable;
 		this.#seed(snapshot, false, true);
+		if (
+			this.#workspaceRuntime !== undefined &&
+			(previousWorkspaceAvailable || !snapshot.workspaceAvailable)
+		) {
+			await applyPlainWorkspaceLayoutRuntime(snapshot, this.#workspaceRuntime);
+		}
 		this.#mutationGeneration += 1;
 		this.#flushedGeneration = this.#mutationGeneration;
+	}
+
+	configureWorkspaceRuntime(runtime: PlainWorkspaceLayoutRuntime): void {
+		this.#workspaceRuntime = runtime;
 	}
 
 	override dispose(): void {

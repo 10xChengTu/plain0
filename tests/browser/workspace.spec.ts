@@ -13267,6 +13267,60 @@ test("restores audited Workbench layout across reload and flushes the final stat
 	expect(errors).toEqual([]);
 });
 
+test("resets workspace-scoped layout when a live topology adopts a fresh root set", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") errors.push(message.text());
+	});
+
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	await page.getByRole("tab", { name: /^Explorer / }).click();
+	const sideBar = page.locator(".part.sidebar");
+	const editorPart = page.locator(".part.editor");
+	await expect(sideBar).toBeVisible();
+	const sideBarPosition = async () => {
+		const sideBarBox = await sideBar.boundingBox();
+		const editorBox = await editorPart.boundingBox();
+		if (sideBarBox === null || editorBox === null) return undefined;
+		return sideBarBox.x < editorBox.x ? "left" : "right";
+	};
+	await executePaletteCommand(
+		page,
+		"Toggle Primary Side Bar Visibility",
+		"View: Toggle Primary Side Bar Visibility",
+	);
+	await expect(sideBar).toBeHidden();
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+	await expect(
+		page.getByRole("treeitem", { name: "plain-library", exact: true }),
+	).toBeVisible();
+	await expect(sideBar).toBeVisible();
+	await expect.poll(sideBarPosition).toBe("left");
+	await expect(page.locator(".part.panel")).toBeHidden();
+	await expect(page.getByRole("tab", { name: /^Explorer / })).toHaveAttribute(
+		"aria-selected",
+		"true",
+	);
+	await page.keyboard.press("ControlOrMeta+J");
+	await expect(
+		page.getByRole("tab", { name: "Debug Console", exact: true }),
+	).toHaveAttribute("aria-selected", "true");
+	expect(errors).toEqual([]);
+});
+
 test("keeps the entire provider readonly when one platform capability is false", async ({
 	page,
 }) => {
