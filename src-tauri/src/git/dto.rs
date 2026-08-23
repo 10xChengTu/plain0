@@ -18,7 +18,10 @@ use super::history_operation::{
     HistoryMutationOutcome, HistoryMutationOutcomeKind, HistoryOperation, HistoryPreview,
     HistoryState, SequencerKind, SequencerState,
 };
-use super::log::{GraphList, GraphNode, HistoryEntry, HistoryList, LineHistoryDetail, LineRange};
+use super::log::{
+    GraphList, GraphNode, HistoryEntry, HistoryList, HistorySearchMode, LineHistoryDetail,
+    LineRange,
+};
 use super::management::{BranchDeleteOutcome, RemoteUrlKind};
 use super::network::NetworkOperation;
 use super::reflog::{ReflogEntry, ReflogList};
@@ -815,6 +818,56 @@ impl GitBlameCommitMessagesResult {
 
 fn git_log_invalid_request() -> CommandError {
     CommandError::new("GIT_LOG_INVALID_REQUEST", "The git log request is invalid.")
+}
+
+fn git_history_search_invalid_request() -> CommandError {
+    CommandError::new(
+        "GIT_HISTORY_SEARCH_INVALID_QUERY",
+        "The commit history search query is invalid.",
+    )
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum GitHistorySearchModeWire {
+    Message,
+    Author,
+    Sha,
+}
+
+impl From<GitHistorySearchModeWire> for HistorySearchMode {
+    fn from(value: GitHistorySearchModeWire) -> Self {
+        match value {
+            GitHistorySearchModeWire::Message => Self::Message,
+            GitHistorySearchModeWire::Author => Self::Author,
+            GitHistorySearchModeWire::Sha => Self::Sha,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GitHistorySearchRequest {
+    mode: GitHistorySearchModeWire,
+    query: String,
+}
+
+impl GitHistorySearchRequest {
+    pub(crate) fn into_parts(self) -> Result<(HistorySearchMode, String), CommandError> {
+        let query = self.query.trim();
+        if query.is_empty() || query.len() > 256 || query.chars().any(char::is_control) {
+            return Err(git_history_search_invalid_request());
+        }
+        let mode = HistorySearchMode::from(self.mode);
+        if mode == HistorySearchMode::Sha
+            && (query.len() < 4
+                || query.len() > 40
+                || !query.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            return Err(git_history_search_invalid_request());
+        }
+        Ok((mode, query.to_owned()))
+    }
 }
 
 /// Mirrors `log::is_lowercase_hex40` — kept as its own independent copy

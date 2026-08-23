@@ -1,6 +1,7 @@
 import type {
 	GitHistoryEntry,
 	GitHistoryListResult,
+	GitHistorySearchMode,
 	GitLineHistoryDetail,
 	GitLogLineRange,
 } from "../../platform/tauri/contracts";
@@ -22,6 +23,10 @@ import type {
  */
 export interface PlainGitHistoryBridge {
 	gitFileHistory(path: string): Promise<GitHistoryListResult>;
+	gitHistorySearch(
+		mode: GitHistorySearchMode,
+		query: string,
+	): Promise<GitHistoryListResult>;
 	gitLineHistoryList(
 		path: string,
 		range: GitLogLineRange,
@@ -84,6 +89,10 @@ export function historyEntrySummary(entry: GitHistoryEntry): string {
  * call that follows it.
  */
 export class PlainGitHistoryController {
+	#searchMode: GitHistorySearchMode | undefined;
+	#searchQuery: string | undefined;
+	#searchHistory: GitHistoryListResult = EMPTY_HISTORY_LIST;
+
 	#fileHistoryPath: string | undefined;
 	#fileHistory: GitHistoryListResult = EMPTY_HISTORY_LIST;
 
@@ -95,6 +104,35 @@ export class PlainGitHistoryController {
 
 	get fileHistoryPath(): string | undefined {
 		return this.#fileHistoryPath;
+	}
+
+	get searchMode(): GitHistorySearchMode | undefined {
+		return this.#searchMode;
+	}
+
+	get searchQuery(): string | undefined {
+		return this.#searchQuery;
+	}
+
+	get searchHistory(): GitHistoryListResult {
+		return this.#searchHistory;
+	}
+
+	async loadSearch(
+		mode: GitHistorySearchMode,
+		query: string,
+	): Promise<GitHistoryListResult> {
+		const result = await this.bridge.gitHistorySearch(mode, query);
+		this.#searchMode = mode;
+		this.#searchQuery = query.trim();
+		this.#searchHistory = result;
+		return result;
+	}
+
+	clearSearchHistory(): void {
+		this.#searchMode = undefined;
+		this.#searchQuery = undefined;
+		this.#searchHistory = EMPTY_HISTORY_LIST;
 	}
 
 	get fileHistory(): GitHistoryListResult {
@@ -146,6 +184,9 @@ export class PlainGitHistoryController {
 	 * product-level Git invalidation. Empty panes stay empty and cause no IPC. */
 	async refreshLoadedHistory(): Promise<void> {
 		const requests: Promise<unknown>[] = [];
+		if (this.#searchMode !== undefined && this.#searchQuery !== undefined) {
+			requests.push(this.loadSearch(this.#searchMode, this.#searchQuery));
+		}
 		if (this.#fileHistoryPath !== undefined) {
 			requests.push(this.loadFileHistory(this.#fileHistoryPath));
 		}

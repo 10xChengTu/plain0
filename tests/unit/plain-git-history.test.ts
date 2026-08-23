@@ -65,6 +65,7 @@ function fakeBridge(
 ): PlainGitHistoryBridge {
 	return {
 		gitFileHistory: vi.fn().mockResolvedValue(historyList([])),
+		gitHistorySearch: vi.fn().mockResolvedValue(historyList([])),
 		gitLineHistoryList: vi.fn().mockResolvedValue(historyList([])),
 		gitLineHistoryDetail: vi
 			.fn()
@@ -100,6 +101,35 @@ describe("PlainGitHistoryController.loadFileHistory", () => {
 		await expect(controller.loadFileHistory("f.txt")).rejects.toThrow(
 			"GIT_NO_REPOSITORY",
 		);
+	});
+});
+
+describe("PlainGitHistoryController.loadSearch", () => {
+	it("stores the bounded result and trimmed query for refresh", async () => {
+		const list = historyList([entry({ message: "matching subject" })]);
+		const gitHistorySearch = vi.fn().mockResolvedValue(list);
+		const controller = new PlainGitHistoryController(
+			fakeBridge({ gitHistorySearch }),
+		);
+
+		const result = await controller.loadSearch("author", "  Ada  ");
+
+		expect(gitHistorySearch).toHaveBeenCalledWith("author", "  Ada  ");
+		expect(result).toBe(list);
+		expect(controller.searchMode).toBe("author");
+		expect(controller.searchQuery).toBe("Ada");
+		expect(controller.searchHistory).toBe(list);
+	});
+
+	it("clears search state so a failed replacement query cannot leave stale results", async () => {
+		const controller = new PlainGitHistoryController(fakeBridge());
+		await controller.loadSearch("message", "needle");
+
+		controller.clearSearchHistory();
+
+		expect(controller.searchMode).toBeUndefined();
+		expect(controller.searchQuery).toBeUndefined();
+		expect(controller.searchHistory).toEqual({ entries: [], truncated: false });
 	});
 });
 
@@ -219,15 +249,31 @@ describe("PlainGitHistoryController.clearLineHistory", () => {
 describe("PlainGitHistoryController.refreshLoadedHistory", () => {
 	it("does not issue IPC before either history pane has been loaded", async () => {
 		const gitFileHistory = vi.fn().mockResolvedValue(historyList([]));
+		const gitHistorySearch = vi.fn().mockResolvedValue(historyList([]));
 		const gitLineHistoryList = vi.fn().mockResolvedValue(historyList([]));
 		const controller = new PlainGitHistoryController(
-			fakeBridge({ gitFileHistory, gitLineHistoryList }),
+			fakeBridge({ gitFileHistory, gitHistorySearch, gitLineHistoryList }),
 		);
 
 		await controller.refreshLoadedHistory();
 
 		expect(gitFileHistory).not.toHaveBeenCalled();
+		expect(gitHistorySearch).not.toHaveBeenCalled();
 		expect(gitLineHistoryList).not.toHaveBeenCalled();
+	});
+
+	it("repeats the currently loaded commit search with its stable mode/query", async () => {
+		const gitHistorySearch = vi.fn().mockResolvedValue(historyList([entry()]));
+		const controller = new PlainGitHistoryController(
+			fakeBridge({ gitHistorySearch }),
+		);
+		await controller.loadSearch("message", "release");
+		gitHistorySearch.mockClear();
+
+		await controller.refreshLoadedHistory();
+
+		expect(gitHistorySearch).toHaveBeenCalledOnce();
+		expect(gitHistorySearch).toHaveBeenCalledWith("message", "release");
 	});
 
 	it("repeats only the currently loaded file and line queries", async () => {

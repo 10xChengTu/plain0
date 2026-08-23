@@ -508,8 +508,7 @@
 					"The commit-graph swimlane-collapse mitigation the frozen research doc's own risk list anticipated (folding lanes past some threshold) was deliberately not built: S3's real benchmark found the actual bottleneck is git's own `--topo-order` walk, not frontend SVG rendering of many lanes, so a lane-collapse UI would not address the real cost.",
 					"Stash exposes only `push -m <message> [--include-untracked]`; `--keep-index` and other non-default `git stash` variants are not surfaced (S4 scope cut). A conflicting `apply`/`pop` is reported with the conflicted-path list but the stash panel does not yet wire that into the multi-diff-editor machinery S2 already built for commit detail -- it renders as a plain text list (S4 scope cut, though `gitShowCommitBlob` is already generic enough for a future slice to reuse for this).",
 					"`worktree add` never exposes `-b`/`-B` to explicitly name a new branch (S5's deliberate minimal parameter surface, matching the frozen plan's literal command shape); the destination path is always a single new subfolder of a user-picked parent directory (the sandbox-compatible authorization model the lead session ruled on for this feature, documented in the frozen research doc's own 'risks and unknowns' section), never an arbitrary path.",
-					"This slice (S6) did not add a structural AST contract against either of the two DI/decoration bugs it found and fixed (see results above for why); a future self-built `ViewPane` subclass or zero-width decoration remains exposed to the same class of defect unless a human remembers the pattern from this report.",
-					"Git history 'search' — finding commits by message, author or sha, which product-scope.md:49 promises alongside file/line history, revision navigation and compare — is not implemented: src-tauri/src/git/log.rs exposes no grep/author/pickaxe-style filter parameters, and app/features/scm/ has no search entry point in either the history or graph view. This acceptance point was silently dropped when this feature's acceptance[1] was written (it lists only file/line history, revision navigation and compare) and was not previously registered as a narrowing anywhere. Recorded per the F230 S1 completion audit (docs/completion-audit.md)."
+					"This slice (S6) did not add a structural AST contract against either of the two DI/decoration bugs it found and fixed (see results above for why); a future self-built `ViewPane` subclass or zero-width decoration remains exposed to the same class of defect unless a human remembers the pattern from this report."
 				],
 				"acceptanceResults": [
 					{
@@ -1385,6 +1384,53 @@
 					{
 						"acceptance": "Unit Browser process-boundary and real Tauri restart scenarios pass without WebView storage dependence",
 						"result": "Achieved. Focused unit contracts passed 71/71, Browser process-boundary scenarios passed 2/2, and the rebuilt real Tauri bundle passed E2E-029 through multiple complete process exits and cold launches backed only by Rust app-local-data JSON."
+					}
+				]
+			}
+		},
+		{
+			"id": "F260",
+			"name": "Git history commit search",
+			"phase": 7,
+			"status": "complete",
+			"acceptance": [
+				"Commit history can be searched by literal message author or hexadecimal SHA query",
+				"Search is bounded hardened root-scoped and exposes no arbitrary Git argument surface",
+				"The self-built History view renders searchable results and preserves explicit multi-root routing",
+				"Rust codec unit architecture and real Workbench Browser search scenarios pass"
+			],
+			"evidence": {
+				"commands": [
+					"cargo test --manifest-path src-tauri/Cargo.toml history_search",
+					"pnpm exec vitest run tests/unit/git-codec.test.ts tests/unit/plain-git-history.test.ts tests/unit/plain-git-root.test.ts tests/unit/boundary-contracts.test.mjs",
+					"pnpm typecheck && pnpm lint && pnpm check:architecture",
+					"pnpm exec playwright test tests/browser/workspace.spec.ts --grep 'searches commit history|routes commit history search'"
+				],
+				"results": [
+					"Six real Apple Git 2.50.1 Rust fixtures passed for literal case-insensitive message matching, literal author matching with regex metacharacters, unique SHA prefix resolution, unknown SHA, control text and invalid SHA rejection.",
+					"Focused TypeScript and architecture coverage passed 639/639 tests, including hostile mutations for missing registration, DTO-selected query bypass, missing PlainBridge method and frozen request-builder bypass.",
+					"Typecheck, lint and architecture passed over 128 app and 215 Rust sources with 28 pinned runtime dependencies. Two real Workbench Browser scenarios passed for message/author/SHA result rendering and explicit multi-root repository routing."
+				],
+				"nativeScenarios": [
+					"No separate desktop-only scenario is required for F260: the Rust command is exercised against real Apple Git repositories and the same self-built Workbench view is exercised without substitution in Chromium. Later Git desktop regressions may observe the control, but no native picker, process-lifecycle or WKWebView-only mechanism was added by this slice."
+				],
+				"platformGaps": [],
+				"acceptanceResults": [
+					{
+						"acceptance": "Commit history can be searched by literal message author or hexadecimal SHA query",
+						"result": "Achieved. The History view exposes Message, Author and SHA modes and renders decoded HistoryList entries; Enter and the Search Commits action share the same controller path."
+					},
+					{
+						"acceptance": "Search is bounded hardened root-scoped and exposes no arbitrary Git argument surface",
+						"result": "Achieved. DTOs reject unknown fields, empty/control/oversized text and non-hex SHA; Rust constructs only fixed argv, caps results at 500 and resolves the selected authorized root before spawning hardened Git."
+					},
+					{
+						"acceptance": "The self-built History view renders searchable results and preserves explicit multi-root routing",
+						"result": "Achieved. The view uses Plain's existing repository selection and commit-detail URI; Browser assertions prove only the explicitly selected root receives each query."
+					},
+					{
+						"acceptance": "Rust codec unit architecture and real Workbench Browser search scenarios pass",
+						"result": "Achieved by 6 Rust fixtures, 639 focused frontend/architecture tests, static gates and 2 real Workbench Browser scenarios."
 					}
 				]
 			}

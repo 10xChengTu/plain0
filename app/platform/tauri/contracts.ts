@@ -1327,6 +1327,8 @@ export interface GitHistoryEntry {
 	readonly message: string;
 }
 
+export type GitHistorySearchMode = "message" | "author" | "sha";
+
 /** Result shape shared by [`gitFileHistory`] and [`gitLineHistoryList`] —
  * both are "ordered commit list" queries against the same underlying
  * sha+full-body format, differing only in which `git log` invocation
@@ -2128,6 +2130,15 @@ export interface PlainBridge {
 	 * rejection — it resolves to `{ entries: [], truncated: false }`. Same
 	 * trust/repository rejections as `gitStatus`. */
 	gitFileHistory(path: string, rootId?: string): Promise<GitHistoryListResult>;
+	/** Bounded repository-wide commit search. Message and author queries are
+	 * literal and case-insensitive; SHA queries accept only a 4..40 digit
+	 * hexadecimal unique prefix/full id. No revision expression or arbitrary
+	 * Git argument crosses this API. */
+	gitHistorySearch(
+		mode: GitHistorySearchMode,
+		query: string,
+		rootId?: string,
+	): Promise<GitHistoryListResult>;
 	/** `F090` S1: `git log -z --format=%H%x1f%B --no-patch -L<range>:<path>` —
 	 * the commit list touching one specific line range, newest first (this
 	 * already crosses a rename on its own, by default, for the tracked line —

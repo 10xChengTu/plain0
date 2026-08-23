@@ -8131,6 +8131,14 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 	},
 	{
 		file: "src-tauri/src/git/commands.rs",
+		name: "git_history_search",
+		parameters:
+			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitHistorySearchRequest",
+		returnType: "->Result<GitHistoryListResultWire,CommandError>",
+		body: "let(mode,query)=request.into_parts()?;letresult=log::search_history(trust.inner(),workspace.inner(),window.label(),mode,&query).await?;Ok(GitHistoryListResultWire::from(result))",
+	},
+	{
+		file: "src-tauri/src/git/commands.rs",
 		name: "git_line_history_list",
 		parameters:
 			"window:WebviewWindow,trust:State<'_,TrustService>,workspace:State<'_,WorkspaceService>,request:GitLineHistoryListRequest",
@@ -8452,11 +8460,11 @@ const GIT_COMMAND_CONTRACTS = Object.freeze([
 ]);
 
 /**
- * Locks all fifty-six git commands (`F080` S1's three reads, S3's five
+ * Locks all fifty-seven git commands (`F080` S1's three reads, S3's five
  * writes, S4's five network commands, `F090` S0's two read-only blame
  * commands — `git_blame_file`/`git_blame_commit_messages` —, `F090` S1's
- * three read-only file/line-history commands —
- * `git_file_history`/`git_line_history_list`/`git_line_history_detail` —,
+ * four read-only file/line/search-history commands — `git_file_history`/
+ * `git_history_search`/`git_line_history_list`/`git_line_history_detail` —,
  * `F090` S2's two read-only commit-detail commands —
  * `git_show_commit`/`git_show_commit_blob` —, `F090` S3's two read-only
  * graph/refs commands — `git_log_graph`/`git_refs_list` —, `F180` S1A's
@@ -10149,7 +10157,7 @@ export function validateGitStashMessageFieldSafetyBoundary(rustSources) {
  * management methods and S3's ten state/preview/history-operation methods.
  * Every slice deliberately shares this same closed-list lock instead of a parallel
  * "S_ bridge methods" const, for the same reason `GIT_COMMAND_CONTRACTS`
- * above holds all fifty-six Rust commands in one array: `PlainBridge`'s git
+ * above holds all fifty-seven Rust commands in one array: `PlainBridge`'s git
  * surface is one audited whole, not several independently-sized ones.
  */
 const GIT_BRIDGE_METHOD_NAMES = [
@@ -10169,6 +10177,7 @@ const GIT_BRIDGE_METHOD_NAMES = [
 	"gitBlameFile",
 	"gitBlameCommitMessages",
 	"gitFileHistory",
+	"gitHistorySearch",
 	"gitLineHistoryList",
 	"gitLineHistoryDetail",
 	"gitShowCommit",
@@ -10370,7 +10379,7 @@ const GIT_HISTORY_NATIVE_CONTRACTS = Object.freeze([
 
 /**
  * Locks `F080` S1+S3+S4 and `F090` S0+S1+S2+S3+S4+S5's TypeScript surface:
- * `PlainBridge` exposes exactly the fifty-six audited git methods,
+ * `PlainBridge` exposes exactly the fifty-seven audited git methods,
  * `git-codec.ts`'s read-result decoders validate exact own-data keys/reject
  * Proxy wrapping/freeze their result (same rigor
  * `validateTerminalIpcBridgeBoundary` already locks for the terminal
@@ -10434,7 +10443,7 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 			JSON.stringify([...GIT_BRIDGE_METHOD_NAMES].sort())
 	) {
 		failures.push(
-			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-seven audited git methods, no more and no fewer",
 		);
 	}
 
@@ -10597,6 +10606,17 @@ export function validateGitIpcBridgeBoundary(rustSources, appSources) {
 				`native.ts must invoke ${command} exactly once, decoded through ${decoder}`,
 			);
 		}
+	}
+	if (
+		native === undefined ||
+		[...native.matchAll(/\binvoke<unknown>\(\s*"git_history_search"/g)]
+			.length !== 1 ||
+		!native.includes("frozenGitHistorySearchRequest(") ||
+		!native.includes("decodeGitHistoryListResult(")
+	) {
+		failures.push(
+			"native.ts must invoke git_history_search exactly once, routed through frozenGitHistorySearchRequest and decoded through decodeGitHistoryListResult",
+		);
 	}
 	if (
 		native === undefined ||

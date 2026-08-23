@@ -183,6 +183,7 @@ pub fn run() {
             git::commands::git_blame_file,
             git::commands::git_blame_commit_messages,
             git::commands::git_file_history,
+            git::commands::git_history_search,
             git::commands::git_line_history_list,
             git::commands::git_line_history_detail,
             git::commands::git_show_commit,

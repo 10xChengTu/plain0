@@ -174,6 +174,7 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		gitBlameFile: notImplemented,
 		gitBlameCommitMessages: notImplemented,
 		gitFileHistory: notImplemented,
+		gitHistorySearch: notImplemented,
 		gitLineHistoryList: notImplemented,
 		gitLineHistoryDetail: notImplemented,
 		gitShowCommit: notImplemented,

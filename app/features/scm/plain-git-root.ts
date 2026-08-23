@@ -58,6 +58,8 @@ export function bindPlainGitBridge(bridge: PlainBridge, rootId: string) {
 		gitBlameCommitMessages: (shas: readonly string[]) =>
 			bridge.gitBlameCommitMessages(shas, rootId),
 		gitFileHistory: (path: string) => bridge.gitFileHistory(path, rootId),
+		gitHistorySearch: (mode: "message" | "author" | "sha", query: string) =>
+			bridge.gitHistorySearch(mode, query, rootId),
 		gitLineHistoryList: (
 			path: string,
 			range: { readonly start: number; readonly end: number },

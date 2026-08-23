@@ -157,6 +157,7 @@ interface TestGitFixture {
 	readonly blame?: Readonly<Record<string, TestGitBlameFileResult>>;
 	readonly blameCommitMessages?: Readonly<Record<string, string>>;
 	readonly fileHistory?: Readonly<Record<string, TestGitHistoryListResult>>;
+	readonly historySearch?: Readonly<Record<string, TestGitHistoryListResult>>;
 	readonly lineHistoryList?: Readonly<Record<string, TestGitHistoryListResult>>;
 	readonly lineHistoryDetail?: Readonly<
 		Record<string, Readonly<{ sha: string; diffText: string }>>
@@ -3209,6 +3210,9 @@ async function installNativeIpcMock(
 			const mockGitFileHistory = new Map<string, TestGitHistoryListResult>(
 				Object.entries(gitFixtureForTest.fileHistory ?? {}),
 			);
+			const mockGitHistorySearch = new Map<string, TestGitHistoryListResult>(
+				Object.entries(gitFixtureForTest.historySearch ?? {}),
+			);
 			const mockGitLineHistoryList = new Map<string, TestGitHistoryListResult>(
 				Object.entries(gitFixtureForTest.lineHistoryList ?? {}),
 			);
@@ -6187,6 +6191,19 @@ async function installNativeIpcMock(
 								}
 							);
 						}
+						case "git_history_search": {
+							if (!terminalTrusted) throw terminalNotTrusted();
+							if (gitFixtureForTest.noRepositoryForTest === true) {
+								throw gitNoRepository();
+							}
+							const searchRequest = args.request as
+								{ mode?: string; query?: string } | undefined;
+							return (
+								mockGitHistorySearch.get(
+									`${searchRequest?.mode ?? ""}:${searchRequest?.query ?? ""}`,
+								) ?? { entries: [], truncated: false }
+							);
+						}
 						case "git_line_history_list": {
 							if (!terminalTrusted) {
 								throw terminalNotTrusted();
@@ -8479,6 +8496,7 @@ async function installMultiRootNativeIpcMock(
 							selectedGitRootId(args);
 							return { messages: {} };
 						case "git_file_history":
+						case "git_history_search":
 						case "git_line_history_list":
 							selectedGitRootId(args);
 							return { entries: [], truncated: false };
@@ -22022,6 +22040,132 @@ test("shows file history with the real commit list and drills into a specific li
 	});
 
 	expect(pageErrors).toEqual([]);
+});
+
+test("searches commit history by literal message author and SHA through the real History view", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	const messageSha = "a1".repeat(20);
+	const authorSha = "b2".repeat(20);
+	const shaSha = "c3".repeat(20);
+
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"readonly",
+		{ "src/search-history.ts": "search history\n" },
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		true,
+		{
+			historySearch: {
+				"message:release.*literal": {
+					entries: [{ sha: messageSha, message: "release.*literal shipped" }],
+					truncated: false,
+				},
+				"author:Ada Lovelace": {
+					entries: [{ sha: authorSha, message: "authored change" }],
+					truncated: false,
+				},
+				"sha:c3c3c3c3": {
+					entries: [{ sha: shaSha, message: "resolved SHA" }],
+					truncated: false,
+				},
+			},
+		},
+	);
+	await openNativeWorkspaceExplorer(page);
+	await openScmView(page);
+	const mode = page.getByLabel("Commit Search Field");
+	const query = page.getByLabel("Commit Search Query");
+	const results = page.locator(".plain-git-history-search-results");
+
+	await query.fill("  release.*literal  ");
+	await page
+		.getByRole("button", { name: "Search Commits", exact: true })
+		.click();
+	await expect(results).toContainText(messageSha.slice(0, 7));
+	await expect(results).toContainText("release.*literal shipped");
+
+	await mode.selectOption("author");
+	await query.fill("Ada Lovelace");
+	await query.press("Enter");
+	await expect(results).toContainText(authorSha.slice(0, 7));
+	await expect(results).toContainText("authored change");
+
+	await mode.selectOption("sha");
+	await query.fill("c3c3c3c3");
+	await page
+		.getByRole("button", { name: "Search Commits", exact: true })
+		.click();
+	await expect(results).toContainText(shaSha.slice(0, 7));
+	await expect(results).toContainText("resolved SHA");
+
+	const calls = await terminalCallsFor(page, "git_history_search");
+	expect(calls.map((call) => call.args)).toEqual([
+		{
+			rootId: nativeRootId,
+			request: { mode: "message", query: "release.*literal" },
+		},
+		{
+			rootId: nativeRootId,
+			request: { mode: "author", query: "Ada Lovelace" },
+		},
+		{
+			rootId: nativeRootId,
+			request: { mode: "sha", query: "c3c3c3c3" },
+		},
+	]);
+	expect(pageErrors).toEqual([]);
+});
+
+test("routes commit history search only through the explicitly selected repository in a multi-root workspace", async ({
+	page,
+}) => {
+	await installMultiRootNativeIpcMock(page);
+	await openNativeWorkspaceExplorer(page);
+	await executePaletteCommand(
+		page,
+		"Add Folder to Workspace",
+		"Workspaces: Add Folder to Workspace...",
+	);
+	const body = await openScmView(page);
+	const selector = body.getByRole("combobox", {
+		name: "Source Control Repository",
+	});
+	const mode = page.getByLabel("Commit Search Field");
+	const query = page.getByLabel("Commit Search Query");
+
+	await selector.selectOption(nativeSecondaryRootId);
+	await query.fill("secondary history");
+	await page
+		.getByRole("button", { name: "Search Commits", exact: true })
+		.click();
+	await selector.selectOption(nativeRootId);
+	await mode.selectOption("author");
+	await query.fill("Primary Author");
+	await page
+		.getByRole("button", { name: "Search Commits", exact: true })
+		.click();
+
+	const calls = await terminalCallsFor(page, "git_history_search");
+	expect(calls.map((call) => call.args)).toEqual([
+		{
+			rootId: nativeSecondaryRootId,
+			request: { mode: "message", query: "secondary history" },
+		},
+		{
+			rootId: nativeRootId,
+			request: { mode: "author", query: "Primary Author" },
+		},
+	]);
 });
 
 test("opens a commit's changed files as a real multi-diff editor from the History view", async ({

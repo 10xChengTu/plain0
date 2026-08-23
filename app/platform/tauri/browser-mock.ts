@@ -98,6 +98,7 @@ import {
 	frozenGitDiffFilesRequest,
 	frozenGitDiscardPathsRequest,
 	frozenGitFileHistoryRequest,
+	frozenGitHistorySearchRequest,
 	frozenGitHistoryAbortRequest,
 	frozenGitHistoryContinueRequest,
 	frozenGitHistoryPreviewRequest,
@@ -1345,6 +1346,9 @@ export interface BrowserMockGitFixtureForTest {
 	 * consuming frontend has structurally correct, scriptable responses to
 	 * develop and test the history sidebar against. */
 	readonly fileHistory?: Readonly<Record<string, GitHistoryListResult>>;
+	/** F260: keyed as `<mode>:<trimmed query>`; missing searches return an
+	 * empty bounded list. */
+	readonly historySearch?: Readonly<Record<string, GitHistoryListResult>>;
 	/** `F090` S1: seeds the deterministic `gitLineHistoryList` response, keyed
 	 * by path only (a missing path key defaults to `{ entries: [], truncated:
 	 * false }`) — unlike the real `-L<range>` command, this mock has no real
@@ -6663,6 +6667,9 @@ export function createBrowserMockBridge(
 	const gitFileHistoryFixtures = new Map<string, GitHistoryListResult>(
 		Object.entries(gitFixture.fileHistory ?? {}),
 	);
+	const gitHistorySearchFixtures = new Map<string, GitHistoryListResult>(
+		Object.entries(gitFixture.historySearch ?? {}),
+	);
 	const gitLineHistoryListFixtures = new Map<string, GitHistoryListResult>(
 		Object.entries(gitFixture.lineHistoryList ?? {}),
 	);
@@ -9304,6 +9311,17 @@ export function createBrowserMockBridge(
 				throw unavailable;
 			}
 			return gitFileHistoryFixtures.get(request.path) ?? defaultGitHistoryList;
+		},
+		async gitHistorySearch(mode_, query_, rootId_) {
+			const request = frozenGitHistorySearchRequest(mode_, query_);
+			const unavailable = gitMutateUnavailable(rootId_);
+			if (unavailable !== undefined) {
+				throw unavailable;
+			}
+			return (
+				gitHistorySearchFixtures.get(`${request.mode}:${request.query}`) ??
+				defaultGitHistoryList
+			);
 		},
 		async gitLineHistoryList(path_, range_, rootId_) {
 			const request = frozenGitLineHistoryListRequest(path_, range_);

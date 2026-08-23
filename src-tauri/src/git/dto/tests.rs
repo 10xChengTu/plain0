@@ -3,12 +3,12 @@ use super::{
     GitBranchRenameRequest, GitBranchSwitchRequest, GitCommitRequest, GitContributorsListRequest,
     GitContributorsListResultWire, GitDiffFilesRequest, GitDiffFilesResult, GitDiscardPathsRequest,
     GitHistoryAbortRequest, GitHistoryContinueRequest, GitHistoryMutationOutcomeWire,
-    GitHistoryPreviewRequest, GitHistoryPreviewResultWire, GitMergeRequest, GitReflogListRequest,
-    GitReflogListResultWire, GitRemoteAddRequest, GitRemoteRemoveRequest, GitRemoteRenameRequest,
-    GitRemoteSetUrlRequest, GitRemotesListRequest, GitRemotesListResultWire, GitResetRequest,
-    GitShowBlobRequest, GitShowBlobResult, GitStageBlobRequest, GitStagePathsRequest,
-    GitStatusResult, GitTagCreateRequest, GitTagDeleteRequest, GitUnstagePathsRequest,
-    GitUpstreamSetRequest, GitUpstreamUnsetRequest,
+    GitHistoryPreviewRequest, GitHistoryPreviewResultWire, GitHistorySearchRequest,
+    GitMergeRequest, GitReflogListRequest, GitReflogListResultWire, GitRemoteAddRequest,
+    GitRemoteRemoveRequest, GitRemoteRenameRequest, GitRemoteSetUrlRequest, GitRemotesListRequest,
+    GitRemotesListResultWire, GitResetRequest, GitShowBlobRequest, GitShowBlobResult,
+    GitStageBlobRequest, GitStagePathsRequest, GitStatusResult, GitTagCreateRequest,
+    GitTagDeleteRequest, GitUnstagePathsRequest, GitUpstreamSetRequest, GitUpstreamUnsetRequest,
 };
 use crate::git::contributors::{ContributorEntry, ContributorList};
 use crate::git::diff::{DiffFileEntry, DiffStatusKind};
@@ -16,6 +16,7 @@ use crate::git::history_operation::{
     HistoryMutationOutcome, HistoryMutationOutcomeKind, HistoryOperation, HistoryPreview,
     HistoryState, SequencerKind, SequencerState,
 };
+use crate::git::log::HistorySearchMode;
 use crate::git::management::{BranchDeleteOutcome, RemoteUrlKind};
 use crate::git::reflog::{ReflogEntry, ReflogList};
 use crate::git::remote::{RemoteEntry, RemoteList};
@@ -31,6 +32,40 @@ fn sample_submodule() -> SubmoduleState {
         commit_changed: false,
         tracked_changed: false,
         untracked_changed: false,
+    }
+}
+
+#[test]
+fn git_history_search_request_trims_and_closes_its_mode_query_shape() {
+    let request: GitHistorySearchRequest =
+        serde_json::from_value(serde_json::json!({"mode":"message","query":"  release  "}))
+            .unwrap();
+    assert_eq!(
+        request.into_parts().unwrap(),
+        (HistorySearchMode::Message, "release".to_owned())
+    );
+
+    for value in [
+        serde_json::json!({"mode":"unknown","query":"release"}),
+        serde_json::json!({"mode":"message","query":"release","argv":[]}),
+    ] {
+        assert!(serde_json::from_value::<GitHistorySearchRequest>(value).is_err());
+    }
+}
+
+#[test]
+fn git_history_search_request_rejects_invalid_queries() {
+    for value in [
+        serde_json::json!({"mode":"message","query":"  "}),
+        serde_json::json!({"mode":"author","query":"bad\nname"}),
+        serde_json::json!({"mode":"sha","query":"abc"}),
+        serde_json::json!({"mode":"sha","query":"abcdz"}),
+    ] {
+        let request: GitHistorySearchRequest = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            request.into_parts().unwrap_err().code(),
+            "GIT_HISTORY_SEARCH_INVALID_QUERY"
+        );
     }
 }
 

@@ -195,6 +195,14 @@ pub(crate) const GIT_LOG_COMMIT_META_ARGS: &[&str] =
 /// cost (that remains an open, disclosed risk — see this slice's own
 /// report) — this is purely a response-size ceiling.
 const MAX_HISTORY_ENTRIES: usize = 500;
+const MAX_HISTORY_SEARCH_QUERY_BYTES: usize = 256;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HistorySearchMode {
+    Message,
+    Author,
+    Sha,
+}
 
 fn git_log_invalid_path() -> CommandError {
     CommandError::new(
@@ -221,6 +229,20 @@ fn git_file_history_failed() -> CommandError {
     CommandError::new(
         "GIT_FILE_HISTORY_FAILED",
         "git log did not complete successfully.",
+    )
+}
+
+fn git_history_search_invalid_query() -> CommandError {
+    CommandError::new(
+        "GIT_HISTORY_SEARCH_INVALID_QUERY",
+        "The commit history search query is invalid.",
+    )
+}
+
+fn git_history_search_failed() -> CommandError {
+    CommandError::new(
+        "GIT_HISTORY_SEARCH_FAILED",
+        "git log did not complete the commit history search successfully.",
     )
 }
 
@@ -363,6 +385,106 @@ fn parse_history_entries(output: &[u8]) -> Result<HistoryList, CommandError> {
         entries.truncate(MAX_HISTORY_ENTRIES);
     }
     Ok(HistoryList { entries, truncated })
+}
+
+fn validate_history_search_query(mode: HistorySearchMode, query: &str) -> Result<(), CommandError> {
+    if query.is_empty()
+        || query.len() > MAX_HISTORY_SEARCH_QUERY_BYTES
+        || query.chars().any(char::is_control)
+    {
+        return Err(git_history_search_invalid_query());
+    }
+    if mode == HistorySearchMode::Sha
+        && (query.len() < 4
+            || query.len() > 40
+            || !query.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(git_history_search_invalid_query());
+    }
+    Ok(())
+}
+
+/// Searches repository commits without exposing a revision or argv surface.
+/// Message/author queries are literal, case-insensitive Git log filters over
+/// branches, tags and remotes (the same ref scope as [`log_graph`]); a SHA
+/// query is restricted to 4..40 hexadecimal characters and first resolved to
+/// exactly one commit before its metadata is read. Every response uses the
+/// same bounded, delimiter-safe [`HistoryList`] parser as file history.
+pub(crate) async fn search_history(
+    trust: &TrustService,
+    workspace: &(impl GitRepositoryScope + ?Sized),
+    window_label: &str,
+    mode: HistorySearchMode,
+    query: &str,
+) -> Result<HistoryList, CommandError> {
+    validate_history_search_query(mode, query)?;
+    if mode != HistorySearchMode::Sha {
+        let filter = match mode {
+            HistorySearchMode::Message => format!("--grep={query}"),
+            HistorySearchMode::Author => format!("--author={query}"),
+            HistorySearchMode::Sha => unreachable!("handled above"),
+        };
+        let output = run_history_list(
+            trust,
+            workspace,
+            window_label,
+            vec![
+                "--branches".to_owned(),
+                "--tags".to_owned(),
+                "--remotes".to_owned(),
+                "--regexp-ignore-case".to_owned(),
+                "--fixed-strings".to_owned(),
+                filter,
+            ],
+            git_history_search_failed,
+        )
+        .await?;
+        return parse_history_entries(&output);
+    }
+
+    let repo_dir = resolve_repo_toplevel(trust, workspace, window_label).await?;
+    let revision = format!("{}^{{commit}}", query.to_ascii_lowercase());
+    let cancel = AtomicBool::new(false);
+    let resolved = tauri::async_runtime::spawn_blocking({
+        let repo_dir = repo_dir.clone();
+        move || {
+            run_git(
+                &repo_dir,
+                &["rev-parse".to_owned(), "--verify".to_owned(), revision],
+                GitExecMode::BackgroundRead,
+                &cancel,
+            )
+        }
+    })
+    .await
+    .map_err(|_| git_exec_unavailable())??;
+    if resolved.exit_code != 0 {
+        return Ok(HistoryList {
+            entries: Vec::new(),
+            truncated: false,
+        });
+    }
+    let sha = String::from_utf8_lossy(&resolved.stdout).trim().to_owned();
+    if !is_lowercase_hex40(sha.as_bytes()) {
+        return Err(git_log_parse_failed());
+    }
+
+    let mut args: Vec<String> = GIT_LOG_COMMIT_META_ARGS
+        .iter()
+        .map(|arg| (*arg).to_owned())
+        .collect();
+    args.push("--max-count=1".to_owned());
+    args.push(sha);
+    let cancel = AtomicBool::new(false);
+    let output = tauri::async_runtime::spawn_blocking(move || {
+        run_git(&repo_dir, &args, GitExecMode::BackgroundRead, &cancel)
+    })
+    .await
+    .map_err(|_| git_exec_unavailable())??;
+    if output.exit_code != 0 {
+        return Err(git_history_search_failed());
+    }
+    parse_history_entries(&output.stdout)
 }
 
 /// Shared by [`file_history`]/[`line_history_list`] — `on_other_failure` is

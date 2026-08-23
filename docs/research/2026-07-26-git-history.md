@@ -267,3 +267,13 @@ F090 acceptance 第 3 条明确要求"stash、worktree 工作流通过 fixture"�
 ## 排除项
 
 GitLens 账号/Launchpad/Cloud Patches/PR provider/品牌/AI commit message/AI 解冲突/MCP（沿用 F080 排除项)；GitLens+/Pro 的 Commit Graph/Worktrees/Visual File History **具体实现代码**（本文档已确认这三者恰是 GitLens `LICENSE.plus` 覆盖范围,F090 做的是同名但完全独立实现的功能,不参考其代码);`git2`/`gix`/`libgit2-sys`（ADR 0003 已定,本 feature 不重新讨论,继续等基准证明 CLI 读取成为瓶颈后再议);通用 `git_run`（本 feature 同 F080 一样,每个能力对应写死参数的专用命令);`git blame -M`/`-C`（同一提交内行移动检测、跨文件复制检测)作为默认开启项——留作 v2 可选增强,v1 不实现;stash 的 `--include-untracked`/`--keep-index` 等非默认变体的完整 UI 覆盖（见"风险与未知项"第 6 条,视实施阶段判断可能部分纳入)。
+
+## F260 实施补记：commit search 缺口闭合（2026-08-24）
+
+F230 完成度审计发现 `docs/product-scope.md:49` 的历史「搜索」在 F090 验收中被静默遗漏。F260 以一个窄的只读能力闭合该项，不扩大为任意 revision、pickaxe、正则或通用 Git 查询器：
+
+- Rust 新增 `git_history_search`。message/author 是最多 256 bytes、无控制字符的 literal case-insensitive 查询；命令参数固定为 `--branches --tags --remotes --fixed-strings --regexp-ignore-case`，结果沿用 `HistoryList` 的 500 条预算。SHA 只接受 4–40 位十六进制，先以固定 `rev-parse --verify <prefix>^{commit}` 解析唯一 commit，未知或歧义前缀返回空列表。
+- wire DTO、TypeScript request builder、native decoder 与 `PlainBridge` 都是闭集；每次调用仍携带显式授权 rootId。History view 复用 Source Control 的共享 repository selection，多根时只查询用户明确选择的仓库，不以活动编辑器或授权顺序覆盖该选择。
+- 真实 Apple Git 2.50.1 fixture 覆盖 message 大小写、author 正则元字符 literal 语义、SHA 前缀、未知 SHA 与无效输入；单元/架构 hostile mutation 覆盖 handler 注册与改线、bridge 方法闭集和 request-builder 绕过；两条真实 Workbench Browser 场景覆盖三种搜索和多根路由。
+
+明确排除：任意 argv、revision expression、正则模式、内容 pickaxe（`-S`/`-G`）、分页和历史搜索持久化。本切片只闭合 product-scope 中按 message/author/SHA 找 commit 的原始缺口。

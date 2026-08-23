@@ -146,6 +146,7 @@ describe("bindPlainGitBridge", () => {
 		await rooted.gitBlameFile("a.txt", null);
 		await rooted.gitBlameCommitMessages(["a".repeat(40)]);
 		await rooted.gitFileHistory("a.txt");
+		await rooted.gitHistorySearch("message", "release");
 		await rooted.gitLineHistoryList("a.txt", { start: 1, end: 2 });
 		await rooted.gitLineHistoryDetail(
 			"a.txt",
@@ -196,7 +197,7 @@ describe("bindPlainGitBridge", () => {
 		await rooted.gitWorktreeAdd("child", false, null);
 		await rooted.gitWorktreeRemove("/tmp/child", false);
 
-		expect(calls).toHaveLength(56);
+		expect(calls).toHaveLength(57);
 		for (const call of calls) {
 			expect(call.args.at(-1), call.method).toBe(ROOT_A);
 		}

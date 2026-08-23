@@ -39,22 +39,22 @@ use super::dto::{
     GitDiffFilesResult, GitDiscardPathsRequest, GitFetchRequest, GitFileHistoryRequest,
     GitHistoryAbortRequest, GitHistoryCancelRequest, GitHistoryContinueRequest,
     GitHistoryListResultWire, GitHistoryMutationOutcomeWire, GitHistoryPreviewRequest,
-    GitHistoryPreviewResultWire, GitHistoryStateRequest, GitHistoryStateResultWire,
-    GitLineHistoryDetailRequest, GitLineHistoryDetailResultWire, GitLineHistoryListRequest,
-    GitLogGraphRequest, GitLogGraphResultWire, GitMergeRequest, GitNetworkCancelRequest,
-    GitNetworkPreviewRequest, GitNetworkPreviewResult, GitPullRequest, GitPushRequest,
-    GitRebaseRequest, GitReflogListRequest, GitReflogListResultWire, GitRefsListRequest,
-    GitRefsListResultWire, GitRemoteAddRequest, GitRemoteRemoveRequest, GitRemoteRenameRequest,
-    GitRemoteSetUrlRequest, GitRemotesListRequest, GitRemotesListResultWire, GitResetRequest,
-    GitRevertRequest, GitShowBlobRequest, GitShowBlobResult, GitShowCommitBlobRequest,
-    GitShowCommitRequest, GitShowCommitResult, GitStageBlobRequest, GitStagePathsRequest,
-    GitStashApplyOutcomeWire, GitStashApplyRequest, GitStashDropRequest, GitStashListRequest,
-    GitStashListResultWire, GitStashPopRequest, GitStashPushOutcomeWire, GitStashPushRequest,
-    GitStashShowRequest, GitStashShowResultWire, GitStatusRequest, GitStatusResult,
-    GitTagCreateRequest, GitTagDeleteRequest, GitUnstagePathsRequest, GitUpstreamSetRequest,
-    GitUpstreamUnsetRequest, GitWorktreeAddOutcomeWire, GitWorktreeAddRequest,
-    GitWorktreeListRequest, GitWorktreeListResultWire, GitWorktreeRemoveOutcomeWire,
-    GitWorktreeRemoveRequest,
+    GitHistoryPreviewResultWire, GitHistorySearchRequest, GitHistoryStateRequest,
+    GitHistoryStateResultWire, GitLineHistoryDetailRequest, GitLineHistoryDetailResultWire,
+    GitLineHistoryListRequest, GitLogGraphRequest, GitLogGraphResultWire, GitMergeRequest,
+    GitNetworkCancelRequest, GitNetworkPreviewRequest, GitNetworkPreviewResult, GitPullRequest,
+    GitPushRequest, GitRebaseRequest, GitReflogListRequest, GitReflogListResultWire,
+    GitRefsListRequest, GitRefsListResultWire, GitRemoteAddRequest, GitRemoteRemoveRequest,
+    GitRemoteRenameRequest, GitRemoteSetUrlRequest, GitRemotesListRequest,
+    GitRemotesListResultWire, GitResetRequest, GitRevertRequest, GitShowBlobRequest,
+    GitShowBlobResult, GitShowCommitBlobRequest, GitShowCommitRequest, GitShowCommitResult,
+    GitStageBlobRequest, GitStagePathsRequest, GitStashApplyOutcomeWire, GitStashApplyRequest,
+    GitStashDropRequest, GitStashListRequest, GitStashListResultWire, GitStashPopRequest,
+    GitStashPushOutcomeWire, GitStashPushRequest, GitStashShowRequest, GitStashShowResultWire,
+    GitStatusRequest, GitStatusResult, GitTagCreateRequest, GitTagDeleteRequest,
+    GitUnstagePathsRequest, GitUpstreamSetRequest, GitUpstreamUnsetRequest,
+    GitWorktreeAddOutcomeWire, GitWorktreeAddRequest, GitWorktreeListRequest,
+    GitWorktreeListResultWire, GitWorktreeRemoveOutcomeWire, GitWorktreeRemoveRequest,
 };
 use super::history_operation::{self, GitHistoryOperationService};
 use super::log;
@@ -342,6 +342,20 @@ pub(crate) async fn git_file_history(
     let path = request.into_parts()?;
     let scope = SelectedGitRoot::new(workspace.inner(), root_id);
     let result = log::file_history(trust.inner(), &scope, window.label(), &path).await?;
+    Ok(GitHistoryListResultWire::from(result))
+}
+
+#[tauri::command]
+pub(crate) async fn git_history_search(
+    window: WebviewWindow,
+    trust: State<'_, TrustService>,
+    workspace: State<'_, WorkspaceService>,
+    root_id: RootId,
+    request: GitHistorySearchRequest,
+) -> Result<GitHistoryListResultWire, CommandError> {
+    let (mode, query) = request.into_parts()?;
+    let scope = SelectedGitRoot::new(workspace.inner(), root_id);
+    let result = log::search_history(trust.inner(), &scope, window.label(), mode, &query).await?;
     Ok(GitHistoryListResultWire::from(result))
 }
 

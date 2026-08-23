@@ -6,6 +6,7 @@ import {
 	decodeGitBranchDeleteOutcome,
 	decodeGitContributorsListResult,
 	decodeGitDiffFilesResult,
+	decodeGitHistoryListResult,
 	decodeGitNetworkPreviewResult,
 	decodeGitReflogListResult,
 	decodeGitRemotesListResult,
@@ -21,6 +22,7 @@ import {
 	frozenGitCommitRequest,
 	frozenGitDiffFilesRequest,
 	frozenGitDiscardPathsRequest,
+	frozenGitHistorySearchRequest,
 	frozenGitNetworkPreviewRequest,
 	frozenGitPushRequest,
 	frozenGitRemoteAddRequest,
@@ -57,6 +59,50 @@ describe("Git root identity codec", () => {
 				expect.objectContaining({ code: "INVALID_ROOT_ID" }),
 			);
 		}
+	});
+});
+
+describe("Git history search codec", () => {
+	it("builds frozen trimmed message author and SHA requests", () => {
+		for (const mode of ["message", "author"] as const) {
+			const request = frozenGitHistorySearchRequest(mode, "  literal.*value  ");
+			expect(request).toEqual({ mode, query: "literal.*value" });
+			expect(Object.isFrozen(request)).toBe(true);
+		}
+		expect(frozenGitHistorySearchRequest("sha", "A1b2")).toEqual({
+			mode: "sha",
+			query: "A1b2",
+		});
+	});
+
+	it("rejects unknown modes empty/control text oversized text and non-hex SHA", () => {
+		for (const [mode, query] of [
+			["subject", "value"],
+			["message", "   "],
+			["author", "bad\nname"],
+			["message", "x".repeat(257)],
+			["message", "界".repeat(86)],
+			["sha", "abc"],
+			["sha", "abcdz"],
+			["sha", "a".repeat(41)],
+		] as const) {
+			expect(() => frozenGitHistorySearchRequest(mode, query)).toThrowError(
+				expect.objectContaining({ code: "GIT_HISTORY_SEARCH_INVALID_QUERY" }),
+			);
+		}
+	});
+
+	it("reuses the strict frozen bounded history-list decoder", () => {
+		const result = decodeGitHistoryListResult({
+			entries: [{ sha: "a".repeat(40), message: "subject\nbody" }],
+			truncated: false,
+		});
+		expect(result.entries[0]).toEqual({
+			sha: "a".repeat(40),
+			message: "subject\nbody",
+		});
+		expect(Object.isFrozen(result)).toBe(true);
+		expect(Object.isFrozen(result.entries)).toBe(true);
 	});
 });
 

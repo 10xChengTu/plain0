@@ -15,7 +15,7 @@ use tempfile::TempDir;
 
 use super::{
     file_history, line_history_detail, line_history_list, log_graph, parse_graph_entries,
-    parse_history_entries, LineRange,
+    parse_history_entries, search_history, HistorySearchMode, LineRange,
 };
 use crate::git::network::GitNetworkService;
 use crate::remote::session::RemoteSessionService;
@@ -108,6 +108,129 @@ fn init_repo() -> TempDir {
 
 fn range(start: u32, end: u32) -> LineRange {
     LineRange { start, end }
+}
+
+#[test]
+fn history_search_message_is_literal_case_insensitive_and_bounded_to_matching_commits() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    std::fs::write(repo.path().join("f.txt"), "one\n").unwrap();
+    raw_git_ok(repo.path(), &["add", "f.txt"]);
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "Fix.*Literal"]);
+    let matching_sha = head_sha(repo.path());
+    std::fs::write(repo.path().join("f.txt"), "two\n").unwrap();
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-am", "fixZZliteral"]);
+
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
+    let result = block_on(search_history(
+        &trust,
+        &workspace,
+        "main",
+        HistorySearchMode::Message,
+        "fix.*literal",
+    ))
+    .expect("literal message search succeeds");
+
+    assert_eq!(result.entries.len(), 1);
+    assert_eq!(result.entries[0].sha, matching_sha);
+    assert!(!result.truncated);
+}
+
+#[test]
+fn history_search_author_treats_regex_metacharacters_literally() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    raw_git_ok(repo.path(), &["config", "user.name", "Ada.*Lovelace"]);
+    std::fs::write(repo.path().join("f.txt"), "one\n").unwrap();
+    raw_git_ok(repo.path(), &["add", "f.txt"]);
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "literal author"]);
+    let matching_sha = head_sha(repo.path());
+    raw_git_ok(repo.path(), &["config", "user.name", "AdaXXLovelace"]);
+    std::fs::write(repo.path().join("f.txt"), "two\n").unwrap();
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-am", "other author"]);
+
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
+    let result = block_on(search_history(
+        &trust,
+        &workspace,
+        "main",
+        HistorySearchMode::Author,
+        "ada.*lovelace",
+    ))
+    .expect("literal author search succeeds");
+
+    assert_eq!(result.entries.len(), 1);
+    assert_eq!(result.entries[0].sha, matching_sha);
+}
+
+#[test]
+fn history_search_sha_resolves_one_unique_hex_prefix_and_unknown_prefix_is_empty() {
+    if !git_available() {
+        eprintln!("skipping: git not found on PATH");
+        return;
+    }
+    let repo = init_repo();
+    std::fs::write(repo.path().join("f.txt"), "one\n").unwrap();
+    raw_git_ok(repo.path(), &["add", "f.txt"]);
+    raw_git_ok(repo.path(), &["commit", "--quiet", "-m", "target commit"]);
+    let sha = head_sha(repo.path());
+    let trust_base = TempDir::new().unwrap();
+    let (workspace, trust) = trusted_workspace("main", repo.path(), trust_base.path());
+
+    let found = block_on(search_history(
+        &trust,
+        &workspace,
+        "main",
+        HistorySearchMode::Sha,
+        &sha[..12].to_ascii_uppercase(),
+    ))
+    .expect("SHA prefix search succeeds");
+    assert_eq!(found.entries.len(), 1);
+    assert_eq!(found.entries[0].sha, sha);
+
+    let missing = block_on(search_history(
+        &trust,
+        &workspace,
+        "main",
+        HistorySearchMode::Sha,
+        "0000000000000000000000000000000000000000",
+    ))
+    .expect("unknown SHA is an empty result");
+    assert!(missing.entries.is_empty());
+    assert!(!missing.truncated);
+}
+
+#[test]
+fn history_search_rejects_control_text_and_non_hex_sha_before_spawning_git() {
+    let workspace = WorkspaceService::new();
+    let trust_base = TempDir::new().unwrap();
+    let trust = TrustService::new(trust_base.path().to_path_buf());
+    let control = block_on(search_history(
+        &trust,
+        &workspace,
+        "main",
+        HistorySearchMode::Message,
+        "bad\nquery",
+    ))
+    .expect_err("control query rejected");
+    assert_eq!(control.code(), "GIT_HISTORY_SEARCH_INVALID_QUERY");
+    let sha = block_on(search_history(
+        &trust,
+        &workspace,
+        "main",
+        HistorySearchMode::Sha,
+        "not-hex",
+    ))
+    .expect_err("non-hex SHA rejected");
+    assert_eq!(sha.code(), "GIT_HISTORY_SEARCH_INVALID_QUERY");
 }
 
 // --- file_history: basics ----------------------------------------------

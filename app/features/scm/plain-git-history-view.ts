@@ -15,7 +15,10 @@ import {
 import { IViewDescriptorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service";
 import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service";
 
-import type { PlainBridge } from "../../platform/tauri/contracts";
+import type {
+	GitHistorySearchMode,
+	PlainBridge,
+} from "../../platform/tauri/contracts";
 import { normalizeCommandError } from "../../platform/tauri/errors";
 import { encodeGitCommitSourceUri } from "./plain-git-commit-detail";
 import { plainGitInvalidation } from "./plain-git-invalidation";
@@ -76,6 +79,9 @@ export class PlainGitHistoryView extends ViewPane {
 	#controller: PlainGitHistoryController | undefined;
 	#controllerRootId: string | undefined;
 	#messageElement: HTMLElement | undefined;
+	#searchModeSelect: HTMLSelectElement | undefined;
+	#searchInput: HTMLInputElement | undefined;
+	#searchHistoryList: HTMLElement | undefined;
 	#fileHistoryList: HTMLElement | undefined;
 	#lineHistoryList: HTMLElement | undefined;
 	#detailElement: HTMLElement | undefined;
@@ -119,6 +125,48 @@ export class PlainGitHistoryView extends ViewPane {
 		message.className = "plain-git-history-view-message";
 		message.setAttribute("role", "status");
 		this.#messageElement = message;
+
+		const searchHeading = document.createElement("div");
+		searchHeading.className = "plain-git-history-view-group-heading";
+		searchHeading.textContent = "Commit Search";
+		const searchRow = document.createElement("div");
+		searchRow.className = "plain-git-history-view-row";
+		const searchMode = document.createElement("select");
+		searchMode.className = "plain-git-history-view-search-mode";
+		searchMode.setAttribute("aria-label", "Commit Search Field");
+		for (const [value, label] of [
+			["message", "Message"],
+			["author", "Author"],
+			["sha", "SHA"],
+		] as const) {
+			const option = document.createElement("option");
+			option.value = value;
+			option.textContent = label;
+			searchMode.append(option);
+		}
+		this.#searchModeSelect = searchMode;
+		const searchInput = document.createElement("input");
+		searchInput.type = "search";
+		searchInput.className = "plain-git-history-view-search-input";
+		searchInput.setAttribute("aria-label", "Commit Search Query");
+		searchInput.placeholder = "Message, author, or SHA";
+		this.#searchInput = searchInput;
+		const searchButton = document.createElement("button");
+		searchButton.type = "button";
+		searchButton.className = "plain-git-history-view-action";
+		searchButton.textContent = "Search Commits";
+		const submitSearch = () => void this.showCommitSearch();
+		this._register(addDisposableListener(searchButton, "click", submitSearch));
+		this._register(
+			addDisposableListener(searchInput, "keydown", (event) => {
+				if (event.key === "Enter") submitSearch();
+			}),
+		);
+		searchRow.append(searchMode, searchInput, searchButton);
+		const searchHistoryList = document.createElement("ul");
+		searchHistoryList.className =
+			"plain-git-history-view-list plain-git-history-search-results";
+		this.#searchHistoryList = searchHistoryList;
 
 		const fileHistoryRow = document.createElement("div");
 		fileHistoryRow.className = "plain-git-history-view-row";
@@ -182,6 +230,9 @@ export class PlainGitHistoryView extends ViewPane {
 
 		container.append(
 			message,
+			searchHeading,
+			searchRow,
+			searchHistoryList,
 			fileHistoryRow,
 			fileHistoryHeading,
 			fileHistoryList,
@@ -220,6 +271,7 @@ export class PlainGitHistoryView extends ViewPane {
 		this.#detailElement?.replaceChildren();
 		this.#renderFileHistory();
 		this.#renderLineHistory();
+		this.#renderSearchHistory();
 	}
 
 	#getController(): PlainGitHistoryController | undefined {
@@ -267,6 +319,79 @@ export class PlainGitHistoryView extends ViewPane {
 		if (this.#messageElement !== undefined) {
 			this.#messageElement.textContent = text ?? "";
 		}
+	}
+
+	async showCommitSearch(): Promise<void> {
+		const mode = this.#searchModeSelect?.value as
+			GitHistorySearchMode | undefined;
+		const query = this.#searchInput?.value.trim() ?? "";
+		if (mode === undefined || query.length === 0) {
+			this.#setMessage("Enter a commit message, author, or SHA query.");
+			return;
+		}
+		const roots = plainGitRootsFromWorkspaceFolders(
+			this.workspaceContextService.getWorkspace().folders,
+		);
+		const root = plainGitRootSelection.resolve(roots);
+		if (root === undefined) {
+			this.#setMessage(
+				"Select a repository in Source Control before searching.",
+			);
+			return;
+		}
+		const controller = this.#getControllerForRoot(root.rootId);
+		if (controller === undefined) return;
+		try {
+			await controller.loadSearch(mode, query);
+			this.#setMessage(undefined);
+		} catch (error) {
+			controller.clearSearchHistory();
+			this.#setMessage(normalizeCommandError(error).message);
+		}
+		this.#renderSearchHistory();
+	}
+
+	#renderSearchHistory(): void {
+		const controller = this.#getController();
+		const list = this.#searchHistoryList;
+		const rootId = this.#controllerRootId;
+		if (
+			controller === undefined ||
+			list === undefined ||
+			rootId === undefined
+		) {
+			return;
+		}
+		list.textContent = "";
+		for (const entry of controller.searchHistory.entries) {
+			const item = document.createElement("li");
+			item.className = "plain-git-history-view-item";
+			const row = document.createElement("button");
+			row.type = "button";
+			row.className = "plain-git-history-view-item-row";
+			row.textContent = `${shortCommitSha(entry.sha)}  ${historyEntrySummary(entry)}`;
+			row.setAttribute(
+				"aria-label",
+				`Open commit ${shortCommitSha(entry.sha)}`,
+			);
+			this._register(
+				addDisposableListener(row, "click", () => {
+					void this.editorService.openEditor({
+						multiDiffSource: encodeGitCommitSourceUri(rootId, entry.sha),
+						label: `Commit ${shortCommitSha(entry.sha)}`,
+					});
+				}),
+			);
+			item.append(row);
+			list.append(item);
+		}
+		if (controller.searchHistory.entries.length === 0) {
+			const empty = document.createElement("li");
+			empty.className = "plain-git-history-view-empty";
+			empty.textContent = "No commits found.";
+			list.append(empty);
+		}
+		if (controller.searchHistory.truncated) list.append(truncatedNoticeItem());
 	}
 
 	async showFileHistory(): Promise<void> {

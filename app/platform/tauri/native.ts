@@ -214,6 +214,7 @@ import {
 	frozenGitDiffFilesRequest,
 	frozenGitDiscardPathsRequest,
 	frozenGitFileHistoryRequest,
+	frozenGitHistorySearchRequest,
 	frozenGitHistoryAbortRequest,
 	frozenGitHistoryContinueRequest,
 	frozenGitHistoryPreviewRequest,
@@ -1032,6 +1033,15 @@ export function createNativeBridge(): PlainBridge {
 			const request = frozenGitFileHistoryRequest(path);
 			return decodeGitHistoryListResult(
 				await invoke<unknown>("git_file_history", {
+					rootId: await resolveNativeGitRootId(rootId),
+					request,
+				}),
+			);
+		},
+		gitHistorySearch: async (mode, query, rootId) => {
+			const request = frozenGitHistorySearchRequest(mode, query);
+			return decodeGitHistoryListResult(
+				await invoke<unknown>("git_history_search", {
 					rootId: await resolveNativeGitRootId(rootId),
 					request,
 				}),

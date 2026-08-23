@@ -483,6 +483,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async gitFileHistory() {
 			throw new Error("unused");
 		},
+		async gitHistorySearch() {
+			throw new Error("unused");
+		},
 		async gitLineHistoryList() {
 			throw new Error("unused");
 		},

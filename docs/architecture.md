@@ -178,6 +178,7 @@ Workbench model ← Plain feature service ← typed bridge/events
 - Debug 启动同样不得读取 `folders[0]`：单根可以自动选择，多根必须先 Quick Pick 一个明确 root，取消时不得读取配置、确认或启动 adapter。`debug_launch`/`debug_attach` 携带并冻结该 rootId；Rust 在 trust 后重验授权，stdio adapter 的进程 cwd 使用该根的 canonical native path，TCP connect 也必须先通过同一 root 授权。每个 debug session 保存自己的 rootId，运行期 `debug_set_breakpoints` 必须携带并匹配它；前端断点身份是 `(rootId, relativePath, line)`，只把当前 session 所属 root 的集合发给 adapter。adapter 首次确认仍按当前完整 workspace roots identity 与精确 `(command,args,transport)` 记录，不把 rootId 重复加入 confirmation subject；配置选择器属于 F210，本切片仍只取所选 root 的首个 launch configuration。
 - Git 报告的 repository top level 必须与所选 canonical root 完全相等。若用户只打开了更大仓库的子目录，仓库级 status/refs/stash/写操作会因可能越过 capability 边界而拒绝；不得以 ambient 父仓库 I/O 或未审计的全仓库 pathspec 回退绕过。
 - Rust service 把 status、diff、log、blame、refs 和动作转换为稳定 DTO；前端不解析人类文本。
+- commit search 是独立的有界只读路由：message/author 只接受最多 256 bytes 的无控制字符文本，并通过固定的 `--fixed-strings --regexp-ignore-case` 参数搜索 branches/tags/remotes；SHA 只接受 4–40 位十六进制前缀，先经固定 `rev-parse --verify <sha>^{commit}` 解析，再读取该唯一 commit。查询值从不被解释为 revision expression、pathspec、正则或 Git argv，结果继续服从显式 root、500 条上限和 hardened background-read 合同。
 - 初期不混用 `git2`/`gix`。只有性能数据证明需要时，才用 `gix` 做只读缓存，并以 Git CLI 差分测试约束语义。
 - 不提供任意 `git_run` 或任意 config 写入；hooks、credential helper、ssh command 等高风险配置不通过 UI 修改。
 - 未信任 workspace 只通过文件系统识别 `.git`，不启动任何 Git、shell 或 helper 进程。信任是按 workspace 保存、可撤销的显式授权，提示中列出仓库 Git 配置可能执行外部程序。

@@ -17,6 +17,7 @@ import type {
 	GitGraphNode,
 	GitHistoryEntry,
 	GitHistoryListResult,
+	GitHistorySearchMode,
 	GitHistoryMutationOutcome,
 	GitHistoryMutationOutcomeKind,
 	GitHistoryOperation,
@@ -1250,6 +1251,7 @@ export function decodeGitBlameCommitMessagesResult(
 // payload with generous headroom, mirroring `MAX_GIT_BLAME_ENTRIES`'s own
 // "far above the real ceiling" rationale.
 const MAX_GIT_HISTORY_ENTRIES = 10_000;
+const MAX_GIT_HISTORY_SEARCH_QUERY_BYTES = 256;
 /** Mirrors `src-tauri/src/git/exec.rs`'s `GIT_EXEC_OUTPUT_CAP_BYTES` — a
  * `gitLineHistoryDetail` response's `diffText` can never exceed one
  * invocation's own captured-output cap. */
@@ -1274,6 +1276,36 @@ export function frozenGitFileHistoryRequest(
 		return gitFileHistoryRequestInvalid();
 	}
 	return Object.freeze({ path });
+}
+
+function gitHistorySearchRequestInvalid(): never {
+	return requestViolation(
+		"GIT_HISTORY_SEARCH_INVALID_QUERY",
+		"The commit history search query is invalid.",
+	);
+}
+
+export function frozenGitHistorySearchRequest(
+	mode: unknown,
+	query: unknown,
+): Readonly<{ mode: GitHistorySearchMode; query: string }> {
+	if (mode !== "message" && mode !== "author" && mode !== "sha") {
+		return gitHistorySearchRequestInvalid();
+	}
+	if (typeof query !== "string") {
+		return gitHistorySearchRequestInvalid();
+	}
+	const trimmed = query.trim();
+	if (
+		trimmed.length === 0 ||
+		new TextEncoder().encode(trimmed).byteLength >
+			MAX_GIT_HISTORY_SEARCH_QUERY_BYTES ||
+		/\p{Cc}/u.test(trimmed) ||
+		(mode === "sha" && !/^[0-9a-fA-F]{4,40}$/u.test(trimmed))
+	) {
+		return gitHistorySearchRequestInvalid();
+	}
+	return Object.freeze({ mode, query: trimmed });
 }
 
 function isValidGitLogLineRange(value: unknown): value is GitLogLineRange {

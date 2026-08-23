@@ -10752,6 +10752,31 @@ describe("Plain F080 S1 git command registration Harness", () => {
 		);
 	});
 
+	it("fails if the history search command is missing from generate_handler", () => {
+		const missingRegistration = withMutatedGitCommandSource(
+			"src-tauri/src/lib.rs",
+			(source) =>
+				source.replace("            git::commands::git_history_search,\n", ""),
+		);
+		expect(validateGitCommandRegistration(missingRegistration)).toContain(
+			"generate_handler! must register git::commands::git_history_search exactly once",
+		);
+	});
+
+	it("fails if git_history_search bypasses its audited DTO-selected query", () => {
+		const rewired = withMutatedGitCommandSource(
+			"src-tauri/src/git/commands.rs",
+			(source) =>
+				source.replace(
+					"let (mode, query) = request.into_parts()?;",
+					'let mode = HistorySearchMode::Message;\n    let query = String::from("all");',
+				),
+		);
+		expect(validateGitCommandRegistration(rewired)).toContain(
+			"git_history_search must contain only its audited DTO decode and single service route",
+		);
+	});
+
 	it("fails if git_reset ignores the DTO-selected reset mode", () => {
 		const rewired = withMutatedGitCommandSource(
 			"src-tauri/src/git/commands.rs",
@@ -12061,7 +12086,39 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-seven audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if PlainBridge loses gitHistorySearch", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/contracts.ts",
+			(source) =>
+				source.replace(
+					/\tgitHistorySearch\([\s\S]*?\n\t\): Promise<GitHistoryListResult>;\n/,
+					"",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"PlainBridge must expose exactly the fifty-seven audited git methods, no more and no fewer",
+		);
+	});
+
+	it("fails if native history search bypasses its frozen request", () => {
+		const mutated = withMutatedGitApp(
+			"app/platform/tauri/native.ts",
+			(source) =>
+				source.replace(
+					"const request = frozenGitHistorySearchRequest(mode, query);",
+					"const request = { mode, query };",
+				),
+		);
+		expect(
+			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
+		).toContain(
+			"native.ts must invoke git_history_search exactly once, routed through frozenGitHistorySearchRequest and decoded through decodeGitHistoryListResult",
 		);
 	});
 
@@ -12077,7 +12134,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
 		).toContain(
-			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-seven audited git methods, no more and no fewer",
 		);
 	});
 
@@ -12169,7 +12226,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-seven audited git methods, no more and no fewer",
 		);
 	});
 
@@ -12226,7 +12283,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-seven audited git methods, no more and no fewer",
 		);
 	});
 
@@ -12242,7 +12299,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-seven audited git methods, no more and no fewer",
 		);
 	});
 
@@ -12290,7 +12347,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, mutated),
 		).toContain(
-			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-seven audited git methods, no more and no fewer",
 		);
 	});
 
@@ -12364,7 +12421,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-seven audited git methods, no more and no fewer",
 		);
 	});
 
@@ -12380,7 +12437,7 @@ describe("Plain F080 S1 git IPC bridge Harness", () => {
 		expect(
 			validateGitIpcBridgeBoundary(baselineGitBridgeRustSources, widened),
 		).toContain(
-			"PlainBridge must expose exactly the fifty-six audited git methods, no more and no fewer",
+			"PlainBridge must expose exactly the fifty-seven audited git methods, no more and no fewer",
 		);
 	});
 
