@@ -1232,12 +1232,24 @@ Reflect.set(FileSystemProviderCapabilities, "FileReadWrite", 0);
 			mutated("main", (source) =>
 				replaceOnce(
 					source,
-					"await workspaceTopologyCoordinator.completeInitial();\n\tworkspaceCommands =",
-					"await workspaceTopologyCoordinator.completeInitial();\n\tworkspaceCommands?.dispose();\n\tworkspaceCommands =",
+					"await layoutStorageService.applyCurrentWorkspaceRuntime();\n\tworkspaceCommands =",
+					"await layoutStorageService.applyCurrentWorkspaceRuntime();\n\tworkspaceCommands?.dispose();\n\tworkspaceCommands =",
 				),
 			),
 			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.bootstrap,
 		);
+	});
+
+	it("restores the hydrated layout only after initial topology completes", () => {
+		const main = currentSources().main;
+		const topologyIndex = main.indexOf(
+			"await workspaceTopologyCoordinator.completeInitial();",
+		);
+		const layoutIndex = main.indexOf(
+			"await layoutStorageService.applyCurrentWorkspaceRuntime();",
+		);
+		expect(topologyIndex).toBeGreaterThanOrEqual(0);
+		expect(layoutIndex).toBeGreaterThan(topologyIndex);
 	});
 
 	it("keeps Tauri native close as the only generic confirmation authority", () => {

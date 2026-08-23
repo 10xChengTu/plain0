@@ -333,10 +333,14 @@ async function bootstrap(): Promise<void> {
 		setSideBarPositionContext: (position) =>
 			sideBarPositionContext.set(position),
 	});
-	await layoutStorageService.applyCurrentWorkspaceRuntime();
 	registerPlainBuiltinThemeResources();
 	registerPlainBuiltinGrammarResources(await getService(ILanguageService));
 	await workspaceTopologyCoordinator.completeInitial();
+	// `completeInitial()` may reinitialize the vendor workspace and activate its
+	// built-mode default Explorer container. Reapply the hydrated Rust snapshot
+	// only after that final startup topology transition, otherwise a persisted
+	// Search/SCM/Debug container is immediately overwritten and flushed away.
+	await layoutStorageService.applyCurrentWorkspaceRuntime();
 	workspaceCommands = registerWorkspaceCommands(
 		bridge,
 		await getService(IContextKeyService),
