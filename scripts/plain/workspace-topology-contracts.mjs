@@ -2289,6 +2289,11 @@ function validateBootstrap(sourceFile) {
 							(visibility) => isExactStringLiteral(visibility, "hidden"),
 						],
 						[
+							"window.confirmBeforeClose",
+							(confirmBeforeClose) =>
+								isExactStringLiteral(confirmBeforeClose, "never"),
+						],
+						[
 							"workbench.startupEditor",
 							(editor) => isExactStringLiteral(editor, "none"),
 						],

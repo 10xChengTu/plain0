@@ -293,6 +293,11 @@ async function bootstrap(): Promise<void> {
 		},
 		configurationDefaults: {
 			"window.menuBarVisibility": "hidden",
+			// Tauri's native CloseCoordinator already owns the complete close
+			// confirmation/veto/flush sequence. The Workbench Web default
+			// `keyboardOnly` otherwise adds a second confirmation veto after a
+			// Cmd shortcut and prevents the native final storage flush.
+			"window.confirmBeforeClose": "never",
 			"workbench.startupEditor": "none",
 			"files.autoSave": "off",
 			// Plain's Rust search domain (search::file_search/text_search) never

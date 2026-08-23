@@ -1240,6 +1240,19 @@ Reflect.set(FileSystemProviderCapabilities, "FileReadWrite", 0);
 		);
 	});
 
+	it("keeps Tauri native close as the only generic confirmation authority", () => {
+		expectFailure(
+			mutated("main", (source) =>
+				replaceOnce(
+					source,
+					'"window.confirmBeforeClose": "never",',
+					'"window.confirmBeforeClose": "keyboardOnly",',
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.bootstrap,
+		);
+	});
+
 	it("rejects mutable configuration events, write surfaces, and late binding", () => {
 		expectFailure(
 			mutated("configurationProvider", (source) =>
