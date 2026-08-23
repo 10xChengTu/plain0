@@ -15484,6 +15484,50 @@ test("replaces every match across multiple files (one already open in an editor)
 	expect(consoleErrors).toEqual([]);
 });
 
+test("replaces every repeated match on the same line instead of retaining only the final range", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") {
+			consoleErrors.push(message.text());
+		}
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"same-line.txt": "token token tokenized\n",
+	});
+	await openNativeWorkspaceExplorer(page);
+
+	await page.getByRole("tab", { name: /^Search/ }).click();
+	const searchInput = page.locator(".plain-search-view-input");
+	const replaceInput = page.locator(".plain-search-view-replace-input");
+	const messages = page.locator(".plain-search-view-messages");
+	const rows = page.locator(".plain-search-view-match-row");
+
+	await searchInput.pressSequentially("token");
+	await expect(rows).toHaveCount(3, { timeout: 5_000 });
+	await replaceInput.fill("cactus");
+	await page.locator(".plain-search-view-replace-all").click();
+
+	await expect(rows).toHaveCount(0, { timeout: 5_000 });
+	await expect(messages).toHaveText("Replaced 3 matches.");
+	const writes = await nativeWriteFileCalls(page);
+	expect(writes).toHaveLength(1);
+	expect(writes[0]!.request.relativePath).toBe("same-line.txt");
+	expect(writes[0]!.contentHex).toBe(hexOfText("cactus cactus cactusized\n"));
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
 test("replaces only the single match a per-match Replace button targets, leaving its sibling match untouched", async ({
 	page,
 }) => {

@@ -24,7 +24,6 @@ import {
 	resultIsMatch,
 	type IFileMatch,
 	type ISearchProgressItem,
-	type ITextSearchMatch,
 } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search";
 import { ISearchService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/search/common/search.service";
 import { IEditorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service";
@@ -173,7 +172,7 @@ interface FileGroupState {
 	readonly groupElement: HTMLElement;
 	readonly listElement: HTMLElement;
 	readonly errorElement: HTMLElement;
-	readonly matches: Map<ITextSearchMatch, ResolvedMatchLocation>;
+	readonly matches: Set<ResolvedMatchLocation>;
 }
 
 /** One resolved match ready to be replaced: everything `replaceSearchMatches`
@@ -183,7 +182,6 @@ interface FileGroupState {
 interface ReplaceCandidate {
 	readonly resourceKey: string;
 	readonly resource: IFileMatch["resource"];
-	readonly match: ITextSearchMatch;
 	readonly location: ResolvedMatchLocation;
 }
 
@@ -582,7 +580,7 @@ export class PlainSearchView extends ViewPane {
 			groupElement: group,
 			listElement: list,
 			errorElement,
-			matches: new Map(),
+			matches: new Set(),
 		};
 
 		for (const result of fileMatch.results ?? []) {
@@ -643,20 +641,24 @@ export class PlainSearchView extends ViewPane {
 				replaceButton.type = "button";
 				replaceButton.className = "plain-search-view-replace-match";
 				replaceButton.textContent = "Replace";
+				const location = { element: item, range, expectedText };
 				replaceButton.addEventListener("click", () => {
 					void this.runReplace([
 						{
 							resourceKey,
 							resource: fileMatch.resource,
-							match: result,
-							location: { element: item, range, expectedText },
+							location,
 						},
 					]);
 				});
 
 				item.append(jumpButton, replaceButton);
 				list.append(item);
-				state.matches.set(result, { element: item, range, expectedText });
+				// One ITextSearchMatch can carry several rangeLocations when a
+				// single line contains repeated matches. Track the rendered range
+				// itself, not the shared result object, so Replace All retains every
+				// occurrence instead of overwriting all but the final range.
+				state.matches.add(location);
 			}
 		}
 		group.append(header, errorElement, list);
@@ -702,10 +704,9 @@ export class PlainSearchView extends ViewPane {
 		if (group === undefined) {
 			return [];
 		}
-		return [...group.matches.entries()].map(([match, location]) => ({
+		return [...group.matches].map((location) => ({
 			resourceKey,
 			resource: group.resource,
-			match,
 			location,
 		}));
 	}
@@ -790,7 +791,7 @@ export class PlainSearchView extends ViewPane {
 		const conflictedResources = new Map<string, IFileMatch["resource"]>();
 
 		for (const candidate of candidates) {
-			const { resourceKey, match } = candidate;
+			const { resourceKey, location } = candidate;
 			const group = this.#fileGroups.get(resourceKey);
 			if (group === undefined) {
 				continue;
@@ -798,8 +799,8 @@ export class PlainSearchView extends ViewPane {
 			const status = outcome.perResource.get(resourceKey);
 			if (status?.status === "replaced") {
 				replacedCount += 1;
-				group.matches.get(match)?.element.remove();
-				group.matches.delete(match);
+				location.element.remove();
+				group.matches.delete(location);
 				group.errorElement.textContent = "";
 			} else {
 				failedCount += 1;
