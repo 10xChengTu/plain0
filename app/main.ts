@@ -14,6 +14,7 @@ import { registerCustomProvider } from "@codingame/monaco-vscode-files-service-o
 import { ICodeEditorService } from "@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/codeEditorService.service";
 import { IModelService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/services/model.service";
 import { ILanguageService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/languages/language.service";
+import { ILanguageConfigurationService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/languages/languageConfigurationRegistry.service";
 import { ITextModelService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/services/resolverService.service";
 import { ILanguageFeaturesService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/services/languageFeatures.service";
 import { IMultiDiffSourceResolverService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/multiDiffEditor/browser/multiDiffSourceResolverService.service";
@@ -301,6 +302,11 @@ async function bootstrap(): Promise<void> {
 			"window.confirmBeforeClose": "never",
 			"workbench.startupEditor": "none",
 			"files.autoSave": "off",
+			// Preserve text-like legacy encodings through Workbench's built-in
+			// jschardet path instead of decoding invalid UTF-8 bytes as U+FFFD and
+			// later saving corrupted UTF-8. Binary/NUL detection still fails into
+			// the existing actionable placeholder before this guess runs.
+			"files.autoGuessEncoding": true,
 			// Plain's Rust search domain (search::file_search/text_search) never
 			// follows symlinks out of an authorized root, unconditionally —
 			// there is no request field that could turn following on. Upstream
@@ -334,7 +340,10 @@ async function bootstrap(): Promise<void> {
 			sideBarPositionContext.set(position),
 	});
 	registerPlainBuiltinThemeResources();
-	registerPlainBuiltinGrammarResources(await getService(ILanguageService));
+	registerPlainBuiltinGrammarResources(
+		await getService(ILanguageService),
+		await getService(ILanguageConfigurationService),
+	);
 	await workspaceTopologyCoordinator.completeInitial();
 	// `completeInitial()` may reinitialize the vendor workspace and activate its
 	// built-mode default Explorer container. Reapply the hydrated Rust snapshot

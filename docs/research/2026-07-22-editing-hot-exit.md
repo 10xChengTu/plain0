@@ -83,3 +83,9 @@
 - 不引入 `editor-service-override`、IndexedDB 持久层、per-file native watcher、Trash/undo 语义扩展。
 - Markdown/图片预览等富预览面不属于 F030（`BinaryFileEditor` 降级已随上游链存在，仅作现状测试，不新建 webview）。
 - 自动保存（`files.autoSave`）默认关闭，不在本项启用。
+
+## 2026-08-24 F280 后续闭合：Monaco 编辑基线
+
+F230 完成度审计登记的 Monaco 基础能力证据缺口已由 F280 闭合。真实 Workbench Browser 场景现在逐项覆盖编辑器内查找替换、多光标、撤销重做、TypeScript 自动缩进、括号匹配、代码折叠与保存后的完整模型；另一场景从真实 Windows-1252 字节开始，证明自动编码识别不会产生 U+FFFD，修改后仍以原编码逐字节写回。
+
+验收同时发现并修复一项真实集成缺陷：F240 已把静态 language configuration 文件和 URI 注册到只读 provider/`ILanguageService`，但 `PlainNullExtensionService` 不会触发上游 extension-point handler，因此括号跳转实际无效。Plain 现在使用 Monaco 自带的 `LanguageConfigurationFileHandler.extractValidConfig` 校验同一批审计 JSON，再直接登记到 `ILanguageConfigurationService`；这仍是纯声明式、进程内的静态能力，不创建 Extension Host、不执行默认扩展代码，也不引入 LSP 或语言运行时。

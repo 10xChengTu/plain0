@@ -634,6 +634,9 @@ async function installNativeIpcMock(
 	// remote SSH tests pass this; every other existing call site keeps the
 	// default (no pins, every target succeeds once past its host-key check).
 	remoteFixtureForTest: TestRemoteFixture = {},
+	// F280: raw byte fixtures for encoding acceptance. Appended after every
+	// older positional option so existing call sites keep their exact shape.
+	extraFileBytesForTest: Readonly<Record<string, readonly number[]>> = {},
 ): Promise<void> {
 	await page.addInitScript(
 		({
@@ -659,6 +662,7 @@ async function installNativeIpcMock(
 			trashBeginFailuresForTest,
 			terminalLifecycleMarkerForTest,
 			remoteFixtureForTest,
+			extraFileBytesForTest,
 		}) => {
 			const calls: Array<{
 				command: string;
@@ -1105,6 +1109,25 @@ async function installNativeIpcMock(
 			};
 			for (const [relativePath, content] of Object.entries(extraFiles)) {
 				ensureNestedFile(relativePath, content);
+			}
+			for (const [relativePath, bytes] of Object.entries(
+				extraFileBytesForTest,
+			)) {
+				const segments = relativePath.split("/");
+				let parent: MockDirectory = root;
+				for (let index = 0; index < segments.length - 1; index += 1) {
+					const segment = segments[index]!;
+					let next = parent.entries.get(segment);
+					if (next === undefined) {
+						next = directory([]);
+						parent.entries.set(segment, next);
+					}
+					if (next.kind !== "directory") {
+						throw new Error("Invalid extra byte fixture path.");
+					}
+					parent = next;
+				}
+				parent.entries.set(segments.at(-1)!, fileBytes(Uint8Array.from(bytes)));
 			}
 			const entryNotFound = () => ({
 				code: "ENTRY_NOT_FOUND",
@@ -7043,6 +7066,7 @@ async function installNativeIpcMock(
 			trashBeginFailuresForTest,
 			terminalLifecycleMarkerForTest,
 			remoteFixtureForTest,
+			extraFileBytesForTest,
 		},
 	);
 }
@@ -9392,7 +9416,10 @@ async function executePaletteCommand(
 	await expect(palette).toBeVisible();
 	await palette.locator("input").pressSequentially(query);
 
-	const command = palette.getByText(label, { exact: true });
+	const escapedLabel = label.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+	const command = palette.getByRole("option", {
+		name: new RegExp(`^${escapedLabel}(?:,|$)`, "u"),
+	});
 	await expect(command).toHaveCount(1);
 	await command.click();
 	await expect(palette).toBeHidden();
@@ -14553,6 +14580,195 @@ test("splits an editor into two groups that stay in sync while editing, and retu
 	expect(nativeDialogs).toEqual([]);
 	expect(pageErrors).toEqual([]);
 	expect(consoleErrors).toEqual([]);
+});
+
+test("exercises Monaco multi-cursor find replace redo indentation bracket navigation and folding in the real editor", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"editing.ts":
+			"const value = MARK;\nconst other = MARK;\nfunction folded() {\n    return (value + other);\n}\n",
+	});
+	const explorer = await openNativeWorkspaceExplorer(page);
+	await explorer
+		.getByRole("treeitem", { name: "editing.ts", exact: true })
+		.dblclick();
+	const editor = page.locator(".monaco-editor");
+	await expect(editor).toBeVisible();
+
+	// The in-editor widget finds both literal matches. Closing it keeps the
+	// current match selected; Monaco's own Select All Occurrences keybinding
+	// creates two real selections/cursors and one type replaces both.
+	await page.keyboard.press("ControlOrMeta+F");
+	const findWidget = editor.locator(".find-widget");
+	await expect(findWidget).toBeVisible();
+	const findInput = findWidget.getByRole("textbox", { name: "Find" });
+	await findInput.fill("MARK");
+	await expect(findWidget.locator(".matchesCount")).toContainText("2");
+	await page.keyboard.press("Escape");
+	await page.keyboard.press("ControlOrMeta+Shift+L");
+	await page.keyboard.type("21");
+	await expect(
+		editor.locator(".view-line").filter({ hasText: "const value = 21;" }),
+	).toBeVisible();
+	await expect(
+		editor.locator(".view-line").filter({ hasText: "const other = 21;" }),
+	).toBeVisible();
+
+	// Undo and redo are separate model operations; redo must restore both
+	// cursor edits, not only the active line.
+	await page.keyboard.press("ControlOrMeta+Z");
+	await expect(
+		editor.locator(".view-line").filter({ hasText: "MARK" }),
+	).toHaveCount(2);
+	await page.keyboard.press("ControlOrMeta+Shift+Z");
+	await expect(
+		editor.locator(".view-line").filter({ hasText: "= 21;" }),
+	).toHaveCount(2);
+
+	// Expand the same in-editor widget's Replace half and use its real Replace
+	// All action; this is Monaco's local editor find/replace, not Plain's
+	// workspace Search view.
+	await page.keyboard.press("ControlOrMeta+F");
+	await findInput.fill("21");
+	const replaceToggle = findWidget.getByRole("button", {
+		name: "Toggle Replace",
+	});
+	if (
+		!(await findWidget.getByRole("textbox", { name: "Replace" }).isVisible())
+	) {
+		await replaceToggle.click();
+	}
+	const replaceInput = findWidget.getByRole("textbox", { name: "Replace" });
+	await replaceInput.fill("42");
+	await findWidget.getByRole("button", { name: "Replace All" }).click();
+	await page.keyboard.press("Escape");
+	await expect(
+		editor.locator(".view-line").filter({ hasText: "= 42;" }),
+	).toHaveCount(2);
+
+	// Enter after an opening brace receives Monaco's TypeScript indentation.
+	const functionLine = editor
+		.locator(".view-line")
+		.filter({ hasText: "function folded() {" });
+	await functionLine.click();
+	await page.keyboard.press("End");
+	await page.keyboard.press("Enter");
+	await page.keyboard.type("const nested = true;");
+	await expect(
+		editor.locator(".view-line").filter({ hasText: "const nested = true;" }),
+	).toBeVisible();
+
+	// Go to Line/Column places the cursor exactly on the function's opening
+	// brace;
+	// Monaco's Go to Bracket then resolves its mate and moves to the closing
+	// side. Exact status-bar positions prove bracket matching without relying
+	// on an ephemeral decoration class.
+	await executePaletteCommandThatMayReopenAQuickInput(
+		page,
+		"Go to Line/Column",
+		"Go to Line/Column...",
+	);
+	const linePicker = page.locator(".quick-input-widget");
+	await expect(linePicker).toBeVisible();
+	await linePicker.locator("input").fill(":3:19");
+	await linePicker.locator("input").press("Enter");
+	await expect(
+		page.getByRole("button", { name: "Ln 3, Col 19" }),
+	).toBeVisible();
+	await page.getByRole("textbox", { name: "editing.ts" }).focus();
+	await executePaletteCommand(page, "Go to Bracket", "Go to Bracket");
+	await expect(page.getByRole("button", { name: "Ln 6, Col 1" })).toBeVisible();
+
+	// Fold from the function header. The nested lines leave the rendered view
+	// while the model remains intact (proved by the subsequent saved bytes).
+	await functionLine.click();
+	await executePaletteCommand(page, "Fold", "Fold");
+	await expect(
+		editor.locator(".view-line").filter({ hasText: "const nested = true;" }),
+	).toHaveCount(0);
+	await page.keyboard.press("ControlOrMeta+S");
+	const writes = await terminalCallsFor(page, "workspace_write_file");
+	const lastWrite = writes.at(-1);
+	expect(lastWrite).toBeDefined();
+	const saved = Buffer.from(String(lastWrite?.args.contentHex), "hex").toString(
+		"utf8",
+	);
+	expect(saved).toContain("const value = 42;");
+	expect(saved).toContain("const other = 42;");
+	expect(saved).toContain("    const nested = true;");
+	expect(saved).toContain("return (value + other);");
+	expect(pageErrors).toEqual([]);
+});
+
+test("auto-detects non-UTF-8 text and preserves its original encoding on save", async ({
+	page,
+}) => {
+	const latin1Text = "café déjà vu résumé naïve façade\n";
+	const latin1Bytes = Array.from(latin1Text, (character) =>
+		character.charCodeAt(0),
+	);
+	await installNativeIpcMock(
+		page,
+		"arrayBuffer",
+		"supported",
+		{},
+		20_000,
+		0,
+		[],
+		[],
+		null,
+		null,
+		null,
+		false,
+		{},
+		{},
+		{},
+		{},
+		[],
+		0,
+		0,
+		null,
+		{},
+		{ "latin1.txt": latin1Bytes },
+	);
+	const explorer = await openNativeWorkspaceExplorer(page);
+	await explorer
+		.getByRole("treeitem", { name: "latin1.txt", exact: true })
+		.dblclick();
+
+	const editor = page.locator(".monaco-editor");
+	await expect(editor).toBeVisible();
+	await expect(
+		editor.locator(".view-line").filter({ hasText: latin1Text.trim() }),
+	).toBeVisible();
+	await expect(editor.locator(".view-lines")).not.toContainText("�");
+	await expect(
+		page.locator(".statusbar-item").filter({
+			hasText: /Windows 1252|ISO 8859-1/,
+		}),
+	).toBeVisible();
+
+	await editor.locator(".view-line").filter({ hasText: "façade" }).click();
+	await page.keyboard.press("End");
+	await page.keyboard.type(" preserved");
+	await page.keyboard.press("ControlOrMeta+S");
+	await expect
+		.poll(
+			async () => (await terminalCallsFor(page, "workspace_write_file")).length,
+		)
+		.toBe(1);
+	const write = (await terminalCallsFor(page, "workspace_write_file"))[0]!;
+	const expectedBytes = [
+		...latin1Bytes.slice(0, -1),
+		...Array.from(" preserved\n", (character) => character.charCodeAt(0)),
+	];
+	const expectedHex = expectedBytes
+		.map((byte) => byte.toString(16).padStart(2, "0"))
+		.join("");
+	expect(write.args.contentHex).toBe(expectedHex);
 });
 
 test("opens a PNG through Explorer as the real binary-file placeholder pane instead of crashing or rendering blank", async ({

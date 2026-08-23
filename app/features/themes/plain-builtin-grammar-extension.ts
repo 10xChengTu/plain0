@@ -5,7 +5,12 @@ import {
 } from "@codingame/monaco-vscode-api/extensions";
 import { URI } from "@codingame/monaco-vscode-api/vscode/vs/base/common/uri";
 import type { ILanguageExtensionPoint } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/languages/language";
+import type { ILanguageConfigurationService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/languages/languageConfigurationRegistry.service";
 import type { ILanguageService } from "@codingame/monaco-vscode-api/vscode/vs/editor/common/languages/language.service";
+import {
+	LanguageConfigurationFileHandler,
+	type ILanguageConfiguration,
+} from "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/codeEditor/common/languageConfigurationExtensionPoint";
 import { toExtensionDescription } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions";
 import { ExtensionMessageCollector } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensionsRegistry";
 import { grammarsExtPoint } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/textMate/common/TMGrammars";
@@ -335,6 +340,7 @@ let registered = false;
  */
 export function registerPlainBuiltinGrammarResources(
 	languageService: ILanguageService,
+	languageConfigurationService: ILanguageConfigurationService,
 ): void {
 	if (registered) {
 		return;
@@ -383,13 +389,35 @@ export function registerPlainBuiltinGrammarResources(
 		const language = contribution as unknown as ILanguageExtensionPoint & {
 			readonly configuration?: string;
 		};
+		const configurationPath = language.configuration;
 		languageService.registerLanguage({
 			...language,
 			configuration:
-				typeof language.configuration === "string"
-					? URI.joinPath(extensionLocation, language.configuration)
+				typeof configurationPath === "string"
+					? URI.joinPath(extensionLocation, configurationPath)
 					: undefined,
 		});
+		if (typeof configurationPath === "string") {
+			const [sourceKey, ...resourceSegments] = configurationPath
+				.replace(/^\.\//u, "")
+				.split("/");
+			const configurationContents = sources.find(
+				(source) => source.key === sourceKey,
+			)?.resources[resourceSegments.join("/")];
+			if (configurationContents === undefined) {
+				throw new Error(
+					`Plain built-in grammar ${language.id} configuration is missing`,
+				);
+			}
+			languageConfigurationService.register(
+				language.id,
+				LanguageConfigurationFileHandler.extractValidConfig(
+					language.id,
+					JSON.parse(configurationContents) as ILanguageConfiguration,
+				),
+				50,
+			);
+		}
 	}
 	(
 		grammarsExtPoint as typeof grammarsExtPoint & {

@@ -203,7 +203,7 @@ Workbench model ← Plain feature service ← typed bridge/events
 ### 内置 TextMate grammar
 
 - 内置语言支持只从与 Workbench 同版、经 `resources/grammars/audit-manifest.json` 固定的默认语言包读取 `contributes.languages`、`contributes.grammars`、language configuration 与 grammar 静态文件；依赖包的其他 manifest 字段不会进入 Plain 合成的运行时 manifest。
-- Plain 在 `initialize()` 后把审计过的 language id、文件关联和只读 `extension-file:` configuration URI 直接登记到 `ILanguageService`，再只向 TextMate 的 grammar extension point 投递 grammar 描述。这样既满足 grammar 对已知 language id 的校验，也不依赖被刻意置空的 `IExtensionService`。
+- Plain 在 `initialize()` 后把审计过的 language id、文件关联和只读 `extension-file:` configuration URI 直接登记到 `ILanguageService`，同时以 Monaco 自带的严格提取器解析同一份静态 JSON 并登记到 `ILanguageConfigurationService`，最后只向 TextMate 的 grammar extension point 投递 grammar 描述。这样既满足 grammar 对已知 language id 的校验，也让括号、缩进、折叠等声明式规则真实生效，且不依赖被刻意置空的 `IExtensionService`。
 - 所有 configuration/grammar 字节都由内存只读 provider 提供；不导入默认扩展包的副作用入口，不调用 activation event，不创建 local、worker、WASM、remote 或 sidecar Extension Host。
 - 新增或升级内置语言包时，必须同步更新 audit manifest、精确依赖白名单、架构 import 拓扑、第三方声明和代表性真实 editor model 的 scope 验收。
 

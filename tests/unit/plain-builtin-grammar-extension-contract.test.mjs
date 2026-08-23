@@ -76,8 +76,17 @@ describe("Plain built-in grammar package contract", () => {
 			/for \(const forbidden of \["main", "browser", "activationEvents"\]\)/u,
 		);
 		expect(wrapperSource).toContain("languageService.registerLanguage({");
+		expect(wrapperSource).toContain("languageConfigurationService.register(");
+		expect(wrapperSource).toContain(
+			"LanguageConfigurationFileHandler.extractValidConfig(",
+		);
 		expect(
 			wrapperSource.indexOf("languageService.registerLanguage({"),
+		).toBeLessThan(
+			wrapperSource.indexOf("languageConfigurationService.register("),
+		);
+		expect(
+			wrapperSource.indexOf("languageConfigurationService.register("),
 		).toBeLessThan(
 			wrapperSource.indexOf("grammarsExtPoint as typeof grammarsExtPoint"),
 		);

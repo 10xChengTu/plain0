@@ -199,8 +199,7 @@
 					"S2's externally-deleted-open-file DELETED detection uses a bounded per-root LRU (256 entries) of resources seen through plainReadFile as an approximation of \"currently open files\", not a precise open-editor/working-copy reference count; root revocation does not proactively clear this LRU, it only shrinks lazily as new reads evict old entries (harmless because the revoked root stops receiving wakes), so the approximation can lazily retain entries past root removal.",
 					"The two new S5 frontend files (plain-workspace-backup-service.ts, plain-workspace-backup-tracker.ts) reuse and minimally extend existing Harness closed-set checks (MIDDLE_SERVICE_DESCRIPTORS, ALLOWED_MONACO_APP_IMPORTS, isAllowedBridgeIdentifier) rather than adding a dedicated AST hostile-mutation suite of the density used by earlier F020 slices; only the real source passing the existing checks was used as positive evidence.",
 					"Windows and Linux native packaging remains F120.",
-					"Zeroing the monaco-vscode-api bundle migration debt remains F110.",
-					"Monaco's baseline editing sub-capabilities inherited unmodified from the vendored upstream editor — multi-cursor editing, the in-editor find/replace widget, redo, code folding, bracket matching, indentation and non-UTF-8 encoding handling — have never been decomposed into this feature's (or any feature's) acceptance criteria and have no dedicated Rust/vitest/Browser/desktop coverage of their own; only undo has partial real coverage (the F200 undo scenario's Cmd/Ctrl+Z, tests/browser/workspace.spec.ts:15939/16037) and only encoding safety has partial coverage (the binary-placeholder PNG scenario's zero-byte detection, tests/browser/workspace.spec.ts:14137). This is an evidence gap for functionality Plain inherits from vendor Monaco rather than a known defect or a deliberate narrowing — recorded per the F230 S1 completion audit (docs/completion-audit.md)."
+					"Zeroing the monaco-vscode-api bundle migration debt remains F110."
 				],
 				"acceptanceResults": [
 					{
@@ -1478,6 +1477,53 @@
 					{
 						"acceptance": "Rust unit architecture controller and real Workbench Browser multi-thread scenarios pass",
 						"result": "Achieved by 2 Rust parser tests, 71 codec/controller tests, 543 architecture tests and one real Workbench multi-thread scenario."
+					}
+				]
+			}
+		},
+		{
+			"id": "F280",
+			"name": "Monaco editing baseline acceptance",
+			"phase": 7,
+			"status": "complete",
+			"acceptance": [
+				"Multi-cursor edit undo and redo mutate the real shared editor model correctly",
+				"The in-editor find/replace widget folding bracket matching and auto indentation work in the real Workbench",
+				"Non-UTF-8 input is decoded through an explicit encoding or fails into a safe actionable fallback without byte-corrupting writes",
+				"Focused Browser and existing architecture gates pass without adding a language runtime or extension host"
+			],
+			"evidence": {
+				"commands": [
+					"pnpm typecheck",
+					"pnpm exec vitest run tests/unit/plain-builtin-grammar-extension-contract.test.mjs tests/unit/workspace-topology-contracts.test.mjs",
+					"pnpm check:architecture",
+					"pnpm exec playwright test tests/browser/workspace.spec.ts --grep 'exercises Monaco multi-cursor|auto-detects non-UTF-8'"
+				],
+				"results": [
+					"The real Workbench Browser scenario proves find/replace through Monaco's own widget, select-all-occurrences multi-cursor edits, undo and redo, TypeScript auto indentation, exact Go to Bracket cursor movement, folding that removes nested lines from the rendered view while preserving the saved model, and an exact UTF-8 save payload.",
+					"A second Browser scenario starts from genuine Windows-1252 bytes, proves automatic encoding detection renders every accented character without U+FFFD, edits the model, and proves the native write payload remains byte-exact Windows-1252 rather than corrupted UTF-8.",
+					"The first run exposed a real F240 integration defect: static language declarations carried configuration URIs, but PlainNullExtensionService never caused the upstream language-configuration handler to load them. Plain now validates and registers the already-audited JSON directly with ILanguageConfigurationService before grammar dispatch. No extension host, activation event or language runtime was added."
+				],
+				"nativeScenarios": [
+					"No separate desktop scenario is required: these are unmodified Monaco DOM/model interactions already exercised inside the real Workbench composition; the native file read/write boundary is independently covered by F020/E2E-003."
+				],
+				"platformGaps": [],
+				"acceptanceResults": [
+					{
+						"acceptance": "Multi-cursor edit undo and redo mutate the real shared editor model correctly",
+						"result": "Achieved by a real Workbench Browser scenario using the in-editor Find widget, Select All Occurrences, typed edits, undo and redo, followed by saved-model assertions."
+					},
+					{
+						"acceptance": "The in-editor find/replace widget folding bracket matching and auto indentation work in the real Workbench",
+						"result": "Achieved in the same scenario with Replace All, TypeScript indentation, exact line/column movement through Go to Bracket and a rendered-line disappearance assertion after Fold."
+					},
+					{
+						"acceptance": "Non-UTF-8 input is decoded through an explicit encoding or fails into a safe actionable fallback without byte-corrupting writes",
+						"result": "Achieved by enabling Workbench autoGuessEncoding and proving a genuine Windows-1252 fixture renders and saves in its original encoding byte for byte. Existing binary/NUL detection continues to fail safely into BinaryFileEditor."
+					},
+					{
+						"acceptance": "Focused Browser and existing architecture gates pass without adding a language runtime or extension host",
+						"result": "Achieved by focused contract tests, typecheck, architecture validation and two Browser scenarios; the implementation only registers audited declarative language configurations with Monaco's in-process service."
 					}
 				]
 			}

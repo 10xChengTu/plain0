@@ -511,7 +511,9 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/themes/plain-builtin-grammar-extension.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions",
 	"app/features/themes/plain-builtin-grammar-extension.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensionsRegistry",
 	"app/features/themes/plain-builtin-grammar-extension.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/languages/language",
+	"app/features/themes/plain-builtin-grammar-extension.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/languages/languageConfigurationRegistry.service",
 	"app/features/themes/plain-builtin-grammar-extension.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/languages/language.service",
+	"app/features/themes/plain-builtin-grammar-extension.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/codeEditor/common/languageConfigurationExtensionPoint",
 	"app/features/themes/plain-builtin-grammar-extension.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/textMate/common/TMGrammars",
 	"app/features/themes/plain-builtin-grammar-extension.ts:@codingame/monaco-vscode-css-default-extension/resources/css.tmLanguage.json?raw",
 	"app/features/themes/plain-builtin-grammar-extension.ts:@codingame/monaco-vscode-css-default-extension/resources/language-configuration.json?raw",
@@ -664,6 +666,7 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/main.ts:@codingame/monaco-vscode-api",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/codeEditorService.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/services/languageFeatures.service",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/languages/languageConfigurationRegistry.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/languages/language.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/services/model.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/services/resolverService.service",
@@ -2305,6 +2308,11 @@ function validateBootstrap(sourceFile) {
 						[
 							"files.autoSave",
 							(autoSave) => isExactStringLiteral(autoSave, "off"),
+						],
+						[
+							"files.autoGuessEncoding",
+							(autoGuessEncoding) =>
+								autoGuessEncoding.kind === ts.SyntaxKind.TrueKeyword,
 						],
 						[
 							"search.followSymlinks",

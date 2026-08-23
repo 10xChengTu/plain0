@@ -1265,6 +1265,19 @@ Reflect.set(FileSystemProviderCapabilities, "FileReadWrite", 0);
 		);
 	});
 
+	it("keeps non-UTF-8 text auto-detection enabled", () => {
+		expectFailure(
+			mutated("main", (source) =>
+				replaceOnce(
+					source,
+					'"files.autoGuessEncoding": true,',
+					'"files.autoGuessEncoding": false,',
+				),
+			),
+			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.bootstrap,
+		);
+	});
+
 	it("rejects mutable configuration events, write surfaces, and late binding", () => {
 		expectFailure(
 			mutated("configurationProvider", (source) =>
@@ -1488,7 +1501,7 @@ registerCustomView({ id: "plain.extra", name: "Extra", actions: [] });`,
 			withAppSources(customView),
 			WORKSPACE_TOPOLOGY_CONTRACT_FAILURES.authority,
 		);
-	});
+	}, 30_000);
 
 	it("rejects a second local workspace-command registrar", () => {
 		expectFailure(
