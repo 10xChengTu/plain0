@@ -250,6 +250,13 @@ const requiredPatches = new Map([
 			marker: "PlainSimpleGlobalActivityActionViewItem",
 		},
 	],
+	[
+		"@codingame/monaco-vscode-workbench-service-override@35.0.1",
+		{
+			file: "patches/@codingame__monaco-vscode-workbench-service-override@35.0.1.patch",
+			marker: "LegacyWorkbenchLayoutSettings.SIDEBAR_POSITION",
+		},
+	],
 ]);
 
 const workspaceManifest = await readFile(
