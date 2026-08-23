@@ -223,6 +223,7 @@ function fakeBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		debugDisconnect: notImplemented,
 		debugSetBreakpoints: notImplemented,
 		debugStackTrace: notImplemented,
+		debugThreads: notImplemented,
 		debugScopes: notImplemented,
 		debugVariables: notImplemented,
 		debugEvaluate: notImplemented,

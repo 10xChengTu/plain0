@@ -673,3 +673,47 @@ body[data-plain-ready="error"] #plain-bootstrap-status {
 .plain-debug-breakpoint-popup input {
 	min-width: 14rem;
 }
+
+/* F270: self-built Call Stack hierarchy. Thread rows own the primary list
+ * selection; only the selected thread reveals its indented frames. Colors
+ * reuse Workbench list tokens so light/dark themes and hover/selection
+ * semantics stay aligned with the surrounding native views. */
+.plain-debug-call-stack-view-list {
+	margin: 0;
+	padding: 0;
+	list-style: none;
+}
+
+.plain-debug-call-stack-view-thread-button,
+.plain-debug-call-stack-view-frame-button {
+	width: 100%;
+	min-height: 1.5rem;
+	border: 0;
+	padding: 0.15rem 0.5rem;
+	background: transparent;
+	color: inherit;
+	text-align: left;
+}
+
+.plain-debug-call-stack-view-thread-button {
+	font-weight: 600;
+}
+
+.plain-debug-call-stack-view-frame-button {
+	padding-left: 1.5rem;
+}
+
+.plain-debug-call-stack-view-thread-button:hover,
+.plain-debug-call-stack-view-frame-button:hover {
+	background: var(--vscode-list-hoverBackground, rgb(255 255 255 / 8%));
+}
+
+.plain-debug-call-stack-view-thread-selected
+	> .plain-debug-call-stack-view-thread-button,
+.plain-debug-call-stack-view-frame-selected
+	> .plain-debug-call-stack-view-frame-button {
+	background: var(
+		--vscode-list-inactiveSelectionBackground,
+		rgb(255 255 255 / 12%)
+	);
+}

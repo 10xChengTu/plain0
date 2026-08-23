@@ -9,6 +9,7 @@ import type {
 	DebugScope,
 	DebugSessionStartResult,
 	DebugStackFrame,
+	DebugThread,
 	DebugStepInTarget,
 	DebugVariable,
 	GitBlameCommitHeader,
@@ -1518,7 +1519,7 @@ export interface BrowserMockGitNetworkFixtureForTest {
 }
 
 /**
- * Deterministic, injectable `debug_stack_trace`/`debug_scopes`/
+ * Deterministic, injectable `debug_threads`/`debug_stack_trace`/`debug_scopes`/
  * `debug_variables`/`debug_evaluate`/`debug_set_breakpoints` responses
  * (`F100` S3) — like `BrowserMockGitFixtureForTest`'s own doc comment says of
  * the git fixtures, this mock never re-implements a real DAP adapter (the
@@ -1539,6 +1540,10 @@ export interface BrowserMockDebugFixtureForTest {
 	 * anything, and its enabled path by setting e.g.
 	 * `{ supportsConditionalBreakpoints: true }`. */
 	readonly capabilities?: Readonly<Record<string, unknown>>;
+	/** The current session's adapter-issued thread snapshot. Defaults to one
+	 * synthetic main thread so existing single-thread fixtures retain their
+	 * previous behavior without every caller needing to seed this field. */
+	readonly threads?: readonly DebugThread[];
 	/** Keyed by `threadId` — the full (unpaged) synthetic call stack
 	 * `debugStackTrace` slices by `startFrame`/`levels` exactly like a real
 	 * adapter would (this mock does implement real slicing, not a canned
@@ -10188,6 +10193,17 @@ export function createBrowserMockBridge(
 			return Object.freeze({
 				stackFrames: Object.freeze(sliced.map((frame) => ({ ...frame }))),
 				totalFrames: all.length,
+			});
+		},
+		async debugThreads(sessionId) {
+			const request = frozenDebugSessionIdRequest(sessionId);
+			requireLiveMockDebugSession(request.sessionId as string);
+			const threads = options.debugFixtureForTest?.threads ?? [
+				{ id: 1, name: "Main Thread" },
+			];
+			return Object.freeze({
+				threads: Object.freeze(threads.map((thread) => ({ ...thread }))),
+				truncated: false,
 			});
 		},
 		async debugScopes(sessionId, frameId) {

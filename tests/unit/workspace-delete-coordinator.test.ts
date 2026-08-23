@@ -527,6 +527,9 @@ function testBridge(
 		async debugStackTrace() {
 			throw new Error("unused");
 		},
+		async debugThreads() {
+			throw new Error("unused");
+		},
 		async debugScopes() {
 			throw new Error("unused");
 		},

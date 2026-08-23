@@ -3,7 +3,8 @@
 //! added exactly three more — `debug_launch`/`debug_attach`/
 //! `debug_disconnect` — the real session-lifecycle surface. `F100` S3 added
 //! the *interactive* debugging surface: `debug_set_breakpoints`/
-//! `debug_stack_trace`/`debug_scopes`/`debug_variables`/`debug_evaluate`.
+//! `debug_threads`/`debug_stack_trace`/`debug_scopes`/`debug_variables`/
+//! `debug_evaluate`.
 //! `F100` S4 added five more: execution/step control
 //! (`debug_continue`/`debug_next`/`debug_step_in`/`debug_step_out`/
 //! `debug_pause`) — plus real `runInTerminal` reverse-request handling, which
@@ -145,7 +146,7 @@ use super::dto::{
     DebugSessionIdRequest, DebugSessionStartRequest, DebugSessionStartResult,
     DebugSetBreakpointsRequest, DebugSetBreakpointsResult, DebugStackTraceRequest,
     DebugStackTraceResult, DebugStepInRequest, DebugStepInTargetsRequest, DebugStepInTargetsResult,
-    DebugThreadRequest, DebugVariablesRequest, DebugVariablesResult,
+    DebugThreadRequest, DebugThreadsResult, DebugVariablesRequest, DebugVariablesResult,
 };
 use super::service::DebugSessionService;
 use super::session::{
@@ -455,6 +456,26 @@ pub(crate) async fn debug_stack_trace(
         )
         .await?;
     dto::parse_stack_trace_response(&body)
+}
+
+/// Lists the current adapter's threads. The response parser applies its own
+/// bounded unique-identity contract before anything crosses to the WebView.
+#[tauri::command]
+pub(crate) async fn debug_threads(
+    window: WebviewWindow,
+    debug_sessions: State<'_, DebugSessionService>,
+    request: DebugSessionIdRequest,
+) -> Result<DebugThreadsResult, CommandError> {
+    let body = debug_sessions
+        .inner()
+        .send_request(
+            window.label(),
+            request.into_parts(),
+            "threads",
+            serde_json::json!({}),
+        )
+        .await?;
+    dto::parse_threads_response(&body)
 }
 
 /// Fetches the variable scopes available at one stack frame.

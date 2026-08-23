@@ -23220,6 +23220,14 @@ const DEBUG_COMMAND_CONTRACTS = Object.freeze([
 	},
 	{
 		file: "src-tauri/src/debug/commands.rs",
+		name: "debug_threads",
+		parameters:
+			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugSessionIdRequest",
+		returnType: "->Result<DebugThreadsResult,CommandError>",
+		body: "letbody=debug_sessions.inner().send_request(window.label(),request.into_parts(),,serde_json::json!({}),).await?;dto::parse_threads_response(&body)",
+	},
+	{
+		file: "src-tauri/src/debug/commands.rs",
 		name: "debug_scopes",
 		parameters:
 			"window:WebviewWindow,debug_sessions:State<'_,DebugSessionService>,request:DebugScopesRequest",
@@ -23376,6 +23384,25 @@ export function validateDebugCommandRegistration(rustSources) {
 		if (normalizedBody !== contract.body) {
 			failures.push(
 				`${contract.name} must contain only its audited confirmation-service route`,
+			);
+		}
+	}
+
+	const debugCommandsSource = sourceCache.get(
+		"src-tauri/src/debug/commands.rs",
+	);
+	if (debugCommandsSource !== undefined) {
+		const threadsBody = rustFunctionBody(
+			stripRustCommentsOnly(debugCommandsSource),
+			"debug_threads",
+		);
+		if (
+			threadsBody === undefined ||
+			(threadsBody.body.match(/"threads"/g) ?? []).length !== 1 ||
+			!threadsBody.body.includes("serde_json::json!({})")
+		) {
+			failures.push(
+				"debug_threads must contain only its audited confirmation-service route",
 			);
 		}
 	}

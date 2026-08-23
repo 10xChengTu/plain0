@@ -717,6 +717,52 @@ pub struct DebugStackTraceRequest {
     pub levels: Option<u32>,
 }
 
+const MAX_DEBUG_THREADS: usize = 4_096;
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugThread {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DebugThreadsResult {
+    pub threads: Vec<DebugThread>,
+    pub truncated: bool,
+}
+
+/// Parses DAP's session-wide `threads` response into a bounded list. Thread
+/// ids must be unique: duplicate identity would make an explicit selection
+/// ambiguous and is treated as a malformed adapter response rather than
+/// silently displaying or targeting the wrong thread.
+pub(crate) fn parse_threads_response(body: &Value) -> Result<DebugThreadsResult, CommandError> {
+    let entries = body
+        .get("threads")
+        .and_then(Value::as_array)
+        .ok_or_else(debug_adapter_response_malformed)?;
+    let truncated = entries.len() > MAX_DEBUG_THREADS;
+    let mut seen = std::collections::HashSet::new();
+    let mut threads = Vec::with_capacity(entries.len().min(MAX_DEBUG_THREADS));
+    for entry in entries.iter().take(MAX_DEBUG_THREADS) {
+        let id = entry
+            .get("id")
+            .and_then(Value::as_i64)
+            .ok_or_else(debug_adapter_response_malformed)?;
+        let name = entry
+            .get("name")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(debug_adapter_response_malformed)?;
+        if !seen.insert(id) {
+            return Err(debug_adapter_response_malformed());
+        }
+        threads.push(DebugThread { id, name });
+    }
+    Ok(DebugThreadsResult { threads, truncated })
+}
+
 pub(crate) struct DebugStackTraceQuery {
     pub(crate) session_id: DebugSessionId,
     pub(crate) arguments: Value,
@@ -1718,12 +1764,13 @@ mod tests {
     use super::{
         parse_continue_response, parse_disassemble_response, parse_evaluate_response,
         parse_run_in_terminal_arguments, parse_scopes_response, parse_set_breakpoints_response,
-        parse_stack_trace_response, parse_step_in_targets_response, parse_variables_response,
-        AdapterTransportKind, DebugDisassembleRequest, DebugEvaluateContext, DebugEvaluateRequest,
-        DebugOutputAckRequest, DebugScopesRequest, DebugSessionId, DebugSessionStartRequest,
-        DebugSetBreakpointsRequest, DebugStackTraceRequest, DebugStepInRequest,
-        DebugStepInTargetsRequest, DebugThreadRequest, DebugVariablesFilter, DebugVariablesRequest,
-        LineBreakpointRequest, SessionTransportRequest, SourceBreakpointsRequest,
+        parse_stack_trace_response, parse_step_in_targets_response, parse_threads_response,
+        parse_variables_response, AdapterTransportKind, DebugDisassembleRequest,
+        DebugEvaluateContext, DebugEvaluateRequest, DebugOutputAckRequest, DebugScopesRequest,
+        DebugSessionId, DebugSessionStartRequest, DebugSetBreakpointsRequest,
+        DebugStackTraceRequest, DebugStepInRequest, DebugStepInTargetsRequest, DebugThreadRequest,
+        DebugVariablesFilter, DebugVariablesRequest, LineBreakpointRequest,
+        SessionTransportRequest, SourceBreakpointsRequest, MAX_DEBUG_THREADS,
         MAX_RUN_IN_TERMINAL_ARGS,
     };
     use crate::debug::session::LaunchRequestKind;
@@ -2248,6 +2295,39 @@ mod tests {
             paged.into_parts().arguments,
             json!({"threadId": 1, "startFrame": 20, "levels": 10})
         );
+    }
+
+    #[test]
+    fn parse_threads_response_is_bounded_and_rejects_missing_or_duplicate_identity() {
+        let body = json!({
+            "threads": [
+                {"id": 7, "name": "main"},
+                {"id": 9, "name": "worker", "adapterExtension": true},
+            ],
+        });
+        let result = parse_threads_response(&body).expect("well-formed threads parse");
+        assert_eq!(result.threads.len(), 2);
+        assert_eq!(result.threads[0].id, 7);
+        assert_eq!(result.threads[1].name, "worker");
+        assert!(!result.truncated);
+
+        assert!(parse_threads_response(&json!({})).is_err());
+        assert!(parse_threads_response(&json!({"threads": [{"id": 1}]})).is_err());
+        assert!(parse_threads_response(&json!({
+            "threads": [{"id": 1, "name": "one"}, {"id": 1, "name": "duplicate"}],
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn parse_threads_response_truncates_an_adversarially_large_list() {
+        let threads = (0..=MAX_DEBUG_THREADS)
+            .map(|id| json!({"id": id, "name": format!("thread-{id}")}))
+            .collect::<Vec<_>>();
+        let result = parse_threads_response(&json!({"threads": threads}))
+            .expect("bounded thread list parses");
+        assert_eq!(result.threads.len(), MAX_DEBUG_THREADS);
+        assert!(result.truncated);
     }
 
     #[test]

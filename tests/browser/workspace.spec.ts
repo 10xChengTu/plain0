@@ -396,6 +396,10 @@ interface TestDebugEvaluateResult {
 	readonly namedVariables: number | null;
 	readonly indexedVariables: number | null;
 }
+interface TestDebugThread {
+	readonly id: number;
+	readonly name: string;
+}
 /** `F210` S5 — one `disassemble` instruction entry. */
 interface TestDebugDisassembledInstruction {
 	readonly address: string;
@@ -417,6 +421,8 @@ interface TestDebugFixture {
 	 * call returns — defaults to `{}` (every `supportsXxx` query answers
 	 * `false`). */
 	readonly capabilities?: Readonly<Record<string, unknown>>;
+	/** Adapter-issued session thread snapshot. */
+	readonly threads?: readonly TestDebugThread[];
 	/** Keyed by `threadId` — sliced by `startFrame`/`levels` exactly like a
 	 * real adapter would. */
 	readonly stackFramesByThread?: Readonly<
@@ -5164,6 +5170,19 @@ async function installNativeIpcMock(
 							return {
 								stackFrames: slicedFrames,
 								totalFrames: allFrames.length,
+							};
+						}
+						case "debug_threads": {
+							const threadsRequest = args.request as
+								{ sessionId?: string } | undefined;
+							if (!liveDebugSessions.has(threadsRequest?.sessionId ?? "")) {
+								throw debugSessionNotFound();
+							}
+							return {
+								threads: debugFixtureForTest.threads ?? [
+									{ id: 1, name: "Main Thread" },
+								],
+								truncated: false,
 							};
 						}
 						case "debug_scopes": {
@@ -23920,6 +23939,10 @@ test("places a breakpoint the adapter moves to another line, starts a session th
 		{},
 		{},
 		{
+			threads: [
+				{ id: 1, name: "Main Thread" },
+				{ id: 2, name: "Worker Thread" },
+			],
 			stackFramesByThread: {
 				1: [
 					{
@@ -23938,6 +23961,17 @@ test("places a breakpoint the adapter moves to another line, starts a session th
 						column: 1,
 						sourcePath: "main.py",
 						sourceName: "main.py",
+						instructionPointerReference: null,
+					},
+				],
+				2: [
+					{
+						id: 20,
+						name: "worker_loop",
+						line: 30,
+						column: 3,
+						sourcePath: "worker.py",
+						sourceName: "worker.py",
 						instructionPointerReference: null,
 					},
 				],
@@ -24073,6 +24107,10 @@ test("places a breakpoint the adapter moves to another line, starts a session th
 	const frameButtons = page.locator(
 		".plain-debug-call-stack-view-frame-button",
 	);
+	const threadButtons = page.locator(
+		".plain-debug-call-stack-view-thread-button",
+	);
+	await expect(threadButtons).toHaveText(["Main Thread", "Worker Thread"]);
 	await expect(frameButtons).toHaveText([
 		"main (main.py:6)",
 		"<module> (main.py:10)",
@@ -24084,6 +24122,29 @@ test("places a breakpoint the adapter moves to another line, starts a session th
 	await expect(frameItems.nth(1)).not.toHaveClass(
 		/plain-debug-call-stack-view-frame-selected/,
 	);
+	await expect
+		.poll(async () => (await terminalCallsFor(page, "debug_threads")).length)
+		.toBe(1);
+	expect(
+		(await terminalCallsFor(page, "debug_threads"))[0]?.args.request,
+	).toEqual({ sessionId });
+
+	// Selecting another adapter-issued thread lazily fetches only that
+	// thread's stack, then selecting Main restores its already-defined thread
+	// identity and stack path. Execution controls still target the stopped
+	// thread from the event; browsing does not rewrite session state.
+	await threadButtons.getByText("Worker Thread", { exact: true }).click();
+	await expect(frameButtons).toHaveText(["worker_loop (worker.py:30)"]);
+	await threadButtons.getByText("Main Thread", { exact: true }).click();
+	await expect(frameButtons).toHaveText([
+		"main (main.py:6)",
+		"<module> (main.py:10)",
+	]);
+	expect(
+		(await terminalCallsFor(page, "debug_stack_trace")).map(
+			(call) => (call.args.request as { threadId: number }).threadId,
+		),
+	).toEqual([1, 2, 1]);
 
 	// The top frame auto-selects, which alone (no click needed) drives the
 	// Variables view to fetch real scopes for it.
@@ -24168,6 +24229,18 @@ test("places a breakpoint the adapter moves to another line, starts a session th
 	await frameButtons.nth(1).click();
 	await expect(page.locator(".plain-debug-variables-view-message")).toHaveText(
 		"No variables.",
+	);
+
+	// Running state clears every stopped-only thread/frame identity instead
+	// of leaving the last multi-thread snapshot visible behind the toolbar.
+	await emitDebugTestEvent(page, sessionId, "continued", {
+		threadId: 1,
+		allThreadsContinued: true,
+	});
+	await expect(threadButtons).toHaveCount(0);
+	await expect(frameButtons).toHaveCount(0);
+	await expect(page.locator(".plain-debug-call-stack-view-message")).toHaveText(
+		"Running…",
 	);
 
 	expect(pageErrors).toEqual([]);

@@ -272,6 +272,7 @@ pub fn run() {
             debug::commands::debug_attach,
             debug::commands::debug_disconnect,
             debug::commands::debug_set_breakpoints,
+            debug::commands::debug_threads,
             debug::commands::debug_stack_trace,
             debug::commands::debug_scopes,
             debug::commands::debug_variables,

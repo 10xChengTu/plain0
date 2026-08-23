@@ -13,7 +13,10 @@ import {
 } from "@codingame/monaco-vscode-api/vscode/vs/workbench/browser/parts/views/viewPane";
 import { IViewDescriptorService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/common/views.service";
 
-import type { DebugStackFrame } from "../../platform/tauri/contracts";
+import type {
+	DebugStackFrame,
+	DebugThread,
+} from "../../platform/tauri/contracts";
 import { normalizeCommandError } from "../../platform/tauri/errors";
 import { getPlainDebugRuntime } from "./plain-debug-runtime";
 import type { DebugSessionState } from "./plain-debug-session";
@@ -22,11 +25,13 @@ import type { DebugSessionState } from "./plain-debug-session";
  * `F100` S3's Call Stack view — self-built (per the frozen research doc's
  * "决策 3": no `debug-service-override` `CallStackView` import, no
  * `IDebugService`/`IViewModel` object graph; this reads
- * `DebugSessionController`'s own state and `debug_stack_trace` directly). A
+ * `DebugSessionController`'s own state and `debug_threads`/`debug_stack_trace`
+ * directly). A
  * `stopped` event (surfaced as `DebugSessionState.stoppedThreadId` becoming
- * non-`null`, via `onDidChangeState`) drives a real `debugStackTrace` fetch
- * and re-render — the panel is otherwise a plain "Running…"/"Not
- * debugging." status line. Selecting a frame writes to the shared
+ * non-`null`, via `onDidChangeState`) first drives a real `debugThreads`
+ * snapshot, then a `debugStackTrace` fetch for only the selected thread —
+ * the panel is otherwise a plain "Running…"/"Not debugging." status line.
+ * Selecting a frame writes to the shared
  * `DebugFrameSelection` (`plain-debug-runtime.ts`) the Variables/Watch views
  * read from — no direct dependency between the three views.
  *
@@ -68,6 +73,9 @@ export class PlainDebugCallStackView extends ViewPane {
 
 	#messageElement: HTMLElement | undefined;
 	#listElement: HTMLElement | undefined;
+	#threads: readonly DebugThread[] = [];
+	#threadsTruncated = false;
+	#selectedThreadId: number | null = null;
 	#frames: readonly DebugStackFrame[] = [];
 	#selectedFrameId: number | null = null;
 	#stateSubscription: { dispose(): void } | undefined;
@@ -322,6 +330,9 @@ export class PlainDebugCallStackView extends ViewPane {
 		this.#updateToolbar(state);
 		const token = (this.#refreshToken += 1);
 		if (state === null) {
+			this.#threads = [];
+			this.#threadsTruncated = false;
+			this.#selectedThreadId = null;
 			this.#frames = [];
 			this.#selectedFrameId = null;
 			this.#setMessage("Not debugging.");
@@ -330,6 +341,9 @@ export class PlainDebugCallStackView extends ViewPane {
 			return;
 		}
 		if (state.stoppedThreadId === null) {
+			this.#threads = [];
+			this.#threadsTruncated = false;
+			this.#selectedThreadId = null;
 			this.#frames = [];
 			this.#selectedFrameId = null;
 			this.#setMessage("Running…");
@@ -337,7 +351,55 @@ export class PlainDebugCallStackView extends ViewPane {
 			getPlainDebugRuntime()?.frameSelection.select(null);
 			return;
 		}
-		await this.#refresh(state.stoppedThreadId, token);
+		await this.#refreshThreadsAndStack(state.stoppedThreadId, token);
+	}
+
+	async #refreshThreadsAndStack(
+		stoppedThreadId: number,
+		token: number,
+	): Promise<void> {
+		const runtime = getPlainDebugRuntime();
+		if (runtime === undefined) return;
+		try {
+			const result = await runtime.session.threads();
+			if (token !== this.#refreshToken) return;
+			const threads = result?.threads ?? [];
+			const includesStopped = threads.some(
+				(thread) => thread.id === stoppedThreadId,
+			);
+			this.#threads = includesStopped
+				? threads
+				: [
+						{ id: stoppedThreadId, name: `Thread ${stoppedThreadId}` },
+						...threads.slice(0, 4_095),
+					];
+			this.#threadsTruncated =
+				(result?.truncated ?? false) ||
+				(!includesStopped && threads.length >= 4_096);
+			this.#selectedThreadId = stoppedThreadId;
+		} catch (error) {
+			if (token !== this.#refreshToken) return;
+			this.#threads = [];
+			this.#threadsTruncated = false;
+			this.#selectedThreadId = null;
+			this.#frames = [];
+			this.#setMessage(normalizeCommandError(error).message);
+			this.#renderFrames();
+			return;
+		}
+		await this.#refresh(stoppedThreadId, token);
+	}
+
+	async #selectThread(threadId: number): Promise<void> {
+		if (this.#selectedThreadId === threadId) return;
+		this.#selectedThreadId = threadId;
+		this.#selectedFrameId = null;
+		this.#frames = [];
+		getPlainDebugRuntime()?.frameSelection.select(null);
+		this.#setMessage("Loading call stack…");
+		this.#renderFrames();
+		const token = (this.#refreshToken += 1);
+		await this.#refresh(threadId, token);
 	}
 
 	async #refresh(threadId: number, token: number): Promise<void> {
@@ -389,27 +451,61 @@ export class PlainDebugCallStackView extends ViewPane {
 			return;
 		}
 		list.textContent = "";
-		for (const frame of this.#frames) {
+		for (const thread of this.#threads) {
 			const item = document.createElement("li");
-			item.className = "plain-debug-call-stack-view-frame";
-			if (frame.id === this.#selectedFrameId) {
-				item.classList.add("plain-debug-call-stack-view-frame-selected");
+			item.className = "plain-debug-call-stack-view-thread";
+			if (thread.id === this.#selectedThreadId) {
+				item.classList.add("plain-debug-call-stack-view-thread-selected");
 			}
 			const button = document.createElement("button");
 			button.type = "button";
-			button.className = "plain-debug-call-stack-view-frame-button";
-			const location =
-				frame.sourceName !== null
-					? `${frame.sourceName}:${frame.line}`
-					: `line ${frame.line}`;
-			button.textContent = `${frame.name} (${location})`;
-			this._register(
-				addDisposableListener(button, "click", () => {
-					this.#selectFrame(frame.id);
-				}),
+			button.className = "plain-debug-call-stack-view-thread-button";
+			button.textContent = thread.name;
+			button.setAttribute("aria-label", `Thread ${thread.name}`);
+			button.setAttribute(
+				"aria-expanded",
+				String(thread.id === this.#selectedThreadId),
 			);
+			button.addEventListener("click", () => {
+				void this.#selectThread(thread.id);
+			});
 			item.append(button);
 			list.append(item);
+			if (thread.id === this.#selectedThreadId) {
+				for (const frame of this.#frames) {
+					const frameItem = document.createElement("li");
+					frameItem.className = "plain-debug-call-stack-view-frame";
+					if (frame.id === this.#selectedFrameId) {
+						frameItem.classList.add(
+							"plain-debug-call-stack-view-frame-selected",
+						);
+					}
+					const frameButton = document.createElement("button");
+					frameButton.type = "button";
+					frameButton.className = "plain-debug-call-stack-view-frame-button";
+					const location =
+						frame.sourceName !== null
+							? `${frame.sourceName}:${frame.line}`
+							: `line ${frame.line}`;
+					frameButton.textContent = `${frame.name} (${location})`;
+					if (frame.id === this.#selectedFrameId) {
+						frameButton.setAttribute("aria-current", "true");
+					}
+					this._register(
+						addDisposableListener(frameButton, "click", () => {
+							this.#selectFrame(frame.id);
+						}),
+					);
+					frameItem.append(frameButton);
+					list.append(frameItem);
+				}
+			}
+		}
+		if (this.#threadsTruncated) {
+			const truncated = document.createElement("li");
+			truncated.className = "plain-debug-call-stack-view-truncated";
+			truncated.textContent = "Showing the first 4096 threads only.";
+			list.append(truncated);
 		}
 	}
 

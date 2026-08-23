@@ -71,6 +71,10 @@ function fakeBridge(
 				return result;
 			},
 		),
+		debugThreads: vi.fn(async () => ({
+			threads: [{ id: 1, name: "Main Thread" }],
+			truncated: false,
+		})),
 		debugStackTrace: vi.fn(async () => ({
 			stackFrames: [],
 			totalFrames: 0,
@@ -263,6 +267,33 @@ describe("DebugSessionController", () => {
 		expect(controller.state?.stoppedThreadId).toBeNull();
 	});
 
+	it("an exited thread event clears only the matching pause target", async () => {
+		const { bridge, emit } = fakeBridge();
+		const controller = new DebugSessionController(
+			bridge,
+			new DebugBreakpointStore(),
+		);
+		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
+		emit({
+			sessionId: "session-1",
+			event: "thread",
+			body: { reason: "started", threadId: 4 },
+		});
+		emit({
+			sessionId: "session-1",
+			event: "thread",
+			body: { reason: "exited", threadId: 9 },
+		});
+		expect(controller.state?.lastKnownThreadId).toBe(4);
+
+		emit({
+			sessionId: "session-1",
+			event: "thread",
+			body: { reason: "exited", threadId: 4 },
+		});
+		expect(controller.state?.lastKnownThreadId).toBeNull();
+	});
+
 	it("events for a different session id are ignored", async () => {
 		const { bridge, emit } = fakeBridge();
 		const controller = new DebugSessionController(
@@ -383,13 +414,14 @@ describe("DebugSessionController", () => {
 		expect(setBreakpointsCalls).toHaveLength(0);
 	});
 
-	it("stackTrace/scopes/variables/evaluate resolve to undefined with no live session, without calling the bridge", async () => {
+	it("threads/stackTrace/scopes/variables/evaluate resolve to undefined with no live session, without calling the bridge", async () => {
 		const { bridge } = fakeBridge();
 		const controller = new DebugSessionController(
 			bridge,
 			new DebugBreakpointStore(),
 		);
 
+		await expect(controller.threads()).resolves.toBeUndefined();
 		await expect(controller.stackTrace(1, null, null)).resolves.toBeUndefined();
 		await expect(controller.scopes(1)).resolves.toBeUndefined();
 		await expect(
@@ -398,19 +430,23 @@ describe("DebugSessionController", () => {
 		await expect(
 			controller.evaluate("1 + 1", null, "watch"),
 		).resolves.toBeUndefined();
+		expect(bridge.debugThreads).not.toHaveBeenCalled();
 		expect(bridge.debugStackTrace).not.toHaveBeenCalled();
 		expect(bridge.debugScopes).not.toHaveBeenCalled();
 		expect(bridge.debugVariables).not.toHaveBeenCalled();
 		expect(bridge.debugEvaluate).not.toHaveBeenCalled();
 	});
 
-	it("stackTrace/scopes/variables/evaluate delegate to the bridge scoped to the live session id", async () => {
+	it("threads/stackTrace/scopes/variables/evaluate delegate to the bridge scoped to the live session id", async () => {
 		const { bridge } = fakeBridge();
 		const controller = new DebugSessionController(
 			bridge,
 			new DebugBreakpointStore(),
 		);
 		await controller.start(ROOT_ID, "launch", STDIO_TARGET, "debugpy", {});
+
+		await controller.threads();
+		expect(bridge.debugThreads).toHaveBeenCalledWith("session-1");
 
 		await controller.stackTrace(2, 0, 20);
 		expect(bridge.debugStackTrace).toHaveBeenCalledWith("session-1", 2, 0, 20);

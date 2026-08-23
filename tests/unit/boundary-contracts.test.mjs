@@ -14676,6 +14676,40 @@ describe("Plain F100 S1 debug adapter confirmation command registration Harness"
 			"src-tauri/src/lib.rs must register debug::commands::debug_adapter_confirmation_revoke exactly once in generate_handler",
 		);
 	});
+
+	it("fails if debug_threads is missing from generate_handler", () => {
+		const missingRegistration = baselineCommandRustSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/lib.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							"            debug::commands::debug_threads,\n",
+							"",
+						),
+					}
+				: entry,
+		);
+		expect(validateDebugCommandRegistration(missingRegistration)).toContain(
+			"src-tauri/src/lib.rs must register debug::commands::debug_threads exactly once in generate_handler",
+		);
+	});
+
+	it("fails if debug_threads is rewired to another DAP request", () => {
+		const rewired = baselineCommandRustSources.map((entry) =>
+			entry.relativePath === "src-tauri/src/debug/commands.rs"
+				? {
+						...entry,
+						source: entry.source.replace(
+							'            "threads",\n',
+							'            "stackTrace",\n',
+						),
+					}
+				: entry,
+		);
+		expect(validateDebugCommandRegistration(rewired)).toContain(
+			"debug_threads must contain only its audited confirmation-service route",
+		);
+	});
 });
 
 describe("Plain F100 S4 runInTerminal boundary Harness", () => {

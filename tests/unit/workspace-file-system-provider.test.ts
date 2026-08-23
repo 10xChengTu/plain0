@@ -630,6 +630,9 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async debugStackTrace() {
 			throw new Error("unused");
 		},
+		async debugThreads() {
+			throw new Error("unused");
+		},
 		async debugScopes() {
 			throw new Error("unused");
 		},

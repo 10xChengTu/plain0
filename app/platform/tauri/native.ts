@@ -96,6 +96,7 @@ import {
 	decodeDebugSessionStartResult,
 	decodeDebugSetBreakpointsResult,
 	decodeDebugStackTraceResult,
+	decodeDebugThreadsResult,
 	decodeDebugStepInTargetsResult,
 	decodeDebugStepVoid,
 	decodeDebugVariablesResult,
@@ -1470,6 +1471,12 @@ export function createNativeBridge(): PlainBridge {
 			);
 			return decodeDebugSetBreakpointsResult(
 				await invoke<unknown>("debug_set_breakpoints", { request }),
+			);
+		},
+		debugThreads: async (sessionId) => {
+			const request = frozenDebugSessionIdRequest(sessionId);
+			return decodeDebugThreadsResult(
+				await invoke<unknown>("debug_threads", { request }),
 			);
 		},
 		debugStackTrace: async (sessionId, threadId, startFrame, levels) => {

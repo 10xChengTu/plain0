@@ -16,6 +16,8 @@ import type {
 	DebugSetBreakpointsResult,
 	DebugStackFrame,
 	DebugStackTraceResult,
+	DebugThread,
+	DebugThreadsResult,
 	DebugStepInTarget,
 	DebugStepInTargetsResult,
 	DebugVariable,
@@ -67,6 +69,23 @@ function hasExactKeys(
 		keys.length === expected.length &&
 		keys.every((key) => typeof key === "string" && expected.includes(key))
 	);
+}
+
+function hasExactDataKeys(
+	value: Record<string, unknown>,
+	expected: readonly string[],
+): boolean {
+	if (!hasExactKeys(value, expected)) return false;
+	const descriptors = Object.getOwnPropertyDescriptors(value);
+	return expected.every((key) => {
+		const descriptor = descriptors[key];
+		return (
+			descriptor !== undefined &&
+			"value" in descriptor &&
+			descriptor.get === undefined &&
+			descriptor.set === undefined
+		);
+	});
 }
 
 // Defensive encode-side ceilings — mirrors `src-tauri/src/debug/confirm_store.rs`'s
@@ -562,6 +581,42 @@ export function decodeDebugSetBreakpointsResult(
 	);
 	rejectProxyObject(value);
 	return Object.freeze({ breakpoints });
+}
+
+const MAX_DEBUG_THREADS = 4_096;
+
+function decodeDebugThread(entry: unknown): DebugThread {
+	if (
+		!isPlainObject(entry) ||
+		!hasExactDataKeys(entry, ["id", "name"]) ||
+		!isSafeInteger(entry.id) ||
+		typeof entry.name !== "string"
+	) {
+		return violation();
+	}
+	const thread = { id: entry.id, name: entry.name };
+	rejectProxyObject(entry);
+	return Object.freeze(thread);
+}
+
+export function decodeDebugThreadsResult(value: unknown): DebugThreadsResult {
+	if (
+		!isPlainObject(value) ||
+		!hasExactDataKeys(value, ["threads", "truncated"]) ||
+		typeof value.truncated !== "boolean"
+	) {
+		return violation();
+	}
+	const threads = ownObjectArraySnapshot(
+		value.threads,
+		MAX_DEBUG_THREADS,
+		decodeDebugThread,
+	);
+	if (new Set(threads.map((thread) => thread.id)).size !== threads.length) {
+		return violation();
+	}
+	rejectProxyObject(value);
+	return Object.freeze({ threads, truncated: value.truncated });
 }
 
 /** Encodes `debug_stack_trace`'s request. */

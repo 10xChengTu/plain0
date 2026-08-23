@@ -7,6 +7,7 @@ import {
 	decodeDebugDisassembleResult,
 	decodeDebugStepInTargetsResult,
 	decodeDebugStepVoid,
+	decodeDebugThreadsResult,
 	frozenDebugAdapterConfirmationRequest,
 	frozenDebugDisassembleRequest,
 	frozenDebugSessionStartRequest,
@@ -15,6 +16,67 @@ import {
 	frozenDebugStepInTargetsRequest,
 	frozenDebugThreadRequest,
 } from "../../app/platform/tauri/debug-codec";
+
+describe("decodeDebugThreadsResult", () => {
+	it("freezes a strict bounded unique thread snapshot", () => {
+		const result = decodeDebugThreadsResult({
+			threads: [
+				{ id: 7, name: "main" },
+				{ id: 9, name: "worker" },
+			],
+			truncated: false,
+		});
+		expect(result).toEqual({
+			threads: [
+				{ id: 7, name: "main" },
+				{ id: 9, name: "worker" },
+			],
+			truncated: false,
+		});
+		expect(Object.isFrozen(result)).toBe(true);
+		expect(Object.isFrozen(result.threads)).toBe(true);
+		expect(Object.isFrozen(result.threads[0])).toBe(true);
+	});
+
+	it("rejects duplicate malformed oversized and accessor results", () => {
+		for (const value of [
+			{
+				threads: [
+					{ id: 1, name: "one" },
+					{ id: 1, name: "two" },
+				],
+				truncated: false,
+			},
+			{ threads: [{ id: 1 }], truncated: false },
+			{
+				threads: Array.from({ length: 4_097 }, (_, id) => ({
+					id,
+					name: `${id}`,
+				})),
+				truncated: true,
+			},
+			Object.defineProperty({ truncated: false }, "threads", { get: () => [] }),
+			{
+				threads: [
+					Object.defineProperty({ name: "one" }, "id", { get: () => 1 }),
+				],
+				truncated: false,
+			},
+		]) {
+			expect(() => decodeDebugThreadsResult(value)).toThrowError(
+				expect.objectContaining({ code: "IPC_CONTRACT_VIOLATION" }),
+			);
+		}
+	});
+
+	it("rejects a Proxy-wrapped result", () => {
+		expect(() =>
+			decodeDebugThreadsResult(
+				new Proxy({ threads: [], truncated: false }, {}),
+			),
+		).toThrow();
+	});
+});
 
 describe("frozenDebugAdapterConfirmationRequest", () => {
 	it("accepts a well-formed stdio descriptor", () => {

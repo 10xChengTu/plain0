@@ -2,8 +2,8 @@
  * `F100` S3 — the real session controller: the first production consumer of
  * `debug_launch`/`debug_attach`/`debug_disconnect` (`F100` S2's own report
  * disclosed these had zero frontend callers) plus this slice's own
- * interactive commands (`debug_set_breakpoints`/`debug_stack_trace`/
- * `debug_scopes`/`debug_variables`/`debug_evaluate`). Deliberately DOM-free
+ * interactive commands (`debug_set_breakpoints`/`debug_threads`/
+ * `debug_stack_trace`/`debug_scopes`/`debug_variables`/`debug_evaluate`). Deliberately DOM-free
  * and Workbench-service-free — same testability discipline as
  * `plain-debug-adapter-confirmation.ts`/`plain-git-blame.ts`'s own
  * controller classes — so its event-filtering and state-transition logic is
@@ -25,8 +25,9 @@
  *
  * `state.stoppedThreadId` becomes non-`null` the instant a real `stopped`
  * event names a thread, and `null` again on `continued` — the call-stack
- * view's own "re-fetch on stop" wiring reacts to this transition, not to a
- * raw event stream itself. `plain/sessionEnded` (Plain's own synthetic
+ * view's own "re-fetch threads and the selected stack on stop" wiring reacts
+ * to this transition, not to a raw event stream itself. `plain/sessionEnded`
+ * (Plain's own synthetic
  * "transport died" signal — never a real DAP event name, see
  * `src-tauri/src/debug/session.rs`'s module doc) tears down `state` to
  * `null` outright. A real `terminated` DAP event is first forwarded to
@@ -50,6 +51,7 @@ import type {
 	DebugScopesResult,
 	DebugSetBreakpointsResult,
 	DebugStackTraceResult,
+	DebugThreadsResult,
 	DebugStepInTargetsResult,
 	DebugVariablesFilter,
 	DebugVariablesResult,
@@ -70,6 +72,7 @@ export type DebugSessionBridge = Pick<
 	| "debugAttach"
 	| "debugDisconnect"
 	| "debugSetBreakpoints"
+	| "debugThreads"
 	| "debugStackTrace"
 	| "debugScopes"
 	| "debugVariables"
@@ -206,15 +209,23 @@ export class DebugSessionController {
 			return;
 		}
 		if (event.event === "thread") {
-			// A real `started` thread event is the only other place a valid
-			// thread id can become known before the debuggee has ever actually
-			// stopped once — this domain does not otherwise track the full
-			// thread list (no `threads` request is implemented), but grabbing
-			// this one field from an event we already forward regardless costs
-			// nothing and gives `pause` a real target sooner.
 			const threadId = threadIdFromStoppedBody(event.body);
-			if (threadId !== null) {
+			const reason =
+				typeof event.body === "object" &&
+				event.body !== null &&
+				!Array.isArray(event.body)
+					? (event.body as Record<string, unknown>).reason
+					: undefined;
+			if (reason === "started" && threadId !== null) {
 				this.#setState({ ...this.#state, lastKnownThreadId: threadId });
+			} else if (reason === "exited" && threadId !== null) {
+				this.#setState({
+					...this.#state,
+					lastKnownThreadId:
+						threadId === this.#state.lastKnownThreadId
+							? null
+							: this.#state.lastKnownThreadId,
+				});
 			}
 			return;
 		}
@@ -387,6 +398,13 @@ export class DebugSessionController {
 			startFrame,
 			levels,
 		);
+	}
+
+	async threads(): Promise<DebugThreadsResult | undefined> {
+		if (this.#state === null) {
+			return undefined;
+		}
+		return this.#bridge.debugThreads(this.#state.sessionId);
 	}
 
 	async scopes(frameId: number): Promise<DebugScopesResult | undefined> {

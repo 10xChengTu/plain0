@@ -57,3 +57,13 @@ F100 已交付 Rust 拥有的通用 DAP 客户端：`Content-Length` 严格分�
 7. **S7 收口**：`E2E-027` 登记（暂缓）、progress/features 例外收账、完整门禁与全量 Browser 回归。
 
 每个切片先通过自己的最小验证并独立提交，再开始下一项；F210 关闭前不切换 F220。
+
+## F270 实施补记：DAP threads 缺口闭合（2026-08-24）
+
+F230 完成度审计发现 `docs/product-scope.md:60` 的 `threads` 从未进入生产路径；F100 只从 stopped/thread-started 事件保存一个 id，Call Stack 因此是假定单线程。F270 的裁定是补齐标准 DAP 请求和线程 UI，不引入 vendor debug service：
+
+- Rust 新增 `debug_threads`，只发送固定 `threads` command 和空 arguments。`parse_threads_response` 要求每项有唯一整数 id 与字符串 name，最多返回 4096 项并以 `truncated` 明示截断；Tauri handler 的 command literal、空 arguments、parser 和唯一注册由 architecture hostile mutation 锁定。
+- TypeScript wire decoder要求精确 own-data keys，拒绝 accessor、Proxy、重复 id 与超限数组；native/browser bridge 只接收 sessionId。`DebugSessionController.threads()` 仅对 live session 可用，thread started/exited 修正 pause target 并驱动视图刷新。
+- 自建 Call Stack 在 stopped 时先取 thread snapshot，默认选择 stopped event 指定的线程，只为当前选中线程请求 stackTrace；用户点击其他线程只切换浏览栈，不改写执行控制目标。continued、terminated 与 session-ended 清空线程/帧/frame selection，避免旧 session 或运行态残留。
+
+明确排除：线程冻结/单线程 stepping 的 `singleThread` 变体、线程排序/分组策略、跨停止点缓存所有线程的 stackTrace。当前实现保留 adapter 顺序并对选中线程惰性读取，满足 product-scope 的基础 threads 能力且维持有界预算。

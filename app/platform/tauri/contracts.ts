@@ -735,7 +735,7 @@ export interface DebugAdapterConfirmationState {
 // ---------------------------------------------------------------------
 // `F100` S3 — the real session-lifecycle and interactive-debugging wire
 // shapes (`debug_launch`/`debug_attach`/`debug_disconnect`/
-// `debug_set_breakpoints`/`debug_stack_trace`/`debug_scopes`/
+// `debug_set_breakpoints`/`debug_threads`/`debug_stack_trace`/`debug_scopes`/
 // `debug_variables`/`debug_evaluate`). Mirrors `src-tauri/src/debug/dto.rs`'s
 // own S2/S3 wire shapes.
 // ---------------------------------------------------------------------
@@ -817,6 +817,20 @@ export interface DebugBreakpointResult {
 
 export interface DebugSetBreakpointsResult {
 	readonly breakpoints: readonly DebugBreakpointResult[];
+}
+
+/** One DAP thread. `id` is the opaque adapter-issued identity used by
+ * `threads` consumers and every thread-scoped follow-up request. */
+export interface DebugThread {
+	readonly id: number;
+	readonly name: string;
+}
+
+/** `debug_threads`'s bounded response. `truncated` means the adapter reported
+ * more than Plain's fixed UI/result budget, not that another page exists. */
+export interface DebugThreadsResult {
+	readonly threads: readonly DebugThread[];
+	readonly truncated: boolean;
 }
 
 /** One DAP `StackFrame` — `sourcePath`/`sourceName` are both `null` for a
@@ -2540,6 +2554,8 @@ export interface PlainBridge {
 		path: string,
 		breakpoints: readonly DebugBreakpointRequest[],
 	): Promise<DebugSetBreakpointsResult>;
+	/** Lists the live adapter's bounded thread snapshot. */
+	debugThreads(sessionId: string): Promise<DebugThreadsResult>;
 	/** Fetches (a page of) `threadId`'s call stack. `startFrame`/`levels`
 	 * (either or both `null` meaning "from the top"/"every remaining frame")
 	 * are DAP's own `StackTraceArguments` pagination fields. */

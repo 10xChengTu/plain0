@@ -190,6 +190,7 @@ Workbench model ← Plain feature service ← typed bridge/events
 - Rust transport 实现按字节计算的 `Content-Length` framing、request sequence、长度上限、超时、取消、生命周期和事件广播。
 - stdio adapter 由 `tokio::process` 管理并持续消费 stderr；TCP adapter 仅连接用户确认的地址。
 - launch/attach 的 adapter-specific 配置保持 JSON passthrough；核心 UI 只依赖标准 DAP capabilities。
+- 会话停止时 Call Stack 先通过专用 `threads` 路由取得最多 4096 个唯一 adapter-issued thread id/name，再只为当前显式选中线程惰性请求 `stackTrace`；浏览其他线程不改写执行控制的真实 `stoppedThreadId`。continued/terminated/session-ended 清空线程、帧与 frame selection，thread started/exited 事件只触发新 snapshot，不把退出线程保留为 Pause 目标。
 - workspace 未信任或首次启动 adapter 时必须明确确认可执行文件与参数。
 
 ### 主题包

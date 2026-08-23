@@ -568,8 +568,7 @@
 					"The Disassembly view (`supportsDisassembleRequest`, real and present on lldb-dap's own capability set) is explicitly excluded from v1, matching the frozen research document's own scope line; DAP's own in-flight request cancellation is absent because the protocol itself defines no such mechanism, not because of an implementation gap; `Plain: Start Debugging` always uses the first configuration in launch.json with no QuickPick for multiple configurations; the Watch view does not support nested `variablesReference` expansion of a compound evaluate result (only its top-level `result` string is shown); hit-count conditional breakpoints (`hitCondition`) are not implemented, matching the frozen research document's own S3 scope line.",
 					"`output_gate`'s discard policy is a per-category oldest-bytes-first budget (`DEBUG_OUTPUT_MERGE_CAP_BYTES` = 1 MiB per category, `DEBUG_OUTPUT_MAX_CATEGORIES` = 16), not a single global memory budget -- worst case, a malicious/malformed adapter that concentrates output into a small number of categories and drives each to its cap can hold up to 16 MiB rather than one bounded global figure; judged acceptable (still a finite bound, and 16 already generously exceeds the ~5 categories the real DAP specification defines) and not tightened further. No test drives a single DAP message to the real 64 MiB `MAX_DAP_MESSAGE_BYTES` boundary itself -- this feature's own real large-object benchmarks (2000-frame stack, 50,000-element array) prove real large-object scenarios sit far below this ceiling, not how the framing layer behaves exactly at or beyond it, which was not required by this slice's own acceptance scope.",
 					"Zeroing the monaco-vscode-api bundle migration debt remains F110; Windows and Linux native packaging, and the macOS code-signing entitlement this feature's own research surfaced as a prerequisite for native-debugger acceptance, remain F120.",
-					"This feature adds no new @codingame/monaco-vscode-* dependency at all -- the pinned runtime dependency count is unchanged at 17, and the 15 codingame packages in package.json are exactly those F010-F090 already pinned. That is the opposite of F090, which did adopt multi-diff-editor-service-override, and it is not a stylistic preference: the debug-service-override is structurally unusable here rather than merely Chat-coupled. contributes.debuggers and contributes.breakpoints are ExtensionsRegistry extension points, and with no extensions and a NullExtensionService that activates nothing, ConfigurationManager.getDebugger(type) is permanently empty, so the type-resolution path is dead even with Chat and Task stripped out. DebugService additionally constructs AdapterManager and ConfigurationManager directly rather than taking them injected, so neither can be replaced. The debug UI, session state machine, framing and transports are therefore all self-built.",
-					"The DAP `threads` request (product-scope.md:60) is not implemented: app/features/debug/plain-debug-session.ts:212's own comment states no `threads` request is sent; the session only ever tracks a single threadId captured from `stopped`/`thread`-started events, and there is no thread-list UI. A genuinely multi-threaded debuggee session is represented only under a single-thread assumption. This narrowing was not previously registered in platformGaps, progress.md, or either debug research doc. Recorded per the F230 S1 completion audit (docs/completion-audit.md)."
+					"This feature adds no new @codingame/monaco-vscode-* dependency at all -- the pinned runtime dependency count is unchanged at 17, and the 15 codingame packages in package.json are exactly those F010-F090 already pinned. That is the opposite of F090, which did adopt multi-diff-editor-service-override, and it is not a stylistic preference: the debug-service-override is structurally unusable here rather than merely Chat-coupled. contributes.debuggers and contributes.breakpoints are ExtensionsRegistry extension points, and with no extensions and a NullExtensionService that activates nothing, ConfigurationManager.getDebugger(type) is permanently empty, so the type-resolution path is dead even with Chat and Task stripped out. DebugService additionally constructs AdapterManager and ConfigurationManager directly rather than taking them injected, so neither can be replaced. The debug UI, session state machine, framing and transports are therefore all self-built."
 				],
 				"acceptanceResults": [
 					{
@@ -1431,6 +1430,54 @@
 					{
 						"acceptance": "Rust codec unit architecture and real Workbench Browser search scenarios pass",
 						"result": "Achieved by 6 Rust fixtures, 639 focused frontend/architecture tests, static gates and 2 real Workbench Browser scenarios."
+					}
+				]
+			}
+		},
+		{
+			"id": "F270",
+			"name": "DAP threads and multi-thread call stack",
+			"phase": 7,
+			"status": "complete",
+			"acceptance": [
+				"The active debug session can issue DAP threads through a strict bounded command and codec",
+				"Call Stack renders adapter thread identity and lazily loads the selected thread stack",
+				"Stopped running terminated and thread-event transitions cannot leak stale thread or frame state",
+				"Rust unit architecture controller and real Workbench Browser multi-thread scenarios pass"
+			],
+			"evidence": {
+				"commands": [
+					"cargo test --manifest-path src-tauri/Cargo.toml parse_threads_response",
+					"pnpm exec vitest run tests/unit/debug-codec.test.ts tests/unit/plain-debug-session.test.ts",
+					"pnpm exec vitest run tests/unit/boundary-contracts.test.mjs",
+					"pnpm exec playwright test tests/browser/workspace.spec.ts --grep 'real stopped event drives the call stack'",
+					"pnpm typecheck && pnpm lint && pnpm check:architecture"
+				],
+				"results": [
+					"Rust parser tests passed 2/2 for normal adapter extension fields, missing identity, duplicate identity and 4097-entry truncation. Debug codec/controller tests passed 71/71, including getter/Proxy/duplicate/oversized rejection and live-session delegation/state cleanup.",
+					"Architecture hostile mutations passed 543/543 and prove the fixed threads command literal, empty arguments, parser route and unique generate_handler registration cannot be silently rewired.",
+					"The real Workbench Browser scenario passed 1/1: one stopped event fetched two adapter threads, switching Main/Worker/Main emitted stackTrace threadIds [1,2,1], and continued removed all thread/frame DOM state."
+				],
+				"nativeScenarios": [
+					"No separate desktop-only mechanism was introduced: the command/parser is exercised against the real Rust DAP session transport and the self-built Workbench view runs without substitution in Browser. The later E2E-027 debug matrix may add a real multi-thread adapter observation as a regression dimension."
+				],
+				"platformGaps": [],
+				"acceptanceResults": [
+					{
+						"acceptance": "The active debug session can issue DAP threads through a strict bounded command and codec",
+						"result": "Achieved. Only a validated sessionId crosses IPC; Rust sends fixed threads/empty arguments and returns at most 4096 unique ids, while the frontend rejects non-own data, duplicate, Proxy and oversized payloads."
+					},
+					{
+						"acceptance": "Call Stack renders adapter thread identity and lazily loads the selected thread stack",
+						"result": "Achieved. The stopped thread is selected by default; clicking another thread requests only that thread's stack and never changes stoppedThreadId or execution-control routing."
+					},
+					{
+						"acceptance": "Stopped running terminated and thread-event transitions cannot leak stale thread or frame state",
+						"result": "Achieved. Refresh tokens reject late replies; continued/session end clear threads, frames and frame selection; thread exited clears a matching Pause target and refreshes the snapshot."
+					},
+					{
+						"acceptance": "Rust unit architecture controller and real Workbench Browser multi-thread scenarios pass",
+						"result": "Achieved by 2 Rust parser tests, 71 codec/controller tests, 543 architecture tests and one real Workbench multi-thread scenario."
 					}
 				]
 			}
