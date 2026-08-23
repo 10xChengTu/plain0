@@ -669,6 +669,8 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/multiDiffEditor/browser/multiDiffSourceResolverService.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/layout/browser/layoutService",
+	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/layout/browser/layoutService.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/textfile/common/textEditorService.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/textMate/browser/textMateTokenizationFeature.service",
 	"app/main.ts:@codingame/monaco-vscode-api/vscode/vs/workbench/services/themes/common/workbenchThemeService.service",
