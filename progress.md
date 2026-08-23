@@ -5,8 +5,9 @@
 ## 当前状态
 
 - 阶段：7 — 审计缺口闭合与真实桌面验收。
-- WIP：`F250` Rust-owned Workbench layout persistence。
-- 当前最小工作项：`F250` S2——执行新登记的 `E2E-029` 真实 Tauri 布局矩阵；与既有 `E2E-025`/`E2E-026`/`E2E-027` 同批构建并逐条执行，明确跳过用户排除的 `E2E-028` Remote SSH。发现真实缺陷时先回到最小修复提交并重跑受影响矩阵。
+- WIP：无。
+- 当前最小工作项：无；`F250` 与 `E2E-029` 已收账。下一项按审计顺序进入 F090 遗留的 Git history message/author/sha 搜索闭合，E2E-025/026/027 继续使用当前真实构建逐条执行；明确跳过用户排除的 `E2E-028` Remote SSH。
+- [x] `F250` S2F 真实桌面收账：最终新构建通过 E2E-029 完整矩阵。secondary 冷启动恢复 Search/左侧栏/隐藏 panel；反序 primary 冷启动恢复隐藏右侧栏与 active Terminal panel；两根组合生成独立第三 workspace 分区并在冷启动恢复两个 root，关闭到 EMPTY 后回到左 Explorer/隐藏 panel 且 `lastRecentId=null`。profile 尺寸共享为 Side Bar 377/Panel 330，三种 root-set 的 workspace 状态不串联。每次 Cmd+Q 后 Plain 进程为零，七个保留的 layout JSON 均为 schema 1 且不含原生路径、fixture、认证、credential 或 history 文本。F250 转 `complete`，WIP 短暂归零。
 - [x] `F250` S2A 真实布局位置隔离修复：E2E-029 首轮真实 WKWebView 发现 Primary Side Bar 的左右位置仍由 vendor `workbench.sideBar.location` 全局 setting 驱动，导致全新 workspace 继承上一 root-set 的位置；此前 F250 S1 的 workspace `workbench.sideBar.position` 会在加载时被旧 setting 覆盖。新增固定 `monaco-vscode-workbench-service-override` patch，移除旧 setting 对 runtime state 的加载/监听/回写权威；扩展既有 API patch，让 Move/Toggle Side Bar 命令直接调用 Workbench runtime layout 并同步 `plain.workbench.sideBarPosition` context，`main.ts` 从当前 workspace 恢复值初始化该 context。patch 闭集由 10 包增至 11 包并继续锁定精确 SHA、integrity、lock graph 与 hunk shape。聚焦 28 个 storage/patch 单测、typecheck 与 Browser 真 Workbench 位置 right→reload right→left→reload left 场景通过；继续重建真实 Plain.app 并重跑 E2E-029。
 - [x] `F250` S2B 原生关闭握手去除重复 Web confirm veto：真实 E2E-029 复测确认 Workbench 在 Tauri WebView 中仍采用 `window.confirmBeforeClose=keyboardOnly`，命令/快捷键后的正常红色关窗或 `Cmd+Q` 会先被 `veto.confirmBeforeClose` 拒绝，因而没有执行最终 layout flush。Plain 的产品默认现已精确钉为 `never`；真正的 dirty working-copy、backup、storage 与 will-shutdown veto 全部继续由 Plain 原生双阶段生命周期处理。产品配置闭集新增反向变异合同；聚焦 topology/lifecycle 66/66、typecheck、lint、architecture guard 及 Browser layout/native-close 回归 1/1 通过。继续用新构建重跑真实桌面 E2E-029。
 - [x] `F250` S2C live topology 的 workspace runtime 布局隔离：真实 E2E-029 打开全新 secondary 时，Rust storage 已切到空的新分区，但已构造的 Workbench layout/view runtime 没有重新读取 workspace scope，导致 secondary 继承 primary 的右侧栏、可见 Terminal panel 与 active container。分区 seed 现在把审计快照显式投影到既有 layout/pane runtime；空分区固定左侧 Explorer、隐藏 panel 与 Debug Console 默认 active container，已有分区恢复自己的位置、可见性与 active container，profile 尺寸/pins 继续共享；首次 EMPTY→workspace 保留 Workbench 原启动行为，避免无意义改变首开流程。聚焦 layout/topology 单测 69/69、typecheck、lint、architecture guard 及 Browser 既有 multi-root + layout close + fresh root-set 三场景 3/3 通过；继续用新构建重跑真实桌面 secondary/反序/multi-root 矩阵。
@@ -631,7 +632,8 @@
 
 ## 下一步
 
-1. 本项目原定的最后一个 feature（`F130`）和全部可执行 E2E 均已完成，没有下一个已规划的实现或验收工作项。第八次真实 Actions run `30649792999`（`main@954fc718`）整体成功：Ubuntu 完整 `pnpm check` 与 Browser E2E **99/99** 全绿；固定 `macos-15` 的 `build-macos` 成功完成 Zig/Ghostty prewarm、Tauri release 构建、真实 `Plain.app` 目录检查与 `codesign -dv`。`E2E-012` 项 3 的 DMG CI 对照仍为明确的可选项，项 4 的跨机器公证仍受 Apple Developer Program 决策阻塞；这两项均不属于尚可执行但未完成的验收。`jschardet` LGPL-2.1+ 动态链接豁免适用性、`vscode-codicons` 精确 commit/version 比对、Ghostty vendor 二进制级 Nerd Fonts 链接确认三项仍标注为需人工确认，见「已知风险」。
+1. 按非发布缺口闭合顺序新增并完成 F090 遗留的 Git history message/author/sha 搜索工作项，再闭合 F100 DAP threads 与 F030 Monaco 编辑能力专项证据；每项继续遵守 WIP=1、独立验证和独立提交。
+2. 使用当前真实 Tauri 构建执行 E2E-025 Terminal、E2E-026 Search 与 E2E-027 Debug；E2E-028 Remote SSH 按用户明确排除不执行。全部完成后跑最终全量 Browser 与 `pnpm check`，再统一清理构建产物。
 
 ## 当前验收命令
 

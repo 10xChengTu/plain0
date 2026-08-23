@@ -1,6 +1,6 @@
 # 端到端桌面验收交接清单（Codex 执行）
 
-更新时间：2026-08-24（E2E-029 已登记待执行；本轮明确不执行 E2E-028 Remote SSH）
+更新时间：2026-08-24（E2E-029 已完成；本轮明确不执行 E2E-028 Remote SSH）
 
 ## 分工模式
 
@@ -779,7 +779,7 @@ fixture（远程主机上创建，本条专用临时目录/仓库，不使用远
 
 ### E2E-029 · F250 Rust-owned Workbench 布局冷启动、关窗刷新与 workspace 隔离矩阵
 
-状态：**待执行**。Browser process-boundary 已用真实 Workbench UI 验证侧栏可见性经 native close flush 后在 reload 恢复，并逐调用确认 `layout_write` 先于 `lifecycle_complete_close`；本条补真实 Rust app-local-data、真实 WKWebView、完整进程退出和 root-set 稳定 identity 证据。
+状态：**已完成（2026-08-24）**。Browser process-boundary 已用真实 Workbench UI 验证侧栏可见性经 native close flush 后在 reload 恢复，并逐调用确认 `layout_write` 先于 `lifecycle_complete_close`；本条进一步完成真实 Rust app-local-data、真实 WKWebView、完整进程退出和 root-set 稳定 identity 证据。
 
 前置条件：
 
@@ -795,6 +795,13 @@ fixture（远程主机上创建，本条专用临时目录/仓库，不使用远
 5. 在应用退出后检查精确进程：Plain、PTY/shell 和本条启动的其他子进程均为零；只读核对 `layout/profile.json` 与新增 `layout/workspace-<digest>.json` 都是 schema 1、有界 allowlist key、无原生路径/编辑内容/认证或历史数据。fixture、截图、`dist`、`test-results` 与 `src-tauri/target` 清理，保留并报告用户 app-data 中由真实验收产生的布局状态文件。
 
 完成后：把真实结果回写 `features.json` F250 的 `nativeScenarios`、`platformGaps` 与四条 `acceptanceResults`；通过后 F250 才能转 `complete`。
+
+执行结果：**全部通过**。
+
+- 首轮到最终复测共发现并修复五个真实缺陷：vendor 全局 `workbench.sideBar.location` 覆盖 workspace 位置、Workbench Web close confirmation 阻止原生最终 flush、live root-set 切换只换 storage 未投影 runtime、built-mode 冷启动把非默认 active container 改回 Explorer，以及布局投影早于 `workspaceTopologyCoordinator.completeInitial()` 的最终启动顺序竞态。每项均先落独立修复提交并通过聚焦自动化，再重建同一绝对 `Plain.app` 复测。
+- secondary 单根冷启动恢复 Search active、左侧可见 Side Bar、隐藏 Panel；反序切回 primary 后，冷启动恢复隐藏的右侧 Side Bar、可见且 active 的 Terminal Panel。共享 profile 尺寸保持 Side Bar 377、Panel 330，workspace 可见性、位置和 active container 未串根。
+- primary + secondary 生成独立第三分区 `workspace-d1e75a93ea2c6debb8097e4c5c840c9bd417d4c0bf99c6ae921f7ee02ee72e24.json`，不同于 primary `workspace-c5e17912059a6ab0760603a001e7162c551763e928e34170d68d3dd6b5305059.json` 与 secondary `workspace-74af8a65c9101b96d57a56b83ee1f5f8b033751f35c7bdcf7bf4efb8d6f26e69.json`。全新多根使用左 Explorer、可见 Side Bar、隐藏 Panel 和 dormant Debug Console 默认值；冷启动仍显示两个 root 并恢复同一第三分区。关闭到 EMPTY 后 UI 回到左 Explorer/可见 Side Bar/隐藏 Panel，`workspaces.plain.json.lastRecentId` 为 `null`。
+- 每次正常 `Cmd+Q` 后精确进程检查均为零；本条没有创建 PTY/shell。保留的 `layout/` 七个 JSON 全部为 schema 1，检索不到原生路径、fixture 名、认证、credential 或 history 文本。按前置要求没有删除或覆盖用户 app-data；本条 fixture 已清理，`dist`/`src-tauri/target` 暂留给同批 E2E-025/026/027，批次结束后统一清理。
 
 ## 后续条目（随切片追加）
 
@@ -819,4 +826,4 @@ fixture（远程主机上创建，本条专用临时目录/仓库，不使用远
 - F200 S1–S3（搜索入口命令/快捷键与 case/word 开关、Rust 捕获组替换展开、正则能力背书与跳过/截断可见状态）自动化两层已闭合；真实桌面 `Cmd/Ctrl+Shift+F`/`Cmd/Ctrl+Shift+H` 键位打开聚焦、Aa/全字开关真实请求、正则捕获组模板 Replace All 真实落盘与越界组 fail-closed 零写入、真实 >8 MiB 大文件与二进制文件跳过提示、20,000 结果截断提示、真实 undo 逐文件回滚与退出后零残留进程矩阵已登记为 E2E-026（**待执行**）；按用户 2026-08-04 指示，E2E-026 与 E2E-025 一并暂缓、攒批统一执行，F200 同样按例外收账模式转 `complete`，唯一 WIP 切到 F210。
 - F210 S1–S6（launch 配置 QuickPick 选择器、共享 Watch/Variables 树展开、hit-count 断点、step-in targets、只读 disassembly 视图、tcpSpawn spawn-then-connect 编排）自动化两层已闭合；真实桌面多配置选择、真实 debugpy hit-count 命中计数、真实嵌套 Watch 对象展开、step-in targets 能力核实、真实 debugpy spawn-then-connect（覆盖端口延迟就绪与进程早退）与退出后零残留进程矩阵已登记为 E2E-027（**待执行**）；`lldb-dap` 原生半边（disassembly、原生 step-in targets）如实登记双重阻塞（攒批暂缓 + F120 签名 entitlement 前提，两者相互独立）。按用户 2026-08-04 指示，E2E-027 与 E2E-025/E2E-026 一并暂缓、攒批统一执行，F210 同样按例外收账模式转 `complete`，唯一 WIP 切到 F220。
 - F220 S1–S7（含 S3B：SSH 会话与信任底座、root 后端封闭枚举化、SFTP 远程文件系统、远程生命周期、远程终端、远程 Git 核心子集、远程 DAP）自动化两层已闭合；真实远程主机 ssh-agent 认证、首次指纹确认与 pin、SFTP 工作区读写、断连 fail closed 与显式重连、冷启动需要重连、远程终端/Git/DAP、指纹变化硬失败与退出后本地/远程零残留矩阵已登记为 E2E-028（**待执行**）；本条额外要求执行方可控的真实可达 SSH 主机（本机 sshd 或局域网主机），是它与仅需真实 Tauri 构建的 E2E-025/026/027 的结构性差异。按用户指示，E2E-028 与 E2E-025/E2E-026/E2E-027 一并暂缓、攒批统一执行，F220 同样按例外收账模式转 `complete`，唯一 WIP 切到 F230。
-- F250 的窄布局快照、启动前 hydration、native close 最终 flush 与 topology-commit 后 workspace 分区切换已通过 unit/Rust/Browser process-boundary；真实 Rust app-data 冷启动、反序 roots 与多根隔离矩阵登记为 E2E-029（**待执行**）。
+- F250 的窄布局快照、启动前 hydration、native close 最终 flush 与 topology-commit 后 workspace 分区切换已通过 unit/Rust/Browser process-boundary；真实 Rust app-data 冷启动、反序 roots 与多根隔离矩阵 E2E-029 已完成，F250 已转 `complete`。

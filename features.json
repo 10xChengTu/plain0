@@ -1343,13 +1343,51 @@
 			"id": "F250",
 			"name": "Rust-owned Workbench layout persistence",
 			"phase": 7,
-			"status": "in_progress",
+			"status": "complete",
 			"acceptance": [
 				"Only an audited bounded set of Workbench layout and view-arrangement keys is persisted by Rust",
 				"Persisted layout is hydrated before Workbench initialization and final native shutdown waits for its flush",
 				"Profile layout and stable-workspace layout restore visibility positions sizes active containers pins and view arrangement without cross-workspace attachment",
 				"Unit Browser process-boundary and real Tauri restart scenarios pass without WebView storage dependence"
-			]
+			],
+			"evidence": {
+				"commands": [
+					"pnpm exec vitest run tests/unit/plain-layout-storage-service.test.ts tests/unit/workspace-topology-contracts.test.mjs",
+					"pnpm typecheck && pnpm lint && pnpm check:architecture",
+					"pnpm exec playwright test tests/browser/workspace.spec.ts --grep 'restores audited Workbench layout|resets workspace-scoped layout'",
+					"pnpm tauri:build:e2e",
+					"E2E-029 through Computer Use against src-tauri/target/debug/bundle/macos/Plain.app"
+				],
+				"results": [
+					"The bounded layout codec, PlainLayoutStorageService, Rust layout domain and architecture contracts persist only the audited profile/workspace keys. Focused layout/topology validation passed 71/71 tests, typecheck, lint and architecture over 128 app and 215 Rust sources with 28 pinned runtime dependencies.",
+					"The two focused real-Workbench Browser scenarios passed 2/2, covering native-close ordering, cold process reload with Search active, and a live topology transition to a fresh root-set partition.",
+					"E2E-029 repeatedly exposed and drove five real fixes: vendor global side-bar position authority, duplicate Web close confirmation, live runtime state leakage across root sets, cold-start active-container overwrite, and the final initial-topology/projection ordering race. The rebuilt debug Plain.app then passed the complete reverse-order and multi-root matrix."
+				],
+				"nativeScenarios": [
+					"E2E-029 completed on macOS with the real Rust app-data store and WKWebView. A secondary single-root cold start restored Search active with a visible left side bar and hidden panel; the reverse primary cold start restored its hidden right side bar and visible Terminal panel, including the shared profile sizes (side bar 377 and panel 330).",
+					"Combining the primary and secondary roots created a third stable layout file, workspace-d1e75a93ea2c6debb8097e4c5c840c9bd417d4c0bf99c6ae921f7ee02ee72e24.json, distinct from both single-root identities. It started with left Explorer, visible side bar, hidden panel and Debug Console as the dormant default, then restored both roots and the same layout on a cold process start.",
+					"Closing the multi-root workspace returned to EMPTY with left Explorer, visible side bar and hidden panel; workspace-state lastRecentId was null. Every normal Cmd+Q left zero Plain processes, and all seven retained layout JSON files remained schema 1 with no native path, edit content, authentication, credential or history text."
+				],
+				"platformGaps": [],
+				"acceptanceResults": [
+					{
+						"acceptance": "Only an audited bounded set of Workbench layout and view-arrangement keys is persisted by Rust",
+						"result": "Achieved. TypeScript and Rust codecs, allowlist tests and architecture contracts constrain profile/workspace entries; the real app-data audit found schema 1 only and no native paths, editor contents, authentication, credentials or history."
+					},
+					{
+						"acceptance": "Persisted layout is hydrated before Workbench initialization and final native shutdown waits for its flush",
+						"result": "Achieved. Browser ordering assertions prove layout_read precedes initialize and layout_write precedes close allow; E2E-029 exercised immediate normal Cmd+Q exits and every persisted state was present before the process reached zero."
+					},
+					{
+						"acceptance": "Profile layout and stable-workspace layout restore visibility positions sizes active containers pins and view arrangement without cross-workspace attachment",
+						"result": "Achieved. E2E-029 restored opposite single-root layouts in reverse order, shared only profile sizes, created an independent third multi-root partition, and reset EMPTY without attaching the last workspace state."
+					},
+					{
+						"acceptance": "Unit Browser process-boundary and real Tauri restart scenarios pass without WebView storage dependence",
+						"result": "Achieved. Focused unit contracts passed 71/71, Browser process-boundary scenarios passed 2/2, and the rebuilt real Tauri bundle passed E2E-029 through multiple complete process exits and cold launches backed only by Rust app-local-data JSON."
+					}
+				]
+			}
 		}
 	]
 }
