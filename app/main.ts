@@ -264,6 +264,12 @@ async function bootstrap(): Promise<void> {
 	configurePlainGitGraphBridge(bridge);
 	configurePlainGitStashBridge(bridge);
 	configurePlainGitWorktreeBridge(bridge);
+	// KeybindingsRegistry has no change event. The real Workbench keybinding
+	// service can construct and cache its resolver during initialize(), so
+	// Plain-owned default keybindings must exist before that point. The command
+	// handlers resolve IViewsService lazily only when invoked, making this early
+	// declarative registration safe without acquiring any service here.
+	searchCommandsRegistration = registerPlainSearchCommands();
 	await initialize(createServiceOverrides(layoutStorageService), container, {
 		// `F120` S0 (`docs/research/2026-07-29-branding-packaging.md`, "结论
 		// 2.1"/"5.1"): the vendor `product.json.js` blob `initialize()` mixes
@@ -397,7 +403,6 @@ async function bootstrap(): Promise<void> {
 	);
 	preferenceCommandsRegistration = registerPlainPreferenceCommands();
 	terminalCommandsRegistration = registerPlainTerminalCommands();
-	searchCommandsRegistration = registerPlainSearchCommands();
 	scmCommandsRegistration = registerPlainScmCommands(bridge);
 	// `F090` S0: inline blame decoration + hover + age heatmap — see
 	// `plain-git-blame-contribution.ts`'s own module doc comment.

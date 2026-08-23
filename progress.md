@@ -6,7 +6,8 @@
 
 - 阶段：7 — 审计缺口闭合与真实桌面验收。
 - WIP：`F290` Remaining native acceptance and validation closure。
-- 当前最小工作项：无（`F290` S1 / E2E-025 已按当前桌面驱动能力完成并登记；下一项为 E2E-026 Search，开始前先更新本行）。发布与 E2E-028 Remote SSH 明确不进入本轮。
+- 当前最小工作项：`F290` S2B / E2E-026——继续验收真实 Aa/全字、捕获组 Replace All、越界组 fail-closed、大文件/二进制跳过、20,000 截断、逐文件 undo 与退出清理；完成后独立提交。发布与 E2E-028 Remote SSH 明确不进入本轮。
+- [x] `F290` S2A Search 快捷键真实桌面修复：E2E-026 首步发现上游早注册的 Cmd+Shift+E 有效、Plain 自建 Cmd+Shift+F/H 无效。根因是 `KeybindingsRegistry` 无变更事件，Plain 在 `initialize()` 后才注册规则，真实 Workbench 已缓存 resolver；将纯声明式 Search 命令/默认键位提前到 `initialize()` 前，handler 仍在执行时惰性取 `IViewsService`。源码顺序回归、Search 单测 9/9、typecheck/lint/architecture、Browser 2/2 与新构建真实 Cmd+Shift+F 聚焦 Search 输入均通过。
 - [x] `F290` S1 / E2E-025 真实 Terminal 矩阵：新构建签名通过；profile/cwd 冷启动、OSC 7/8 渲染、sh/不可写注入目录降级、8-pane 上限与命令面板零新增 spawn、真实 find/scrollback、exit code 130、SIGKILL 9、三会话异常退出一次性说明、显式关闭正常重启对照、临时 ssh-agent 身份继承及 Plain/shell 零残留进程均完成。唯一未冒充通过的是物理 Cmd+Click：Computer Use 驱动无法跨独立动作保持修饰键，已写回 F190 platform gap 与 E2E-025 结果。
 - [x] `F290` S0 完整门禁稳健性：修复 Git cancellation 敌意 fixture 的 PID 文件“存在但尚未写完”竞态，改为等待内容完整解析为外部 diff shell 与 sleep child 两个 PID 后才触发取消；目标测试连续 5/5 通过。最终 `pnpm check` 全绿：前端 120 文件/2359 项、2261-module 生产构建、architecture 128 app/215 Rust/28 pinned、bundle 2025 sources/53 既有 debt、Rust fmt/clippy 与 1575/1575 测试通过。
 - [x] `F280` S0 Monaco 编辑基线验收：新增真实 Workbench Browser 场景，逐项通过编辑器内 find/replace、Select All Occurrences 多光标、undo/redo、TypeScript 自动缩进、精确 Go to Bracket、Fold 与保存后模型断言；第二场景用真实 Windows-1252 字节证明自动识别、无 U+FFFD 与原编码精确保存。首轮验收发现 F240 只登记 configuration URI、但 NullExtensionService 不会加载配置的真实缺陷；现以 Monaco 自带严格提取器把同一批审计静态 JSON 直接登记到 `ILanguageConfigurationService`，未引入扩展宿主、activation event 或语言运行时。聚焦 Browser 2/2、grammar/topology 合同、typecheck 与 architecture guard 通过；F030 的 Monaco 基础能力 platform gap 与完成度审计矩阵同步闭合。

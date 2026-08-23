@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -51,6 +53,19 @@ function fakeSearchView() {
 
 describe("registerPlainSearchCommands", () => {
 	let disposeRegistration: (() => void) | undefined;
+
+	it("registers its default keybindings before Workbench initialization can cache the resolver", () => {
+		const mainSource = readFileSync(
+			new URL("../../app/main.ts", import.meta.url),
+			"utf8",
+		);
+		const registration =
+			"searchCommandsRegistration = registerPlainSearchCommands();";
+		expect(mainSource.split(registration)).toHaveLength(2);
+		expect(mainSource.indexOf(registration)).toBeLessThan(
+			mainSource.indexOf("await initialize("),
+		);
+	});
 
 	afterEach(() => {
 		disposeRegistration?.();
