@@ -139,7 +139,8 @@ impl WorkspaceService {
     /// The stable identity of `window_label`'s currently authorized root set
     /// (see [`WorkspaceRootsIdentity`]); `None` when zero roots are
     /// authorized. Used only by the backup domain to key its per-root-set
-    /// storage directory; never exposed over IPC.
+    /// storage directory and by the layout domain to partition workspace UI
+    /// state; never exposed over IPC.
     pub(crate) fn stable_identity(
         &self,
         window_label: &str,

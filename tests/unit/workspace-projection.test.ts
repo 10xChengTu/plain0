@@ -216,6 +216,45 @@ describe("workspace topology coordinator", () => {
 		expect(load).not.toHaveBeenCalled();
 	});
 
+	it("refreshes the Rust workspace storage partition only after Workbench adoption", async () => {
+		const harness = configurationStore();
+		const calls: string[] = [];
+		const adoption = vi.fn(async () => {
+			calls.push("adopt");
+			return Object.freeze({
+				id: workspaceId,
+				configPath:
+					harness.state.installed === undefined
+						? undefined
+						: harness.configPath,
+				rootUris: Object.freeze(
+					harness.state.installed?.roots.map(({ uri }) => uri) ?? [],
+				),
+			});
+		});
+		const refreshStoragePartition = vi.fn(async () => {
+			calls.push("refresh-storage");
+		});
+		const coordinator = createWorkspaceTopologyCoordinator(
+			harness.store,
+			vi.fn(async () => {
+				calls.push("reinitialize");
+			}),
+			vi.fn(async () => snapshot(1, [secondRoot])),
+			adoption,
+			vi.fn(),
+			vi.fn(),
+			refreshStoragePartition,
+		);
+		coordinator.prepareInitial(snapshot(0, [firstRoot]));
+		await coordinator.completeInitial();
+		calls.length = 0;
+
+		await coordinator.apply(snapshot(1, [secondRoot]));
+		expect(calls).toEqual(["reinitialize", "adopt", "refresh-storage"]);
+		expect(refreshStoragePartition).toHaveBeenCalledOnce();
+	});
+
 	it("serializes bytes, reinitialize and adoption in exact revision order", async () => {
 		const harness = configurationStore();
 		const releases: Array<() => void> = [];

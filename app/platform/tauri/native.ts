@@ -25,6 +25,11 @@ import {
 	frozenUserDataWriteRequest,
 } from "./user-data-codec";
 import {
+	decodeLayoutStorageSnapshot,
+	decodeLayoutVoid,
+	frozenLayoutWriteRequest,
+} from "./layout-codec";
+import {
 	decodeBackupReadAllResult,
 	decodeBackupVoid,
 	encodeBackupWriteRequest,
@@ -329,6 +334,14 @@ export function createNativeBridge(): PlainBridge {
 			return listen<unknown>(USER_DATA_CHANGED_EVENT, (event) =>
 				listener(decodeUserDataChangedEvent(event.payload)),
 			);
+		},
+		layoutRead: async () =>
+			decodeLayoutStorageSnapshot(
+				await invoke<unknown>("layout_read", { request: {} }),
+			),
+		layoutWrite: async (entries) => {
+			const request = frozenLayoutWriteRequest(entries);
+			decodeLayoutVoid(await invoke<unknown>("layout_write", { request }));
 		},
 		workspaceCapabilities: async () =>
 			decodeWorkspaceCapabilities(

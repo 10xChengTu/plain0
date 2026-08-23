@@ -965,6 +965,18 @@ export function validateDialogServiceOverride(source) {
 			"app/services.ts must define exactly one audited service override factory",
 		];
 	}
+	const [factory] = factories;
+	const storageParameter = factory.parameters[0];
+	const hasStorageParameter =
+		factory.parameters.length === 1 &&
+		storageParameter !== undefined &&
+		ts.isIdentifier(storageParameter.name) &&
+		storageParameter.name.text === "storageService";
+	if (factory.parameters.length !== 0 && !hasStorageParameter) {
+		failures.push(
+			"createServiceOverrides may accept only the audited storageService parameter",
+		);
+	}
 	const returns = factories[0].body.statements.filter(ts.isReturnStatement);
 	const overrideObject =
 		factories[0].body.statements.length === 1 &&
@@ -1008,6 +1020,31 @@ export function validateDialogServiceOverride(source) {
 	const nonSpreadProperties = overrideObject.properties.filter(
 		(property) => !ts.isSpreadAssignment(property),
 	);
+	function isExactStorageServiceProperty(property) {
+		return (
+			ts.isPropertyAssignment(property) &&
+			ts.isComputedPropertyName(property.name) &&
+			ts.isCallExpression(property.name.expression) &&
+			ts.isPropertyAccessExpression(property.name.expression.expression) &&
+			ts.isIdentifier(property.name.expression.expression.expression) &&
+			property.name.expression.expression.expression.text ===
+				"IStorageService" &&
+			property.name.expression.expression.name.text === "toString" &&
+			property.name.expression.arguments.length === 0 &&
+			ts.isIdentifier(property.initializer) &&
+			property.initializer.text === "storageService"
+		);
+	}
+	const storageProperty = overrideObject.properties[0];
+	const hasStorageProperty = isExactStorageServiceProperty(storageProperty);
+	if (hasStorageParameter !== hasStorageProperty) {
+		failures.push(
+			"createServiceOverrides must bind its audited storageService parameter as the first override",
+		);
+	}
+	const auditedNonSpreadProperties = hasStorageProperty
+		? nonSpreadProperties.slice(1)
+		: nonSpreadProperties;
 	// Between the zero-argument override spreads and the trailing audited
 	// IDialogService/ILanguageStatusService pair, only this exact closed set
 	// of hand-selected SyncDescriptor bindings is permitted, in this order.
@@ -1092,7 +1129,7 @@ export function validateDialogServiceOverride(source) {
 					: ts.SyntaxKind.FalseKeyword)
 		);
 	}
-	const middleProperties = nonSpreadProperties.slice(0, -2);
+	const middleProperties = auditedNonSpreadProperties.slice(0, -2);
 	const hasMiddleServiceDescriptors =
 		middleProperties.length === MIDDLE_SERVICE_DESCRIPTORS.length &&
 		middleProperties.every((property, index) =>
@@ -1116,7 +1153,7 @@ export function validateDialogServiceOverride(source) {
 			expression.arguments.length === 0
 		);
 	}
-	const dialogService = nonSpreadProperties.at(-2);
+	const dialogService = auditedNonSpreadProperties.at(-2);
 	const dialogServiceName =
 		dialogService !== undefined &&
 		ts.isPropertyAssignment(dialogService) &&
@@ -1137,7 +1174,7 @@ export function validateDialogServiceOverride(source) {
 		ts.isIdentifier(dialogServiceInitializer.arguments[1]) &&
 		dialogServiceInitializer.arguments[1].text === "undefined" &&
 		dialogServiceInitializer.arguments[2].kind === ts.SyntaxKind.TrueKeyword;
-	const languageStatus = nonSpreadProperties.at(-1);
+	const languageStatus = auditedNonSpreadProperties.at(-1);
 	const languageStatusName =
 		languageStatus !== undefined &&
 		ts.isPropertyAssignment(languageStatus) &&
@@ -1166,7 +1203,7 @@ export function validateDialogServiceOverride(source) {
 		descriptor.arguments[2].kind === ts.SyntaxKind.TrueKeyword;
 	if (
 		![2, 2 + MIDDLE_SERVICE_DESCRIPTORS.length].includes(
-			nonSpreadProperties.length,
+			auditedNonSpreadProperties.length,
 		) ||
 		overrideObject.properties.length !==
 			EXPECTED_SERVICE_OVERRIDE_CALLS.length + nonSpreadProperties.length ||
@@ -1212,6 +1249,7 @@ export function validateDialogServiceOverride(source) {
 	});
 	if (
 		!sameArray(propertyOrder, [
+			...(hasStorageProperty ? ["IStorageService"] : []),
 			...EXPECTED_SERVICE_OVERRIDE_CALLS,
 			...(hasMiddleServiceDescriptors
 				? MIDDLE_SERVICE_DESCRIPTORS.map((spec) => spec.tokenName)
@@ -1669,11 +1707,20 @@ export function validateWorkspaceProviderBootstrap(source) {
 			[
 				"workspaceCapabilities",
 				"workspaceSnapshot",
+				"layoutRead",
 				"onRuntimeReady",
 				"runtimeInfo",
 			].includes(parent.name.text) &&
 			ts.isCallExpression(parent.parent) &&
 			parent.parent.expression === parent
+		) {
+			return true;
+		}
+		if (
+			ts.isNewExpression(parent) &&
+			parent.arguments?.[0] === node &&
+			ts.isIdentifier(parent.expression) &&
+			parent.expression.text === "PlainLayoutStorageService"
 		) {
 			return true;
 		}
@@ -12782,6 +12829,18 @@ function stageCleanupCallsAreExact(relativePath, source) {
 					/\bself\s*\.\s*parent\s*\.\s*$/,
 					"&self.name",
 				),
+			) &&
+			removeDirectoryCalls.length === 0
+		);
+	}
+	if (relativePath === "src-tauri/src/layout/service.rs") {
+		return (
+			removeFileCalls.length === 1 &&
+			exactMethodCall(
+				source,
+				removeFileCalls[0],
+				/\bself\s*\.\s*root\s*\.\s*$/,
+				"&self.name",
 			) &&
 			removeDirectoryCalls.length === 0
 		);

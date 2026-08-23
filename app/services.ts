@@ -20,6 +20,10 @@ import {
 	registerSingleton,
 } from "@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/extensions";
 import { IWorkspacesService } from "@codingame/monaco-vscode-api/vscode/vs/platform/workspaces/common/workspaces.service";
+import {
+	IStorageService,
+	type IStorageService as IStorageServiceType,
+} from "@codingame/monaco-vscode-api/vscode/vs/platform/storage/common/storage.service";
 import { ISCMService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/scm/common/scm.service";
 import { IExtensionService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/extensions/common/extensions.service";
 import { ILifecycleService } from "@codingame/monaco-vscode-api/vscode/vs/workbench/services/lifecycle/common/lifecycle.service";
@@ -161,8 +165,9 @@ registerSingleton(
 	InstantiationType.Eager,
 );
 
-export function createServiceOverrides() {
+export function createServiceOverrides(storageService: IStorageServiceType) {
 	return {
+		[IStorageService.toString()]: storageService,
 		...getConfigurationServiceOverride(),
 		...getFilesServiceOverride(),
 		...getModelServiceOverride(),

@@ -290,6 +290,9 @@ const ALLOWED_MONACO_APP_IMPORTS = Object.freeze([
 	"app/features/preferences/user-data-file-system-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle",
 	"app/features/preferences/user-data-file-system-provider.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/preferences/user-data-file-system-provider.ts:@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files",
+	"app/services.ts:@codingame/monaco-vscode-api/vscode/vs/platform/storage/common/storage.service",
+	"app/services/plain-layout-storage-service.ts:@codingame/monaco-vscode-api/vscode/vs/base/parts/storage/common/storage",
+	"app/services/plain-layout-storage-service.ts:@codingame/monaco-vscode-api/vscode/vs/platform/storage/common/storage",
 	"app/features/scm/git-uri.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/workspace/plain-workspace-roots.ts:@codingame/monaco-vscode-api/vscode/vs/base/common/uri",
 	"app/features/scm/hunk-stage.ts:@codingame/monaco-vscode-api/vscode/vs/editor/common/diff/linesDiffComputers",
@@ -2079,8 +2082,23 @@ function validateBootstrap(sourceFile) {
 		"bridge",
 		"workspaceReconcileWatchRoots",
 	]);
+	const storagePartitionCallback = unwrapExpression(
+		coordinatorCall.arguments[6],
+	);
+	const storagePartitionExpression = expressionBody(storagePartitionCallback);
+	const hasAuditedStoragePartitionCallback =
+		coordinatorCall.arguments.length === 6 ||
+		(coordinatorCall.arguments.length === 7 &&
+			ts.isArrowFunction(storagePartitionCallback) &&
+			storagePartitionCallback.parameters.length === 0 &&
+			ts.isCallExpression(storagePartitionExpression) &&
+			sameChain(storagePartitionExpression.expression, [
+				"layoutStorageService",
+				"switchWorkspacePartition",
+			]) &&
+			storagePartitionExpression.arguments.length === 0);
 	if (
-		coordinatorCall.arguments.length !== 6 ||
+		!hasAuditedStoragePartitionCallback ||
 		!sameChain(coordinatorCall.arguments[0], [configurationName]) ||
 		!sameChain(coordinatorCall.arguments[1], ["reinitializeWorkspace"]) ||
 		!ts.isArrowFunction(watcherAuthorityCallback) ||
@@ -2192,6 +2210,16 @@ function validateBootstrap(sourceFile) {
 		ts.isCallExpression(initializeCall) && initializeCall.arguments.length === 3
 			? unwrapExpression(initializeCall.arguments[2])
 			: undefined;
+	const serviceOverrideCall =
+		ts.isCallExpression(initializeCall) &&
+		ts.isCallExpression(unwrapExpression(initializeCall.arguments[0]))
+			? unwrapExpression(initializeCall.arguments[0])
+			: undefined;
+	const hasAuditedServiceOverrideArguments =
+		serviceOverrideCall !== undefined &&
+		(serviceOverrideCall.arguments.length === 0 ||
+			(serviceOverrideCall.arguments.length === 1 &&
+				sameChain(serviceOverrideCall.arguments[0], ["layoutStorageService"])));
 	const initialWorkspaceDeclarations = declarationInitializedByCall(
 		bootstrap,
 		"prepareInitial",
@@ -2296,11 +2324,9 @@ function validateBootstrap(sourceFile) {
 		]) ||
 		!ts.isCallExpression(initializeCall) ||
 		initializeCall.arguments.length !== 3 ||
-		!ts.isCallExpression(unwrapExpression(initializeCall.arguments[0])) ||
-		!sameChain(unwrapExpression(initializeCall.arguments[0]).expression, [
-			"createServiceOverrides",
-		]) ||
-		unwrapExpression(initializeCall.arguments[0]).arguments.length !== 0 ||
+		serviceOverrideCall === undefined ||
+		!sameChain(serviceOverrideCall.expression, ["createServiceOverrides"]) ||
+		!hasAuditedServiceOverrideArguments ||
 		!sameChain(initializeCall.arguments[1], ["container"]) ||
 		!hasExactInitializeConfiguration ||
 		commands.length !== 1 ||
@@ -2584,10 +2610,11 @@ function validateCoordinator(sourceFile) {
 	);
 	const coordinator = declarations.length === 1 ? declarations[0] : undefined;
 	const body = coordinator?.body;
-	if (!ts.isBlock(body) || coordinator.parameters.length !== 6) {
+	if (!ts.isBlock(body) || coordinator.parameters.length !== 7) {
 		return false;
 	}
 	const watcherAuthorityParameter = coordinator.parameters[5];
+	const storagePartitionParameter = coordinator.parameters[6];
 	const watcherAuthorityDeclarations = callableDeclarations(
 		body,
 		"acceptWatcherAuthority",
@@ -2597,6 +2624,14 @@ function validateCoordinator(sourceFile) {
 		!ts.isIdentifier(watcherAuthorityParameter.name) ||
 		watcherAuthorityParameter.name.text !== "reconcileWorkspaceWatchRoots" ||
 		!isUndefinedCallback(watcherAuthorityParameter.initializer) ||
+		!ts.isIdentifier(storagePartitionParameter.name) ||
+		storagePartitionParameter.name.text !==
+			"refreshWorkspaceStoragePartition" ||
+		storagePartitionParameter.initializer === undefined ||
+		!hasExactSyntaxTokens(
+			storagePartitionParameter.initializer,
+			"async () => undefined",
+		) ||
 		watcherAuthorityDeclarations.length !== 1 ||
 		!hasExactSyntaxTokens(
 			watcherAuthorityDeclaration,
@@ -2838,6 +2873,10 @@ function validateCoordinator(sourceFile) {
 		return false;
 	}
 	const adoptionCalls = callsNamed(reinitialize, "assertWorkbenchAdoption");
+	const storagePartitionRefreshes = callsNamed(
+		reinitialize,
+		"refreshWorkspaceStoragePartition",
+	);
 	const currentAssignment = assignmentPosition(
 		reinitialize,
 		["current"],
@@ -2845,9 +2884,12 @@ function validateCoordinator(sourceFile) {
 	);
 	if (
 		adoptionCalls.length !== 1 ||
+		storagePartitionRefreshes.length !== 1 ||
+		!fatalOnlyCatchAround(reinitialize, storagePartitionRefreshes[0]) ||
 		currentAssignment === undefined ||
 		dispatches[0].pos >= adoptionCalls[0].pos ||
-		adoptionCalls[0].pos >= currentAssignment
+		adoptionCalls[0].pos >= storagePartitionRefreshes[0].pos ||
+		storagePartitionRefreshes[0].pos >= currentAssignment
 	) {
 		return false;
 	}

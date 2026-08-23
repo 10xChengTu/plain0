@@ -68,6 +68,8 @@ function createFakeBridge(overrides: Partial<PlainBridge> = {}): {
 		userDataRead: notImplemented,
 		userDataWrite: notImplemented,
 		onUserDataChanged: notImplemented,
+		layoutRead: notImplemented,
+		layoutWrite: notImplemented,
 		workspaceCapabilities: notImplemented,
 		workspaceSnapshot: notImplemented,
 		workspaceReconcileWatchRoots: notImplemented,

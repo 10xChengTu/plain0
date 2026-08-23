@@ -4,6 +4,7 @@ pub mod backup;
 pub mod debug;
 pub mod error;
 pub mod git;
+pub mod layout;
 pub mod lifecycle;
 pub mod path_policy;
 pub mod recent;
@@ -23,6 +24,7 @@ use debug::service::DebugSessionService;
 use error::CommandError;
 use git::history_operation::GitHistoryOperationService;
 use git::network::GitNetworkService;
+use layout::service::LayoutService;
 use lifecycle::service::{CloseCoordinator, ExitDecision, WindowCloseDecision};
 use recent::service::WorkspaceHistoryService;
 use remote::session::RemoteSessionService;
@@ -76,6 +78,7 @@ pub fn run() {
             app.manage(ThemeService::new(base_path.clone()));
             app.manage(TrustService::new(base_path.clone()));
             app.manage(ConfirmationService::new(base_path.clone()));
+            app.manage(LayoutService::new(base_path.clone()));
             // `F190` S6: the lifecycle marker is this service's only
             // persisted state (see `TerminalLifecycleMarkerStore`'s own doc
             // comment) — `TerminalService::new` therefore joins the other
@@ -238,6 +241,8 @@ pub fn run() {
             lifecycle::commands::lifecycle_request_close,
             user_data::commands::user_data_read,
             user_data::commands::user_data_write,
+            layout::commands::layout_read,
+            layout::commands::layout_write,
             trust::commands::workspace_trust_state,
             trust::commands::workspace_trust_grant,
             trust::commands::workspace_trust_revoke,

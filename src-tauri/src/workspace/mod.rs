@@ -124,6 +124,11 @@ impl WorkspaceRootsIdentity {
     pub(crate) fn as_dir_name(&self) -> &str {
         &self.0
     }
+
+    #[cfg(test)]
+    pub(crate) fn from_test_digest(digest: String) -> Self {
+        Self(digest)
+    }
 }
 
 impl fmt::Debug for WorkspaceRootsIdentity {

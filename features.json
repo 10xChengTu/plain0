@@ -973,7 +973,7 @@
 				"platformGaps": [
 					"The real system-Trash adapter is implemented and exercised on macOS. Unsupported targets advertise trash:false and therefore fail closed instead of presenting or emulating a recoverable delete; Windows and Linux packaging or platform adapter work is outside the current goal.",
 					"Release signing, notarization, DMG, Windows or Linux packaging, application icons and legal confirmation are explicitly outside this non-release feature-completion phase.",
-					"Workbench layout (panel positions, sidebar visibility/width, Activity Bar position and similar view-container arrangement) has no persistence or restoration across a full app restart — product-scope.md:21 names layout alongside local settings and keybindings, but no Rust/vitest/Browser/desktop evidence exercises saving or restoring layout state, and this gap was not previously registered in platformGaps or progress.md. This is distinct from session/workspace restore (this feature's own acceptance[0]) and dirty-content restore (F160), both of which are unaffected. Recorded per the F230 S1 completion audit (docs/completion-audit.md)."
+					"Workbench layout persistence is now implemented by F250 S1 with Rust/vitest/Browser process-boundary evidence; its remaining real Plain.app restart and root-set isolation proof is tracked by F250 and E2E-029 rather than this completed local-workflow feature."
 				],
 				"acceptanceResults": [
 					{
@@ -1338,6 +1338,18 @@
 					}
 				]
 			}
+		},
+		{
+			"id": "F250",
+			"name": "Rust-owned Workbench layout persistence",
+			"phase": 7,
+			"status": "in_progress",
+			"acceptance": [
+				"Only an audited bounded set of Workbench layout and view-arrangement keys is persisted by Rust",
+				"Persisted layout is hydrated before Workbench initialization and final native shutdown waits for its flush",
+				"Profile layout and stable-workspace layout restore visibility positions sizes active containers pins and view arrangement without cross-workspace attachment",
+				"Unit Browser process-boundary and real Tauri restart scenarios pass without WebView storage dependence"
+			]
 		}
 	]
 }

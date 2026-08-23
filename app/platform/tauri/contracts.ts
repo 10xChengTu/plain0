@@ -46,6 +46,19 @@ export interface UserDataChangedEvent {
 	readonly revision: number;
 }
 
+export type LayoutStorageScope = "profile" | "workspace";
+
+export interface LayoutStorageEntry {
+	readonly scope: LayoutStorageScope;
+	readonly key: string;
+	readonly value: string;
+}
+
+export interface LayoutStorageSnapshot {
+	readonly workspaceAvailable: boolean;
+	readonly entries: readonly LayoutStorageEntry[];
+}
+
 export interface CommandError {
 	readonly code: string;
 	readonly message: string;
@@ -1660,6 +1673,8 @@ export interface PlainBridge {
 	onUserDataChanged(
 		listener: (event: UserDataChangedEvent) => void,
 	): Promise<Unlisten>;
+	layoutRead(): Promise<LayoutStorageSnapshot>;
+	layoutWrite(entries: readonly LayoutStorageEntry[]): Promise<void>;
 	workspaceCapabilities(): Promise<WorkspaceCapabilities>;
 	workspaceSnapshot(): Promise<WorkspaceSnapshot>;
 	workspaceReconcileWatchRoots(rootIds: readonly string[]): void;

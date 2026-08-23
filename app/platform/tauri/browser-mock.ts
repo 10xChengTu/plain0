@@ -42,6 +42,7 @@ import type {
 	GitStatusResult,
 	GitWorktreeEntry,
 	GitWorktreeListResult,
+	LayoutStorageEntry,
 	NativeCloseRequest,
 	PlainBridge,
 	RemoteHostKeyListResult,
@@ -1117,6 +1118,11 @@ export interface BrowserMockBridgeOptions {
 	readonly workspaceSavePicks?: readonly BrowserMockWorkspaceSavePick[];
 	/** Seeds the isolated in-memory backup store before first use. */
 	readonly backupFixtureForTest?: readonly BrowserMockBackupSeedEntryForTest[];
+	/** Seeds the Rust-owned layout snapshot for startup-hydration tests. */
+	readonly layoutStorageFixtureForTest?: readonly LayoutStorageEntry[];
+	readonly onLayoutWriteForTest?: (
+		entries: readonly LayoutStorageEntry[],
+	) => void;
 	/** Seeds the isolated in-memory theme library before first use — as if
 	 * these packages had already been imported in a previous session. */
 	readonly themeLibraryFixtureForTest?: readonly BrowserMockThemePackageFixture[];
@@ -2865,6 +2871,12 @@ export function createBrowserMockBridge(
 		["settings", { revision: 1, content: "{}\n" }],
 		["keybindings", { revision: 1, content: "[]\n" }],
 	]);
+	const layoutEntries = new Map<string, LayoutStorageEntry>(
+		(options.layoutStorageFixtureForTest ?? []).map((entry) => [
+			`${entry.scope}\0${entry.key}`,
+			Object.freeze({ ...entry }),
+		]),
+	);
 	const scriptedPicks = [...(options.workspacePicks ?? [])];
 	const scriptedFilePicks = [...(options.workspaceFilePicks ?? [])];
 	const scriptedSavePicks = [...(options.workspaceSavePicks ?? [])];
@@ -8287,6 +8299,24 @@ export function createBrowserMockBridge(
 			return () => {
 				userDataChangedListeners.delete(listener);
 			};
+		},
+		async layoutRead() {
+			return Object.freeze({
+				workspaceAvailable: roots.size > 0,
+				entries: Object.freeze([...layoutEntries.values()]),
+			});
+		},
+		async layoutWrite(entries) {
+			layoutEntries.clear();
+			for (const entry of entries) {
+				layoutEntries.set(
+					`${entry.scope}\0${entry.key}`,
+					Object.freeze({ ...entry }),
+				);
+			}
+			options.onLayoutWriteForTest?.(
+				Object.freeze([...layoutEntries.values()]),
+			);
 		},
 		async workspaceCapabilities() {
 			return workspaceCapabilities;

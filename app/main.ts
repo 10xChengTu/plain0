@@ -112,6 +112,7 @@ import { configureMonacoEnvironment } from "./monaco-environment";
 import { createBridge, normalizeCommandError } from "./platform/tauri";
 import { configurePlainSearchBridge } from "./features/search/plain-search-service";
 import { createServiceOverrides } from "./services";
+import { PlainLayoutStorageService } from "./services/plain-layout-storage-service";
 import { configurePlainLifecycleBridge } from "./services/plain-lifecycle-service";
 import { configurePlainWorkingCopyBackupBridge } from "./services/plain-workspace-backup-service";
 import { flushPlainWorkingCopyBackupsForTopologyChange } from "./services/plain-workspace-backup-tracker";
@@ -146,6 +147,11 @@ async function bootstrap(): Promise<void> {
 		PLAIN_WORKSPACE_CONFIGURATION_SCHEME,
 		workspaceConfigurationProvider,
 	);
+	const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();
+	const layoutStorageService = new PlainLayoutStorageService(
+		bridge,
+		await bridge.layoutRead(),
+	);
 	const workspaceTopologyCoordinator = createWorkspaceTopologyCoordinator(
 		workspaceConfigurationProvider,
 		reinitializeWorkspace,
@@ -166,8 +172,8 @@ async function bootstrap(): Promise<void> {
 			document.body.dataset.plainWorkspaceProjection = "reload-required";
 		},
 		(rootIds) => bridge.workspaceReconcileWatchRoots(rootIds),
+		() => layoutStorageService.switchWorkspacePartition(),
 	);
-	const initialWorkspaceSnapshot = await bridge.workspaceSnapshot();
 	const initialWorkspace = workspaceTopologyCoordinator.prepareInitial(
 		initialWorkspaceSnapshot,
 	);
@@ -254,7 +260,7 @@ async function bootstrap(): Promise<void> {
 	configurePlainGitGraphBridge(bridge);
 	configurePlainGitStashBridge(bridge);
 	configurePlainGitWorktreeBridge(bridge);
-	await initialize(createServiceOverrides(), container, {
+	await initialize(createServiceOverrides(layoutStorageService), container, {
 		// `F120` S0 (`docs/research/2026-07-29-branding-packaging.md`, "结论
 		// 2.1"/"5.1"): the vendor `product.json.js` blob `initialize()` mixes
 		// in underneath this override still ships full Code OSS branding

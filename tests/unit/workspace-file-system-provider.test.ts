@@ -200,6 +200,12 @@ function testBridge(overrides: Partial<PlainBridge> = {}): PlainBridge {
 		async onUserDataChanged() {
 			return () => {};
 		},
+		async layoutRead() {
+			throw new Error("not implemented in fake bridge for this test");
+		},
+		async layoutWrite() {
+			throw new Error("not implemented in fake bridge for this test");
+		},
 		async workspaceCapabilities() {
 			return {
 				create: true,

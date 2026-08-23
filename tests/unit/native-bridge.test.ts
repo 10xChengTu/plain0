@@ -276,6 +276,44 @@ describe("native Plain bridge", () => {
 		expect(unlisten).toHaveBeenCalledOnce();
 	});
 
+	it("hydrates and flushes Rust-owned layout through exact bounded DTOs", async () => {
+		tauri.invoke
+			.mockResolvedValueOnce({
+				workspaceAvailable: true,
+				entries: [
+					{
+						scope: "workspace",
+						key: "workbench.sideBar.hidden",
+						value: "true",
+					},
+				],
+			})
+			.mockResolvedValueOnce(null);
+		const bridge = createNativeBridge();
+		const snapshot = await bridge.layoutRead();
+		await bridge.layoutWrite(snapshot.entries);
+
+		expect(tauri.invoke.mock.calls).toEqual([
+			["layout_read", { request: {} }],
+			[
+				"layout_write",
+				{
+					request: {
+						entries: [
+							{
+								scope: "workspace",
+								key: "workbench.sideBar.hidden",
+								value: "true",
+							},
+						],
+					},
+				},
+			],
+		]);
+		expect(Object.isFrozen(snapshot)).toBe(true);
+		expect(Object.isFrozen(snapshot.entries)).toBe(true);
+	});
+
 	it("uses owned request DTOs and decodes immutable workspace results", async () => {
 		tauri.invoke
 			.mockResolvedValueOnce(validSnapshot())

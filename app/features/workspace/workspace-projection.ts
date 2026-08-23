@@ -48,6 +48,8 @@ export type ReinitializeWorkspace = (
 
 export type ReconcileWorkspaceWatchRoots = (rootIds: readonly string[]) => void;
 
+export type RefreshWorkspaceStoragePartition = () => Promise<void>;
+
 export interface WorkbenchWorkspaceAdoption {
 	readonly id: string;
 	readonly configPath: URI | undefined;
@@ -143,6 +145,8 @@ export function createWorkspaceTopologyCoordinator(
 	readWorkbenchAdoption: () => Promise<WorkbenchWorkspaceAdoption>,
 	onReloadRequired: (error: WorkspaceProjectionFailedError) => void = () => {},
 	reconcileWorkspaceWatchRoots: ReconcileWorkspaceWatchRoots = () => undefined,
+	refreshWorkspaceStoragePartition: RefreshWorkspaceStoragePartition = async () =>
+		undefined,
 ): WorkspaceTopologyCoordinator {
 	let preparedInitial: ProjectedState | undefined;
 	let current: ProjectedState | undefined;
@@ -251,6 +255,14 @@ export function createWorkspaceTopologyCoordinator(
 			throw failPermanently();
 		}
 		await assertWorkbenchAdoption(projected);
+		try {
+			await refreshWorkspaceStoragePartition();
+		} catch {
+			// Workbench already adopted the new topology. Continuing with the old
+			// Rust layout partition would cross-attach workspace state, so this is
+			// the same outcome-unknown reload boundary as an adoption mismatch.
+			throw failPermanently();
+		}
 		current = projected;
 		return projected.projection.identifier;
 	};

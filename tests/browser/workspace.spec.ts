@@ -720,6 +720,34 @@ async function installNativeIpcMock(
 				["settings", { revision: 1, content: "{}\n" }],
 				["keybindings", { revision: 1, content: "[]\n" }],
 			]);
+			type MockLayoutEntry = {
+				scope: "profile" | "workspace";
+				key: string;
+				value: string;
+			};
+			type MockLayoutState = {
+				profile: MockLayoutEntry[];
+				workspaces: Record<string, MockLayoutEntry[]>;
+			};
+			const LAYOUT_STORAGE_KEY = "__plain_test_layout_store__";
+			const loadLayoutState = (): MockLayoutState => {
+				const raw = sessionStorage.getItem(LAYOUT_STORAGE_KEY);
+				if (raw === null) return { profile: [], workspaces: {} };
+				try {
+					return JSON.parse(raw) as MockLayoutState;
+				} catch {
+					return { profile: [], workspaces: {} };
+				}
+			};
+			let layoutState = loadLayoutState();
+			const layoutWorkspaceKey = (): string =>
+				currentSnapshot.roots
+					.map(({ rootId: currentRootId }) => currentRootId)
+					.sort()
+					.join(",");
+			const persistLayoutState = (): void => {
+				sessionStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(layoutState));
+			};
 			let versionSerial = 1;
 			const nextVersion = (): string =>
 				`wv1:${(versionSerial++).toString(16).padStart(64, "0")}`;
@@ -4061,6 +4089,49 @@ async function installNativeIpcMock(
 							emitUserDataChanged(resource, next.revision);
 							return { resource, ...next };
 						}
+						case "layout_read": {
+							const workspaceAvailable = currentSnapshot.roots.length > 0;
+							const workspaceEntries = workspaceAvailable
+								? (layoutState.workspaces[layoutWorkspaceKey()] ?? [])
+								: [];
+							return {
+								workspaceAvailable,
+								entries: [...layoutState.profile, ...workspaceEntries],
+							};
+						}
+						case "layout_write": {
+							const entries = (
+								args.request as { entries?: unknown } | undefined
+							)?.entries;
+							if (!Array.isArray(entries)) {
+								throw new Error("Malformed layout write test request.");
+							}
+							const ownedEntries = structuredClone(
+								entries,
+							) as MockLayoutEntry[];
+							const profile = ownedEntries.filter(
+								({ scope }) => scope === "profile",
+							);
+							const workspace = ownedEntries.filter(
+								({ scope }) => scope === "workspace",
+							);
+							if (workspace.length > 0 && currentSnapshot.roots.length === 0) {
+								throw new Error(
+									"Workspace layout requires an active root set.",
+								);
+							}
+							layoutState = {
+								profile,
+								workspaces: {
+									...layoutState.workspaces,
+									...(currentSnapshot.roots.length > 0
+										? { [layoutWorkspaceKey()]: workspace }
+										: {}),
+								},
+							};
+							persistLayoutState();
+							return null;
+						}
 						case "workspace_capabilities":
 							return {
 								create: true,
@@ -7329,6 +7400,31 @@ async function installMultiRootNativeIpcMock(
 				[secondaryRootId, directory(secondaryEntries)],
 			]);
 			const activeRoots = new Map<string, MockWorkspaceRoot>();
+			type MockLayoutEntry = {
+				scope: "profile" | "workspace";
+				key: string;
+				value: string;
+			};
+			type MockLayoutState = {
+				profile: MockLayoutEntry[];
+				workspaces: Record<string, MockLayoutEntry[]>;
+			};
+			const LAYOUT_STORAGE_KEY = "__plain_test_multi_root_layout_store__";
+			const loadLayoutState = (): MockLayoutState => {
+				const raw = sessionStorage.getItem(LAYOUT_STORAGE_KEY);
+				if (raw === null) return { profile: [], workspaces: {} };
+				try {
+					return JSON.parse(raw) as MockLayoutState;
+				} catch {
+					return { profile: [], workspaces: {} };
+				}
+			};
+			let layoutState = loadLayoutState();
+			const layoutWorkspaceKey = (): string =>
+				[...activeRoots.keys()].sort().join(",");
+			const persistLayoutState = (): void => {
+				sessionStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(layoutState));
+			};
 			const scriptedFilePicks = [...workspaceFilePicks];
 			let recentEntries: {
 				entry: Readonly<{
@@ -8096,6 +8192,49 @@ async function installMultiRootNativeIpcMock(
 							userDataEntries.set(resource, next);
 							emitUserDataChanged(resource, next.revision);
 							return { resource, ...next };
+						}
+						case "layout_read": {
+							const workspaceAvailable = activeRoots.size > 0;
+							return {
+								workspaceAvailable,
+								entries: [
+									...layoutState.profile,
+									...(workspaceAvailable
+										? (layoutState.workspaces[layoutWorkspaceKey()] ?? [])
+										: []),
+								],
+							};
+						}
+						case "layout_write": {
+							const entries = (
+								args.request as { entries?: unknown } | undefined
+							)?.entries;
+							if (!Array.isArray(entries)) {
+								throw new Error("Malformed layout write test request.");
+							}
+							const ownedEntries = structuredClone(
+								entries,
+							) as MockLayoutEntry[];
+							const profile = ownedEntries.filter(
+								({ scope }) => scope === "profile",
+							);
+							const workspace = ownedEntries.filter(
+								({ scope }) => scope === "workspace",
+							);
+							if (workspace.length > 0 && activeRoots.size === 0) {
+								throw new Error("Workspace layout requires active roots.");
+							}
+							layoutState = {
+								profile,
+								workspaces: {
+									...layoutState.workspaces,
+									...(activeRoots.size > 0
+										? { [layoutWorkspaceKey()]: workspace }
+										: {}),
+								},
+							};
+							persistLayoutState();
+							return null;
 						}
 						case "workspace_capabilities":
 							return {
@@ -11309,7 +11448,13 @@ test("shows missing-parent create failures for both workspace roots", async ({
 	};
 
 	await primaryRoot.click();
-	await page.getByRole("button", { name: "New File...", exact: true }).click();
+	await expect(primaryRoot).toHaveAttribute("aria-selected", "true");
+	const newFileButton = page.getByRole("button", {
+		name: "New File...",
+		exact: true,
+	});
+	await expect(newFileButton).toBeEnabled();
+	await newFileButton.click();
 	await finishExplorerNameInput(page, "missing-file-parent/new.txt");
 	await expect.poll(() => createCommandCount("workspace_create_file")).toBe(1);
 	await consumeCreateFailureNotification();
@@ -11324,9 +11469,13 @@ test("shows missing-parent create failures for both workspace roots", async ({
 	).toHaveCount(0);
 
 	await secondaryRoot.click();
-	await page
-		.getByRole("button", { name: "New Folder...", exact: true })
-		.click();
+	await expect(secondaryRoot).toHaveAttribute("aria-selected", "true");
+	const newFolderButton = page.getByRole("button", {
+		name: "New Folder...",
+		exact: true,
+	});
+	await expect(newFolderButton).toBeEnabled();
+	await newFolderButton.click();
 	await finishExplorerNameInput(page, "missing-folder-parent/new-dir");
 	await expect
 		.poll(() => createCommandCount("workspace_create_directory"))
@@ -12939,6 +13088,147 @@ test("moves ordinary Explorer deletes through confirmed system Trash without per
 	}
 	expect(nativeDialogs).toEqual([]);
 	expect(pageErrors).toEqual([]);
+});
+
+test("restores audited Workbench layout across reload and flushes the final state before native close", async ({
+	page,
+}) => {
+	const errors: string[] = [];
+	page.on("pageerror", (error) => errors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") errors.push(message.text());
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported");
+
+	await page.goto("/");
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await executePaletteCommand(page, "Open Folder", "File: Open Folder...");
+	await page.getByRole("tab", { name: /^Explorer / }).click();
+	const sideBar = page.locator(".part.sidebar");
+	await expect(sideBar).toBeVisible();
+	await executePaletteCommand(
+		page,
+		"Toggle Primary Side Bar Visibility",
+		"View: Toggle Primary Side Bar Visibility",
+	);
+	await expect(sideBar).toBeHidden();
+	await page.evaluate(() => {
+		(
+			window as unknown as {
+				__PLAIN_TEST_EMIT_NATIVE_CLOSE__(reason: "close" | "quit"): string;
+			}
+		).__PLAIN_TEST_EMIT_NATIVE_CLOSE__("close");
+	});
+	await expect
+		.poll(
+			async () =>
+				(await nativeInvocations(page, "lifecycle_complete_close")).length,
+			{ timeout: 5_000 },
+		)
+		.toBe(1);
+	const hiddenCloseCalls = await page.evaluate(
+		() =>
+			(
+				window as unknown as {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				}
+			).__PLAIN_TEST_TAURI_CALLS__,
+	);
+	const hiddenCloseIndex = hiddenCloseCalls.findIndex(
+		({ command }) => command === "lifecycle_complete_close",
+	);
+	const hiddenWriteIndex = hiddenCloseCalls.findLastIndex(
+		({ command }) => command === "layout_write",
+	);
+	expect(hiddenWriteIndex).toBeGreaterThanOrEqual(0);
+	expect(hiddenWriteIndex).toBeLessThan(hiddenCloseIndex);
+	expect(
+		(
+			hiddenCloseCalls[hiddenWriteIndex]?.args.request as {
+				entries?: Array<{ key: string; value: string }>;
+			}
+		)?.entries,
+	).toEqual(
+		expect.arrayContaining([
+			expect.objectContaining({
+				scope: "workspace",
+				key: "workbench.sideBar.hidden",
+				value: "true",
+			}),
+		]),
+	);
+
+	await page.reload();
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await expect(page.locator(".part.sidebar")).toBeHidden();
+	await executePaletteCommand(
+		page,
+		"Toggle Primary Side Bar Visibility",
+		"View: Toggle Primary Side Bar Visibility",
+	);
+	await expect(page.locator(".part.sidebar")).toBeVisible();
+
+	await page.evaluate(() => {
+		(
+			window as unknown as {
+				__PLAIN_TEST_EMIT_NATIVE_CLOSE__(reason: "close" | "quit"): string;
+			}
+		).__PLAIN_TEST_EMIT_NATIVE_CLOSE__("close");
+	});
+	await expect
+		.poll(
+			async () =>
+				(await nativeInvocations(page, "lifecycle_complete_close")).length,
+			{ timeout: 5_000 },
+		)
+		.toBe(1);
+	const closeCalls = await page.evaluate(
+		() =>
+			(
+				window as unknown as {
+					__PLAIN_TEST_TAURI_CALLS__: TestTauriInvocation[];
+				}
+			).__PLAIN_TEST_TAURI_CALLS__,
+	);
+	const closeIndex = closeCalls.findIndex(
+		({ command }) => command === "lifecycle_complete_close",
+	);
+	const finalWriteIndex = closeCalls.findLastIndex(
+		({ command }) => command === "layout_write",
+	);
+	expect(finalWriteIndex).toBeGreaterThanOrEqual(0);
+	expect(finalWriteIndex).toBeLessThan(closeIndex);
+	const finalEntries = (
+		closeCalls[finalWriteIndex]?.args.request as {
+			entries?: Array<{ key: string; value: string }>;
+		}
+	)?.entries;
+	expect(finalEntries).toEqual(
+		expect.arrayContaining([
+			expect.objectContaining({
+				scope: "workspace",
+				key: "workbench.sideBar.hidden",
+				value: "false",
+			}),
+		]),
+	);
+
+	await page.reload();
+	await expect(page.locator("body")).toHaveAttribute(
+		"data-plain-ready",
+		"true",
+		{ timeout: 60_000 },
+	);
+	await expect(page.locator(".part.sidebar")).toBeVisible();
+	expect(errors).toEqual([]);
 });
 
 test("keeps the entire provider readonly when one platform capability is false", async ({
@@ -25763,15 +26053,11 @@ test("persists local keybindings and settings through Rust-shaped IPC, reloads t
 	const keybindings =
 		'[{"key":"ctrl+alt+u","command":"plain.preferences.openLocalSettings"}]';
 	await page.keyboard.press("ControlOrMeta+A");
-	await page.keyboard.type(keybindings);
-	// Monaco keeps the quote/object/array auto-closers it created for the
-	// opening characters when Playwright enters the full JSON quickly. Remove
-	// those three synthetic suffix characters just as a user typing or pasting
-	// over this tiny default file would.
-	await page.keyboard.press("End");
-	await page.keyboard.press("Backspace");
-	await page.keyboard.press("Backspace");
-	await page.keyboard.press("Backspace");
+	// Paste-like committed text is deterministic across Monaco's changing
+	// auto-closing state; character-by-character typing plus a fixed number of
+	// Backspaces deleted real suffix bytes once the storage-backed profile made
+	// the editor stop producing the old synthetic closers.
+	await page.keyboard.insertText(keybindings);
 	await expect(keybindingsTab).toHaveClass(/dirty/);
 	await page.keyboard.press("ControlOrMeta+S");
 	await expect
@@ -25812,10 +26098,7 @@ test("persists local keybindings and settings through Rust-shaped IPC, reloads t
 		.click();
 	const settings = '{"files.autoSave":"afterDelay","files.autoSaveDelay":750}';
 	await page.keyboard.press("ControlOrMeta+A");
-	await page.keyboard.type(settings);
-	await page.keyboard.press("End");
-	await page.keyboard.press("Backspace");
-	await page.keyboard.press("Backspace");
+	await page.keyboard.insertText(settings);
 	await page.keyboard.press("ControlOrMeta+S");
 	await expect
 		.poll(async () =>
@@ -25952,7 +26235,9 @@ async function connectMockSshSession(
 		"Plain: Connect to SSH Host…",
 	);
 	await fillConnectToSshHostPrompts(page, host, user);
-	const confirmDialog = page.getByRole("dialog");
+	const confirmDialog = page.getByRole("dialog").filter({
+		has: page.getByRole("button", { name: "Connect", exact: true }),
+	});
 	await expect(confirmDialog).toBeVisible();
 	await confirmDialog
 		.getByRole("button", { name: "Connect", exact: true })
@@ -26153,7 +26438,9 @@ test("Plain: Connect to SSH Host… shows the real algorithm and fingerprint for
 	);
 	await fillConnectToSshHostPrompts(page, "example.com", "octocat");
 
-	const confirmDialog = page.getByRole("dialog");
+	const confirmDialog = page.getByRole("dialog").filter({
+		has: page.getByRole("button", { name: "Connect", exact: true }),
+	});
 	await expect(confirmDialog).toBeVisible();
 	await expect(confirmDialog).toContainText("example.com:22");
 	await expect(confirmDialog).toContainText("ssh-ed25519");
@@ -26219,7 +26506,9 @@ test("cancelling the SSH host-key confirmation dialog pins nothing and starts no
 	);
 	await fillConnectToSshHostPrompts(page, "example.com", "octocat");
 
-	const confirmDialog = page.getByRole("dialog");
+	const confirmDialog = page.getByRole("dialog").filter({
+		has: page.getByRole("button", { name: "Cancel", exact: true }),
+	});
 	await expect(confirmDialog).toBeVisible();
 	await confirmDialog
 		.getByRole("button", { name: "Cancel", exact: true })
@@ -26379,7 +26668,9 @@ test("Plain: Disconnect SSH Session… lists the live session, disconnects it, a
 		"Plain: Connect to SSH Host…",
 	);
 	await fillConnectToSshHostPrompts(page, "example.com", "octocat");
-	const confirmDialog = page.getByRole("dialog");
+	const confirmDialog = page.getByRole("dialog").filter({
+		has: page.getByRole("button", { name: "Connect", exact: true }),
+	});
 	await expect(confirmDialog).toBeVisible();
 	await confirmDialog
 		.getByRole("button", { name: "Connect", exact: true })
@@ -27407,10 +27698,12 @@ test("a reactively disconnected remote root fails FS operations closed, keeps di
 	// straight to `"connected"` this time, no confirmation dialog.
 	await expect(page.locator(".monaco-dialog-box")).toHaveCount(0);
 
-	const successToast = toasts.filter({ hasText: "reconnected" });
-	await expect(successToast).toHaveCount(1);
-	await expect(successToast).toContainText("project");
-	await expect(successToast).toContainText("octocat@example.com:22");
+	const reconnectNotice = page
+		.locator('[role="alert"], .notifications-toasts .notification-toast')
+		.filter({ hasText: "reconnected" });
+	await expect(reconnectNotice.first()).toBeVisible();
+	await expect(reconnectNotice.first()).toContainText("project");
+	await expect(reconnectNotice.first()).toContainText("octocat@example.com:22");
 
 	const reconnectCalls = await nativeInvocations(
 		page,

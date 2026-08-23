@@ -61,6 +61,13 @@ F170 开始前的真实产品状态与“打开文件、最近项目、本地设
 - 每项只报告 `trashed`、`entryRetained` 或 `outcomeUnknown`。首个非成功结果立即停止余项并触发相关 root rescan；已经进入系统 Trash 的项不回滚。失败提示必须明确“未移入回收站”，绝不能自动调用永久删除。
 - Plain 不实现自己的 Trash restore/Undo；恢复由操作系统 Trash UI 完成。`FileAtomicDelete` 继续不声明。
 
+### 7. Workbench 布局只持久化审计过的窄状态
+
+- `IStorageService` 继续向 Workbench 提供同步读写语义，但 Plain 只把布局尺寸、栏位可见性/位置、active container、pins/placeholders 和固定 view state 的精确 allowlist 交给 Rust；历史、认证、编辑内容、扩展状态及任意未知 key 不得进入本域。
+- profile 状态保存到 app-local-data 的单一全局文件；workspace 状态按 Rust `WorkspaceRootsIdentity` 的稳定 root-set digest 分区。digest 和原生路径都不进入 IPC，空 workspace 不接收任何 workspace entry。
+- 初始快照必须在 `initialize()` 前完成严格 DTO 解码并同步 seed；root topology 变化只有在 Workbench 已采用并通过 id/configPath/root URI 核对后才切换 layout 分区，失败进入现有永久 reload boundary，不能继续使用旧分区。
+- 普通变更可有界 debounce，但原生关闭必须先触发 Workbench `onWillSaveState`、再等待 Rust 原子发布，最后才回 lifecycle allow。Rust 采用 create-new stage、sync、回读摘要和 rename；损坏文件 quarantine，symlink/超限/未知字段 fail closed。
+
 平台依据：
 
 - Apple App Sandbox 文件访问：<https://developer.apple.com/documentation/security/accessing-files-from-the-macos-app-sandbox>
@@ -77,6 +84,7 @@ F170 开始前的真实产品状态与“打开文件、最近项目、本地设
 4. S4：New Window、Close Folder 与窗口隔离/dirty protection。
 5. S5：系统 Trash 平台 adapter、独立确认协调器和 permanent-delete 非降级对照。
 6. S6：完整 Browser matrix 与真实 Tauri 冷启动、系统选择器、多窗口和 Trash 验收。
+7. F250：在既有本地状态边界上补 Workbench layout 的窄 Rust 分区、启动前 hydration、拓扑切换与真实重启验收。
 
 WIP 始终为 1；每个切片通过自身最小验证并提交后才进入下一项。
 
@@ -85,4 +93,4 @@ WIP 始终为 1；每个切片通过自身最小验证并提交后才进入下�
 - 用户数据、recent 与系统操作都由 Rust 控制，WebView 不获得 native path 或通用 fs/window 权限。
 - Open File 首版会显式加入 parent root，行为比 VS Code 的隐藏 standalone file 更窄，但能力边界可见、可撤销且复用已经验证的 provider。
 - 系统 Trash 的安全声明诚实地区分 capability preflight 与平台 pathname API；可恢复删除失败时用户会看到错误，而不是得到意外永久删除。
-- 需要新增本地状态 schema、严格 IPC codec、跨窗口 revision、平台条件编译和真实桌面矩阵；这是补齐产品工作流所需的实际成本，不通过恢复上游宽泛 service 来规避。
+- 需要新增本地状态 schema、严格 IPC codec、跨窗口 revision、稳定 layout 分区、平台条件编译和真实桌面矩阵；这是补齐产品工作流所需的实际成本，不通过恢复上游宽泛 service 或 WebView storage 来规避。
