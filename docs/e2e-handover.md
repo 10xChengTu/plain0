@@ -668,7 +668,7 @@ fixture（本条专用临时目录，不使用真实开发仓库或用户密钥�
 
 ### E2E-026 · F200 完整搜索工作流真实桌面矩阵（Cmd/Ctrl+Shift+F/H 真实键位、Aa/全字真实请求、捕获组模板 Replace All 真实落盘、越界组 fail-closed 零写入、大文件/二进制跳过提示、20,000 截断提示、真实 undo 回滚、进程清理）
 
-状态：**待执行**（按用户 2026-08-04 指示暂缓，与 `E2E-025` 攒批统一执行）。本条覆盖 `F200` S1–S3 全部三个切片累计的真实桌面面——Browser mock 已逐切片验证协议/状态机与 UI 文案正确性，但真实 OS 键位分发、真实磁盘字节级落盘/SHA 校验、真实 >8 MiB 文件与真实二进制文件判定、真实达到 20,000 条结果的截断路径与真实进程退出清理只能在真实 Tauri 桌面上验证。`F200` 已按用户指示例外收账转 `complete`（同 `F190` 模式）：不代表桌面验收已通过，本条通过后再回写 `features.json` F200 的 `evidence`（`nativeScenarios`/`platformGaps`/`acceptanceResults`）补齐桌面证据。
+状态：**已完成（2026-08-24）**。完整真实 Tauri 矩阵已执行；过程中发现的快捷键迟注册、同一行多命中替换覆盖与普通 dirty resource editor 关闭确认三个缺陷均先修复、补自动化并在新构建上重跑通过。`F200` 的 `evidence` 已同步补齐真实桌面证据。
 
 前置条件：
 
@@ -692,6 +692,16 @@ fixture（本条专用临时目录，不使用真实开发仓库）：
 6. **20,000 结果截断提示**：按上方 fixture 策略产生真实达到或超过 20,000 条命中的搜索，确认 UI 展示结果已截断的准确提示且结果集条数恰好停在 20,000。
 7. **真实 undo 逐文件回滚**：字面量模式对两个已打开文件执行 Replace All 后，仅对其中一个文件执行 `Cmd/Ctrl+Z`，确认该文件内容精确回滚到替换前、变回 dirty，另一文件不受影响；正则捕获组模板替换同样验证一次 undo 精确回滚到展开前原文。
 8. **退出后零残留进程**：完成以上全部步骤后 `Cmd+Q`，用 `ps`/`pgrep` 精确核对没有残留的 Plain 进程或本条产生的任何后台/构建进程。
+
+执行结果（2026-08-24）：
+
+- 新构建的绝对路径 `Plain.app` 通过 `codesign --verify --deep --strict`。首次执行发现 Plain 自建 Search 命令在 `initialize()` 后注册，真实 Workbench 的 keybinding resolver 已缓存，Cmd+Shift+F/H 不生效；`f930c9b5` 将声明式命令/默认键位前移到初始化之前，修复包实测两组快捷键均聚焦正确输入框，重复调用会全选旧值。
+- 搜索 `token` 在默认不敏感/子串模式显示 6 个命中；Aa 后收窄为 4 个，全字后为 2 个。真实正则 `(\w+)-(\d+)` + `$2-$1` 替换 4 个命中，已打开 `open.txt` 与未打开 `closed.txt` 分别落盘为 41/42 字节，SHA-256 为 `db3937f65e4286c4ede02e77ef07bcd660751f7fee9a2bd1d01b0d73414fcc0f` / `0be7480e2da7dee3caaceaeff2b392b839783b56f2e47f41d24ccbfa3b65e5ec`；截图确认可见 buffer 同步且标签 clean。
+- `$9` 越界捕获组对 `badgroup.txt` 给出既有 conflict UI，替换前后均为 10 字节、mtime `1787522013`、SHA-256 `cd598d64ac73bb632ca82812cde1c2a522625f6dd86bfe64395c55be9128a438`，证明零写入。真实 32-NUL 二进制与 8,388,610 字节文本各被准确计为 `Skipped 1 binary and 1 oversized file(s).`。
+- 未调低生产阈值：真实 `truncated.txt` 为 20,001 行/200,010 字节，SHA-256 `35d348514c7ee7d25140e4b4ccc317a908ed206190c59ae40bc40f37e363d5d2`；UI 精确显示 `20000 results in 1 file` 与 partial-set banner。
+- undo 前的同一行三次 `token` 复现出旧实现只替换最后一个 range、却移除整组结果的缺陷；`2692b96a` 改为逐 range 跟踪并补同一行三命中回归。新包真实 Replace All 报告 6 matches，两文件首行均为 `cactus cactus cactusized`。仅在 `closed.txt` 执行 Cmd+Z 后，buffer 精确恢复 `TOKEN token tokenized`、出现 dirty 标记，磁盘仍保持替换后 SHA；`open.txt` 保持 clean 替换结果。正则 `omega-505 → 505-omega` 同样 Cmd+Z 精确恢复 dirty `omega-505`，磁盘仍为 `505-omega`（SHA-256 `45ed204b8418aaad55667afb0622e19fb80820746c4dfd39c5329c8ae6c5915b`）。
+- undo 清理时旧包的 dirty workspace `Cmd+W` 误入缺失的上游 `showSaveConfirm` stub；`7ab8d556` 为无自有 handler 的 resource editor 接入窄 DOM 确认。新包真实 Cancel 保留 dirty 且磁盘不变，Don't Save 丢弃并关闭，Save 把测试 buffer 精确写成 12 字节（SHA-256 `0a7ff8391cf03000dbb7202f8c9660b24db58080ea40ffa3735e2fd3bd444baf`）后关闭；测试期间临时关闭的 auto-save 已恢复到原 `afterDelay`/750 ms。
+- 最终 Cmd+Q 后，精确 `pgrep`/`ps` 确认无 Plain、workspace search 或 fixture 后台进程残留。
 
 证据要求：除 UI 观察外，步骤 3/4/5/6 需要至少一项文件系统层可核验证据（真实字节数/SHA-256/mtime/`ps` 计数），不得仅凭 UI 文案判定通过；发现的任何真实缺陷需按既有条目先修复代码、补自动化回归，再重跑受影响步骤，不得带着已知缺陷标记通过。
 
@@ -829,8 +839,8 @@ fixture（远程主机上创建，本条专用临时目录/仓库，不使用远
 - F170 S4 New Window/Close Folder、双窗口 capability/dirty 隔离、稳定 backup 先于撤权、跨进程逐根恢复矩阵 E2E-022 已完成；F170 继续进入系统 Trash。
 - F170 S5 系统 Trash DOM 确认/取消、确认期间 identity 竞态、真实 Finder 废纸篓与“放回原处”恢复矩阵 E2E-023 已完成；F170 已整体关闭，唯一 WIP 切到 F180。
 - F180 remote/upstream、branch/tag、冲突/abort、真实 in-flight cancel、history rewrite、reflog/contributors、selected hunk 与进程/Recent 清理矩阵 E2E-024 已完成；F180 已整体关闭，唯一 WIP 切到 F190。
-- F190 S1–S6（profile/cwd、future-tab defaults、递归 split、OSC 7/8/133 与链接、终端查找、live scrollback、真实 exit banner 与不可恢复 marker）自动化两层已闭合；真实桌面 profile/cwd 冷启动持久化、OSC 真实注入与降级、链接 opener、split 上限、查找、live scrollback、真实 shell 退出/信号 banner、异常 kill 重启不可恢复说明、`SSH_AUTH_SOCK` 继承与零残留进程矩阵已登记为 E2E-025（**待执行**）；按用户 2026-08-04 指示例外收账，F190 已转 `complete`，E2E-025 保持登记待执行、与后续 feature 的桌面矩阵攒批统一跑，唯一 WIP 切到 F200。
-- F200 S1–S3（搜索入口命令/快捷键与 case/word 开关、Rust 捕获组替换展开、正则能力背书与跳过/截断可见状态）自动化两层已闭合；真实桌面 `Cmd/Ctrl+Shift+F`/`Cmd/Ctrl+Shift+H` 键位打开聚焦、Aa/全字开关真实请求、正则捕获组模板 Replace All 真实落盘与越界组 fail-closed 零写入、真实 >8 MiB 大文件与二进制文件跳过提示、20,000 结果截断提示、真实 undo 逐文件回滚与退出后零残留进程矩阵已登记为 E2E-026（**待执行**）；按用户 2026-08-04 指示，E2E-026 与 E2E-025 一并暂缓、攒批统一执行，F200 同样按例外收账模式转 `complete`，唯一 WIP 切到 F210。
+- F190 S1–S6 的真实桌面矩阵 E2E-025 已于 2026-08-24 部分完成：profile/cwd、OSC 注入与降级、split/find/live scrollback、exit/signal、异常恢复说明、`SSH_AUTH_SOCK` 与零残留进程均通过；唯一未冒充通过的是驱动能力不支持的物理 Cmd+Click，已写入 F190 `platformGaps`。
+- F200 S1–S3 的完整真实桌面矩阵 E2E-026 已于 2026-08-24 完成：真实快捷键、Aa/全字、捕获组与越界组、真实二进制/超大文件跳过、20,000 截断、逐文件 undo、dirty resource 关闭三分支及退出清理全部通过；过程中发现的三个缺陷均修复并重跑。
 - F210 S1–S6（launch 配置 QuickPick 选择器、共享 Watch/Variables 树展开、hit-count 断点、step-in targets、只读 disassembly 视图、tcpSpawn spawn-then-connect 编排）自动化两层已闭合；真实桌面多配置选择、真实 debugpy hit-count 命中计数、真实嵌套 Watch 对象展开、step-in targets 能力核实、真实 debugpy spawn-then-connect（覆盖端口延迟就绪与进程早退）与退出后零残留进程矩阵已登记为 E2E-027（**待执行**）；`lldb-dap` 原生半边（disassembly、原生 step-in targets）如实登记双重阻塞（攒批暂缓 + F120 签名 entitlement 前提，两者相互独立）。按用户 2026-08-04 指示，E2E-027 与 E2E-025/E2E-026 一并暂缓、攒批统一执行，F210 同样按例外收账模式转 `complete`，唯一 WIP 切到 F220。
 - F220 S1–S7（含 S3B：SSH 会话与信任底座、root 后端封闭枚举化、SFTP 远程文件系统、远程生命周期、远程终端、远程 Git 核心子集、远程 DAP）自动化两层已闭合；真实远程主机 ssh-agent 认证、首次指纹确认与 pin、SFTP 工作区读写、断连 fail closed 与显式重连、冷启动需要重连、远程终端/Git/DAP、指纹变化硬失败与退出后本地/远程零残留矩阵已登记为 E2E-028（**待执行**）；本条额外要求执行方可控的真实可达 SSH 主机（本机 sshd 或局域网主机），是它与仅需真实 Tauri 构建的 E2E-025/026/027 的结构性差异。按用户指示，E2E-028 与 E2E-025/E2E-026/E2E-027 一并暂缓、攒批统一执行，F220 同样按例外收账模式转 `complete`，唯一 WIP 切到 F230。
 - F250 的窄布局快照、启动前 hydration、native close 最终 flush 与 topology-commit 后 workspace 分区切换已通过 unit/Rust/Browser process-boundary；真实 Rust app-data 冷启动、反序 roots 与多根隔离矩阵 E2E-029 已完成，F250 已转 `complete`。

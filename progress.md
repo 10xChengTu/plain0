@@ -6,7 +6,8 @@
 
 - 阶段：7 — 审计缺口闭合与真实桌面验收。
 - WIP：`F290` Remaining native acceptance and validation closure。
-- 当前最小工作项：`F290` S2B / E2E-026——真实搜索矩阵已完成 Aa/全字、捕获组 Replace All、越界组 fail-closed、大文件/二进制跳过、20,000 截断与逐文件 undo；普通 workspace dirty editor 的 DOM Save / Don't Save / Cancel 修复已通过自动化，正在重建真实包复测该分支、恢复临时 auto-save 设置并执行退出清理。发布与 E2E-028 Remote SSH 明确不进入本轮。
+- 当前最小工作项：`F290` S3 / E2E-027——执行真实 debugpy 多配置、hit-count、嵌套 Watch/分页、step-in targets 能力、tcpSpawn 延迟就绪/早退与退出清理矩阵；lldb-dap 原生半边保留既有 entitlement 阻塞。发布与 E2E-028 Remote SSH 明确不进入本轮。
+- [x] `F290` S2 / E2E-026 真实 Search 矩阵：签名新包完成 Cmd+Shift+F/H、Aa/全字、捕获组 opened/unopened 精确落盘、`$9` SHA/mtime 零写入、真实 8,388,610-byte / NUL 文件跳过、20,001 行 fixture 截断到 20,000、字面量与正则逐文件 undo 及退出零进程。验收中发现并修复快捷键迟注册（`f930c9b5`）、同一行多命中只替最后一个 range（`2692b96a`）与 dirty resource editor 关闭误入 unsupported save confirm（`7ab8d556`）；修复包逐项重跑通过，临时 auto-save 设置已恢复。
 - [x] `F290` S2B1 dirty resource editor 关闭确认修复：E2E-026 undo 清理时真实 `Cmd+W` 命中缺失的上游 `showSaveConfirm` stub，只显示 Unsupported 且无法关闭。Plain 现为所有没有自有 close handler 的 resource editor 附加窄 DOM 确认，只返回 `SAVE` / `DONT_SAVE` / `CANCEL`，实际 versioned save/revert 仍由 Workbench 权威路径执行；Untitled 的 Rust scratch / verified Save As 专用分支不变。单测 9/9、topology contracts 74/74、typecheck、lint、architecture 与 Browser 普通/Untitled 关闭分支 2/2 通过。
 - [x] `F290` S2A Search 快捷键真实桌面修复：E2E-026 首步发现上游早注册的 Cmd+Shift+E 有效、Plain 自建 Cmd+Shift+F/H 无效。根因是 `KeybindingsRegistry` 无变更事件，Plain 在 `initialize()` 后才注册规则，真实 Workbench 已缓存 resolver；将纯声明式 Search 命令/默认键位提前到 `initialize()` 前，handler 仍在执行时惰性取 `IViewsService`。源码顺序回归、Search 单测 9/9、typecheck/lint/architecture、Browser 2/2 与新构建真实 Cmd+Shift+F 聚焦 Search 输入均通过。
 - [x] `F290` S1 / E2E-025 真实 Terminal 矩阵：新构建签名通过；profile/cwd 冷启动、OSC 7/8 渲染、sh/不可写注入目录降级、8-pane 上限与命令面板零新增 spawn、真实 find/scrollback、exit code 130、SIGKILL 9、三会话异常退出一次性说明、显式关闭正常重启对照、临时 ssh-agent 身份继承及 Plain/shell 零残留进程均完成。唯一未冒充通过的是物理 Cmd+Click：Computer Use 驱动无法跨独立动作保持修饰键，已写回 F190 platform gap 与 E2E-025 结果。
