@@ -10399,6 +10399,77 @@ test("keeps close confirmation inside DOM and makes Cancel, Don't Save, and Save
 	expect(errors).toEqual([]);
 });
 
+test("closes a dirty workspace editor through the DOM Cancel, Don't Save and Save branches without the unsupported file-dialog service", async ({
+	page,
+}) => {
+	const pageErrors: string[] = [];
+	const consoleErrors: string[] = [];
+	const nativeDialogs: string[] = [];
+	page.on("pageerror", (error) => pageErrors.push(error.message));
+	page.on("console", (message) => {
+		if (message.type() === "error") consoleErrors.push(message.text());
+	});
+	page.on("dialog", (dialog) => {
+		nativeDialogs.push(dialog.message());
+		void dialog.dismiss();
+	});
+	await installNativeIpcMock(page, "arrayBuffer", "supported", {
+		"dirty-close.txt": "before\n",
+	});
+	const explorer = await openNativeWorkspaceExplorer(page);
+	const file = explorer.getByRole("treeitem", {
+		name: "dirty-close.txt",
+		exact: true,
+	});
+	await file.dblclick();
+
+	const editActiveLine = async (suffix: string): Promise<void> => {
+		await page
+			.locator(".monaco-editor .view-line")
+			.filter({ hasText: "before" })
+			.click();
+		await page.keyboard.press("End");
+		await page.keyboard.type(suffix);
+	};
+	let tab = page.locator(".tabs-container .tab", {
+		hasText: "dirty-close.txt",
+	});
+	await editActiveLine("-cancel");
+	await expect(tab).toHaveClass(/dirty/);
+
+	await page.keyboard.press("ControlOrMeta+W");
+	let dialog = page.locator(".monaco-dialog-box");
+	await expect(dialog).toContainText(
+		"Do you want to save the changes to 'dirty-close.txt'?",
+	);
+	await dialog.getByRole("button", { name: "Cancel", exact: true }).click();
+	await expect(tab).toBeVisible();
+	await expect(tab).toHaveClass(/dirty/);
+	expect(await nativeWriteFileCalls(page)).toEqual([]);
+
+	await page.keyboard.press("ControlOrMeta+W");
+	dialog = page.locator(".monaco-dialog-box");
+	await dialog.getByRole("button", { name: "Don't Save", exact: true }).click();
+	await expect(tab).toHaveCount(0);
+	expect(await nativeWriteFileCalls(page)).toEqual([]);
+
+	await file.dblclick();
+	tab = page.locator(".tabs-container .tab", { hasText: "dirty-close.txt" });
+	await editActiveLine("-save");
+	await page.keyboard.press("ControlOrMeta+W");
+	dialog = page.locator(".monaco-dialog-box");
+	await dialog.getByRole("button", { name: "Save", exact: true }).click();
+	await expect(tab).toHaveCount(0);
+	const writes = await nativeWriteFileCalls(page);
+	expect(writes).toHaveLength(1);
+	expect(writes[0]!.request.relativePath).toBe("dirty-close.txt");
+	expect(writes[0]!.contentHex).toBe(hexOfText("before-save\n"));
+
+	expect(nativeDialogs).toEqual([]);
+	expect(pageErrors).toEqual([]);
+	expect(consoleErrors).toEqual([]);
+});
+
 test("restores Rust scratch as one dirty Untitled across a simulated process reload and never resurrects it after verified Save As", async ({
 	page,
 }) => {

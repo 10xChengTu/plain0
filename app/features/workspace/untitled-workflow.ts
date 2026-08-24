@@ -322,7 +322,9 @@ export class PlainUntitledWorkflow {
 	private attachInput(input: EditorInput): boolean {
 		if (this.attachedInputs.has(input)) return true;
 		const model = this.modelForInput(input);
-		if (model === undefined) return false;
+		if (model === undefined) {
+			return this.attachResourceCloseHandler(input);
+		}
 		const languageDetectionModel =
 			model as unknown as PlainUntitledLanguageDetectionModel;
 		model.onDidChangeContent(() => {
@@ -364,6 +366,58 @@ export class PlainUntitledWorkflow {
 				// original close request so EditorGroup never runs its generic
 				// file-dialog path or closes the already-replaced input twice.
 				return ConfirmResult.CANCEL;
+			},
+		});
+		try {
+			Object.defineProperty(input, "closeHandler", {
+				value: closeHandler,
+				configurable: true,
+			});
+		} catch {
+			return false;
+		}
+		this.attachedInputs.add(input);
+		return true;
+	}
+
+	/**
+	 * Plain intentionally does not register the broad upstream
+	 * file-dialog service; its default `showSaveConfirm` is therefore an
+	 * unsupported stub. Normal resource editors still route dirty `Cmd+W`
+	 * through that method unless the input supplies an `IEditorCloseHandler`.
+	 * Attach a narrow DOM-dialog handler to every resource input that does not
+	 * already own one. The Workbench remains authoritative for the actual
+	 * save/revert after this method returns SAVE/DONT_SAVE, so versioned writes,
+	 * conflict handling, remote backends and dirty-state checks stay on their
+	 * existing paths rather than being reimplemented here.
+	 */
+	private attachResourceCloseHandler(input: EditorInput): boolean {
+		if (input.resource === undefined || input.closeHandler !== undefined) {
+			return false;
+		}
+		const closeHandler: IEditorCloseHandler = Object.freeze({
+			showConfirm: () =>
+				!input.isDisposed() && input.isDirty() && !input.isSaving(),
+			confirm: async (editors: readonly IEditorIdentifier[]) => {
+				const names = editors.map(({ editor }) => editor.getName());
+				const singleName = names.length === 1 ? names[0] : undefined;
+				const choice = await this.services.dialogService.prompt<ConfirmResult>({
+					type: "warning",
+					message:
+						singleName === undefined
+							? `Do you want to save the changes to ${names.length} files?`
+							: `Do you want to save the changes to '${singleName}'?`,
+					detail: "Your changes will be lost if you don't save them.",
+					buttons: [
+						{ label: "Save", run: () => ConfirmResult.SAVE },
+						{ label: "Don't Save", run: () => ConfirmResult.DONT_SAVE },
+					],
+					cancelButton: {
+						label: "Cancel",
+						run: () => ConfirmResult.CANCEL,
+					},
+				});
+				return choice.result;
 			},
 		});
 		try {

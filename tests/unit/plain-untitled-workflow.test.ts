@@ -203,7 +203,19 @@ function createHarness(options: { initiallyOpen?: boolean } = {}) {
 	} as unknown as IWorkingCopyBackupService;
 	const dialogService = {
 		confirm: vi.fn(async () => ({ confirmed: overwriteConfirmed })),
-		prompt: vi.fn(async () => ({ result: promptChoice })),
+		prompt: vi.fn(
+			async (options: {
+				buttons: readonly { run(): unknown }[];
+				cancelButton: { run(): unknown };
+			}) => ({
+				result:
+					promptChoice === "save"
+						? options.buttons[0]!.run()
+						: promptChoice === "discard"
+							? options.buttons[1]!.run()
+							: options.cancelButton.run(),
+			}),
+		),
 	};
 	const notificationService = {
 		error: (message: string) => errors.push(message),
@@ -420,6 +432,40 @@ describe("PlainUntitledWorkflow", () => {
 		expect(harness.state.replacementCalls).toHaveLength(1);
 		expect(harness.state.discarded).toHaveLength(1);
 		expect(harness.state.dirty).toBe(false);
+	});
+
+	it("attaches the DOM Save, Don't Save and Cancel decision to ordinary resource editors", async () => {
+		const harness = createHarness();
+		let dirty = true;
+		const workspaceInput = {
+			resource: URI.from({
+				scheme: "plain-workspace",
+				authority: ROOT_ID,
+				path: "/ordinary.txt",
+			}),
+			typeId: "workbench.editors.textResourceEditorInput",
+			isDisposed: () => false,
+			isDirty: () => dirty,
+			isSaving: () => false,
+			getName: () => "ordinary.txt",
+		} as unknown as EditorInput;
+		harness.state.editorInputs.push(workspaceInput);
+		harness.workflow.attachOpenEditors();
+
+		const closeHandler = workspaceInput.closeHandler!;
+		expect(closeHandler.showConfirm()).toBe(true);
+		for (const [choice, expected] of [
+			["save", ConfirmResult.SAVE],
+			["discard", ConfirmResult.DONT_SAVE],
+			["cancel", ConfirmResult.CANCEL],
+		] as const) {
+			harness.setPromptChoice(choice);
+			expect(
+				await closeHandler.confirm([{ editor: workspaceInput, groupId: 1 }]),
+			).toBe(expected);
+		}
+		dirty = false;
+		expect(closeHandler.showConfirm()).toBe(false);
 	});
 
 	it("creates a Rust-owned scratch id before opening a new Workbench Untitled input", async () => {

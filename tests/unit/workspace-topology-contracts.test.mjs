@@ -337,7 +337,7 @@ describe("workspace topology source contracts", () => {
 		}
 	});
 
-	it("locks Untitled creation, verified publication, and recovery cleanup ordering", () => {
+	it("locks Untitled publication plus ordinary resource dirty-close confirmation", () => {
 		const relativePath = "app/features/workspace/untitled-workflow.ts";
 		const production = productionAppSourceByPath.get(relativePath);
 		expect(production).toBeTypeOf("string");
@@ -394,6 +394,24 @@ describe("workspace topology source contracts", () => {
 					"primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyN,",
 				),
 			(source) => replaceOnce(source, ".catch(onUnexpectedError);", ".then();"),
+			(source) =>
+				replaceOnce(
+					source,
+					"return this.attachResourceCloseHandler(input);",
+					"return false;",
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					"!input.isDisposed() && input.isDirty() && !input.isSaving()",
+					"false",
+				),
+			(source) =>
+				replaceOnce(
+					source,
+					'{ label: "Don\'t Save", run: () => ConfirmResult.DONT_SAVE }',
+					'{ label: "Don\'t Save", run: () => ConfirmResult.CANCEL }',
+				),
 		]) {
 			const mutatedSource = mutate(production);
 			expect(validatePlainUntitledWorkflow(mutatedSource)).toBe(false);

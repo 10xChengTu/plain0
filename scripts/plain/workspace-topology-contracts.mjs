@@ -20,7 +20,7 @@ export const WORKSPACE_TOPOLOGY_CONTRACT_FAILURES = Object.freeze({
 	localWorkflow:
 		"local Open File and Recent commands must preserve opaque ids, serialized topology projection, DOM confirmation, and path-free UI",
 	untitledWorkflow:
-		"Plain Untitled must keep Rust scratch ownership, provider-verified Save As, dirty preservation, and DOM close confirmation",
+		"Plain editors must keep Rust scratch ownership, provider-verified Save As, dirty preservation, and DOM close confirmation",
 });
 
 export const EXPECTED_GUARDED_WORKSPACE_COMMAND_IDS = Object.freeze([
@@ -6297,6 +6297,11 @@ export function validatePlainUntitledWorkflow(source) {
 		"model.textEditorModel.getAlternativeVersionId() !== contentVersion",
 		"forceReplaceDirty: true",
 		'Object.defineProperty(input, "closeHandler"',
+		"return this.attachResourceCloseHandler(input)",
+		"!input.isDisposed() && input.isDirty() && !input.isSaving()",
+		'{ label: "Save", run: () => ConfirmResult.SAVE }',
+		'{ label: "Don\'t Save", run: () => ConfirmResult.DONT_SAVE }',
+		"return choice.result",
 		"this.services.dialogService.confirm({",
 		"this.services.dialogService.prompt<",
 		"return ConfirmResult.CANCEL",

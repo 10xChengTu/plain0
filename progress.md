@@ -6,7 +6,8 @@
 
 - 阶段：7 — 审计缺口闭合与真实桌面验收。
 - WIP：`F290` Remaining native acceptance and validation closure。
-- 当前最小工作项：`F290` S2B / E2E-026——继续验收真实 Aa/全字、捕获组 Replace All、越界组 fail-closed、大文件/二进制跳过、20,000 截断、逐文件 undo 与退出清理；完成后独立提交。发布与 E2E-028 Remote SSH 明确不进入本轮。
+- 当前最小工作项：`F290` S2B / E2E-026——真实搜索矩阵已完成 Aa/全字、捕获组 Replace All、越界组 fail-closed、大文件/二进制跳过、20,000 截断与逐文件 undo；普通 workspace dirty editor 的 DOM Save / Don't Save / Cancel 修复已通过自动化，正在重建真实包复测该分支、恢复临时 auto-save 设置并执行退出清理。发布与 E2E-028 Remote SSH 明确不进入本轮。
+- [x] `F290` S2B1 dirty resource editor 关闭确认修复：E2E-026 undo 清理时真实 `Cmd+W` 命中缺失的上游 `showSaveConfirm` stub，只显示 Unsupported 且无法关闭。Plain 现为所有没有自有 close handler 的 resource editor 附加窄 DOM 确认，只返回 `SAVE` / `DONT_SAVE` / `CANCEL`，实际 versioned save/revert 仍由 Workbench 权威路径执行；Untitled 的 Rust scratch / verified Save As 专用分支不变。单测 9/9、topology contracts 74/74、typecheck、lint、architecture 与 Browser 普通/Untitled 关闭分支 2/2 通过。
 - [x] `F290` S2A Search 快捷键真实桌面修复：E2E-026 首步发现上游早注册的 Cmd+Shift+E 有效、Plain 自建 Cmd+Shift+F/H 无效。根因是 `KeybindingsRegistry` 无变更事件，Plain 在 `initialize()` 后才注册规则，真实 Workbench 已缓存 resolver；将纯声明式 Search 命令/默认键位提前到 `initialize()` 前，handler 仍在执行时惰性取 `IViewsService`。源码顺序回归、Search 单测 9/9、typecheck/lint/architecture、Browser 2/2 与新构建真实 Cmd+Shift+F 聚焦 Search 输入均通过。
 - [x] `F290` S1 / E2E-025 真实 Terminal 矩阵：新构建签名通过；profile/cwd 冷启动、OSC 7/8 渲染、sh/不可写注入目录降级、8-pane 上限与命令面板零新增 spawn、真实 find/scrollback、exit code 130、SIGKILL 9、三会话异常退出一次性说明、显式关闭正常重启对照、临时 ssh-agent 身份继承及 Plain/shell 零残留进程均完成。唯一未冒充通过的是物理 Cmd+Click：Computer Use 驱动无法跨独立动作保持修饰键，已写回 F190 platform gap 与 E2E-025 结果。
 - [x] `F290` S0 完整门禁稳健性：修复 Git cancellation 敌意 fixture 的 PID 文件“存在但尚未写完”竞态，改为等待内容完整解析为外部 diff shell 与 sleep child 两个 PID 后才触发取消；目标测试连续 5/5 通过。最终 `pnpm check` 全绿：前端 120 文件/2359 项、2261-module 生产构建、architecture 128 app/215 Rust/28 pinned、bundle 2025 sources/53 既有 debt、Rust fmt/clippy 与 1575/1575 测试通过。
